@@ -1433,7 +1433,8 @@ def _ingest_usage_event_tx(cur, event, *, installation_id, plugin_id,
             cur, call_id=event.get("call_id"),
             subject_type=event.get("subject_type"),
             subject_id=event.get("subject_id"), occurred_at=occurred,
-            request_id=event.get("request_id"))
+            request_id=event.get("request_id"),
+            session_id=event.get("session_id"))
         route_backend = route["billing_backend"]
         late_legacy = bool(route["late_legacy"])
         migration_unverified = bool(route.get("migration_unverified"))
@@ -2101,23 +2102,28 @@ def _fetch_hold_by_call(cur, call_id):
     return cur.fetchone()
 
 
-def _migration_evidence_tx(cur, *, request_id, subject_type, subject_id):
+def _migration_evidence_tx(cur, *, request_id, subject_type, subject_id,
+                           session_id=None):
     """可信服务端运行开始时间（原方案 §9.2）→ ``(datetime|None, source)``。
 
     优先 ``ai_run_bindings.created_at``（金额时代 run→主体权威绑定，0027；
-    request_id 与主体都必须一致）；回退 ``ai_budget_reservations.reserved_at``
-    （pre-F 历史行，同 request_id、同主体）。两者都是服务端时间，不能用
-    客户端 ``occurred_at`` 代替迁移边界判断。
+    request_id 与主体都必须一致；绑定已有 session 时还必须等于事件
+    session——同一 request_id 被其他 session 复用时不能充当迁移证据）；
+    回退 ``ai_budget_reservations.reserved_at``（pre-F 历史行，同 request_id、
+    同主体）。两者都是服务端时间，不能用客户端 ``occurred_at`` 代替迁移
+    边界判断。
     """
     if not request_id or not subject_type or not subject_id:
         return None, None
     cur.execute(
-        "SELECT created_at FROM ai_run_bindings "
+        "SELECT created_at, histopilot_session_id FROM ai_run_bindings "
         "WHERE request_id=%s AND subject_type=%s AND subject_id=%s",
         (request_id, subject_type, subject_id))
     row = cur.fetchone()
     if row is not None and row["created_at"] is not None:
-        return row["created_at"], "run_binding"
+        bound_session = row["histopilot_session_id"]
+        if bound_session is None or bound_session == session_id:
+            return row["created_at"], "run_binding"
     cur.execute(
         "SELECT reserved_at FROM ai_budget_reservations "
         "WHERE request_id=%s AND subject_type=%s AND subject_id=%s",
@@ -2142,7 +2148,7 @@ def _event_received_before_migration(row, route):
 
 
 def _credit_route_tx(cur, *, call_id, subject_type, subject_id,
-                     occurred_at=None, request_id=None):
+                     occurred_at=None, request_id=None, session_id=None):
     """无锁判定一次调用/事件应走 legacy 还是 Credit 账务（spec §5.1/原方案 §9.2）。
 
     优先级：已有 hold（call_id 唯一）以 ``hold.billing_backend`` 为准；
@@ -2151,7 +2157,7 @@ def _credit_route_tx(cur, *, call_id, subject_type, subject_id,
       - 已迁移且 ``occurred_at`` 非空（ingest 路径）→ 取**可信服务端运行
         起始时间**（``ai_run_bindings.created_at``，回退
         ``ai_budget_reservations.reserved_at``，均要求 request_id 与主体
-        一致）：
+        一致；绑定已有 session 时还要求与事件 session 一致，否则不算证据）：
           * 早于迁移时刻 → legacy + late_legacy（真正迁移前的运行）；
           * 不早于迁移时刻 → credits（与客户端 occurred_at 无关）；
           * 无证据 → credits；若客户端 occurred_at 早于迁移时刻，标记
@@ -2191,7 +2197,7 @@ def _credit_route_tx(cur, *, call_id, subject_type, subject_id,
         else:
             evidence_at, evidence_source = _migration_evidence_tx(
                 cur, request_id=request_id, subject_type=subject_type,
-                subject_id=subject_id)
+                subject_id=subject_id, session_id=session_id)
             if evidence_at is not None:
                 if evidence_at < migrated_at:
                     backend = "legacy"

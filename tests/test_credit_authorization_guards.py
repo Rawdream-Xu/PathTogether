@@ -95,6 +95,17 @@ def _audit_for_event(event_id, action="usage.ingest"):
         conn.close()
 
 
+def _binding_rows(request_id):
+    conn = base.ch.connect()
+    try:
+        with base.ch.tx(conn) as cur:
+            cur.execute("SELECT * FROM ai_run_bindings WHERE request_id=%s",
+                        (request_id,))
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------- #
 # P1-3：无有效 hold 不得扣钱包
 # --------------------------------------------------------------------------- #
@@ -304,6 +315,40 @@ def test_migration_boundary_unverified_rejects_retry_allows_waive():
     assert not base._credits_debits(acct["account_id"])
 
 
+def test_binding_with_other_session_is_not_migration_evidence():
+    """同 request_id/主体但 session 不一致的迁移前绑定不算 legacy 证据。"""
+    base._seed_prices()
+    user = base._legacy_user("guard-session-mismatch")
+    call_id, session_id, request_id = base._ids()
+    # 迁移前绑定，但 session 与本次事件不同（request_id 被其他会话复用）。
+    bh.bind_run_binding(request_id, "sess-other-" + uuid.uuid4().hex[:12],
+                        "user", user["user_id"])
+    # 主体仍可解析（同 session 的 pre-F consumed reservation，无开始时间）。
+    _insert_reservation_without_time(request_id, session_id,
+                                     user["user_id"])
+    acct = base.ch.provision_user(
+        user["user_id"], grant_units=5 * CNY, kind="legacy_grant",
+        migration={"legacy_grant_units": 5 * CNY},
+        source_key="legacy:%s:v1" % user["user_id"])
+    occurred = acct["credit_migrated_at"] - timedelta(hours=1)
+    event = base.ch.usage_event(
+        call_id, session_id, user["user_id"], occurred=occurred,
+        request_id=request_id, user_id=user["user_id"])
+    charge = base.ch.expected_charge(occurred)
+    out = base._ingest(event, now=datetime.now(timezone.utc))
+    assert out["billing_backend"] == "credits"
+    assert out["credit_settlement"] == "pending_reconciliation"
+    holds = _holds_for_call(call_id)
+    assert len(holds) == 1
+    assert holds[0]["reconciliation_reason"] == \
+        billing_store.RECONCILIATION_MIGRATION_BOUNDARY_UNVERIFIED
+    assert int(holds[0]["actual_nano_cny"]) == charge
+    assert base._account(acct["account_id"])["credit_balance_units"] == 5 * CNY
+    assert not base._credits_debits(acct["account_id"])
+    assert [e for e in base.ch.fetch_entries(acct["account_id"])
+            if e["ledger_scope"] == "legacy"] == []
+
+
 def test_missing_authorization_retry_debits_only_after_admin_review():
     """missing_authorization 的 retry 保持可用（管理员审核后正式扣费）。"""
     base._seed_prices()
@@ -438,6 +483,85 @@ def test_reserve_run_budget_hard_ctx_billing_backend_credits_only(monkeypatch):
             {"role": "user", "user_id": legacy_user["user_id"]},
             "req_" + uuid.uuid4().hex[:16])
         assert err is None and resv is not None and hard is None
+
+
+def _migrated_user_with_pre_migration_binding(prefix):
+    """迁移前已有同 request_id 硬闸绑定的迁移用户（模拟跨迁移复用）。"""
+    user = base._legacy_user(prefix)
+    request_id = "req_" + uuid.uuid4().hex[:16]
+    pre_session = "sess-pre-" + uuid.uuid4().hex[:12]
+    bh.bind_run_binding(request_id, pre_session, "user", user["user_id"])
+    acct = base.ch.provision_user(
+        user["user_id"], grant_units=CNY,
+        migration={"legacy_grant_units": 0},
+        source_key="legacy:%s:v1" % user["user_id"])
+    return user, acct, request_id, pre_session
+
+
+def test_dispatch_rejects_request_id_reused_across_migration(monkeypatch):
+    """迁移前硬闸 run 的 request_id 不得复用于迁移后派发（P1-4 纵深防御）。"""
+    base._seed_prices()
+    _patch_dispatch(monkeypatch)
+    user, _acct, request_id, pre_session = \
+        _migrated_user_with_pre_migration_binding("guard-reuse")
+    with app_mod.app.test_request_context():
+        resv, err, hard = app_mod._ai_reserve_run_budget(
+            {"role": "user", "user_id": user["user_id"]}, request_id)
+        assert resv is None and hard is None
+        assert err is not None and err[1] == 409
+        body = err[0].get_json()
+        assert body["code"] == "request_id_reused_across_migration"
+        rows = _binding_rows(request_id)
+        assert len(rows) == 1
+        assert rows[0]["histopilot_session_id"] == pre_session
+        # 派发组装同样在预占阶段拒绝，不返回可转发 sidecar 的 config。
+        prep = app_mod._ai_run_prepare(
+            {"role": "user", "user_id": user["user_id"]},
+            {"request_id": request_id}, "slide.svs", need_grant=False)
+        assert isinstance(prep, tuple) and prep[1] == 409
+        assert prep[0].get_json()["code"] == \
+            "request_id_reused_across_migration"
+        assert len(_binding_rows(request_id)) == 1
+
+
+def test_dispatch_allows_same_request_id_replay_after_migration(monkeypatch):
+    """迁移后创建绑定的正常网络重试（同 request_id）照常放行。"""
+    base._seed_prices()
+    _patch_dispatch(monkeypatch)
+    user, _acct = _migrated_user("guard-reuse-ok")
+    request_id = "req_" + uuid.uuid4().hex[:16]
+    with app_mod.app.test_request_context():
+        _resv, err, hard = app_mod._ai_reserve_run_budget(
+            {"role": "user", "user_id": user["user_id"]}, request_id)
+        assert err is None and hard["billing_backend"] == "credits"
+        _resv2, err2, hard2 = app_mod._ai_reserve_run_budget(
+            {"role": "user", "user_id": user["user_id"]}, request_id)
+        assert err2 is None and hard2["billing_backend"] == "credits"
+    assert len(_binding_rows(request_id)) == 1
+
+
+def test_dispatch_reuse_guard_wallet_read_failure_503(monkeypatch):
+    """迁移边界校验读账户失败 → 503 fail-closed（与钱包闸一致）。"""
+    base._seed_prices()
+    _patch_dispatch(monkeypatch)
+    user, _acct, request_id, _pre_session = \
+        _migrated_user_with_pre_migration_binding("guard-reuse-readfail")
+    real_snapshot = credit_store.wallet_snapshot
+    calls = {"n": 0}
+
+    def flaky_snapshot(user_id):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_snapshot(user_id)
+        raise RuntimeError("wallet read failed")
+
+    monkeypatch.setattr(credit_store, "wallet_snapshot", flaky_snapshot)
+    with app_mod.app.test_request_context():
+        resv, err, hard = app_mod._ai_reserve_run_budget(
+            {"role": "user", "user_id": user["user_id"]}, request_id)
+    assert resv is None and hard is None
+    assert err is not None and err[1] == 503
+    assert err[0].get_json()["code"] == "credit_wallet_unavailable"
 
 
 # --------------------------------------------------------------------------- #

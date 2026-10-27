@@ -123,7 +123,7 @@ ID 前缀：`lot_<24hex>`、`cla_<24hex>`、`ct<24hex>`（订单号 = 支付宝 
 
 ### 5.1 路由判定
 
-- `_credit_route_tx(cur, *, call_id, subject_type, subject_id, occurred_at=None, request_id=None)`（无锁读取）：hold(call_id) 存在 → 以 `hold.billing_backend` 为准；否则 subject_type='user' 且账户 `billing_backend='credits'`：未迁移（`credit_migrated_at` 为空）→ credits；已迁移且 ingest 路径 → 取可信服务端运行起始时间（`ai_run_bindings.created_at`，回退 `ai_budget_reservations.reserved_at`，均要求 request_id 与主体一致）：早于迁移 → legacy + late_legacy，不早于 → credits；无证据 → credits，客户端 `occurred_at` 早于迁移时标 `migration_unverified`。authorize 路径（occurred_at=None）不变。
+- `_credit_route_tx(cur, *, call_id, subject_type, subject_id, occurred_at=None, request_id=None, session_id=None)`（无锁读取）：hold(call_id) 存在 → 以 `hold.billing_backend` 为准；否则 subject_type='user' 且账户 `billing_backend='credits'`：未迁移（`credit_migrated_at` 为空）→ credits；已迁移且 ingest 路径 → 取可信服务端运行起始时间（`ai_run_bindings.created_at`，回退 `ai_budget_reservations.reserved_at`，均要求 request_id 与主体一致；绑定已有 session 时还要求与事件 session 一致，否则不算证据）：早于迁移 → legacy + late_legacy，不早于 → credits；无证据 → credits，客户端 `occurred_at` 早于迁移时标 `migration_unverified`。authorize 路径（occurred_at=None）不变。
 - `authorize_hold(..., client_capabilities=frozenset())`：新增参数（路由层从请求头 `X-HistoPilot-Billing-Capabilities` 逗号分隔解析）。
 
 ### 5.2 authorize（Credit 分支 `_authorize_credit_hold_tx`）
@@ -195,7 +195,7 @@ pending(event_id 为空)（到期扫描标记）随后收到合法用量并结�
 - authorize 错误（credits）：`credit_insufficient` 429、`wallet_restricted` 403、`credit_pricing_unavailable` 503 retryable、`credit_client_upgrade_required` 409；`error.details` 带 `billing_backend:"credits"`。
 - settle 成功：`status` 可为 `pending_reconciliation`（HTTP 200，`ok:true`，`pending_reconciliation:true`）——终态，客户端不得重投；`settled|released` 语义不变；追加 `billing_backend`。
 - usage-events 成功：追加 `billing_backend`、`credit_settlement`（可为 `pending_reconciliation`）。2xx 即投递完成。
-- PT `_ai_reserve_run_budget`：role=user 且账户 credits → 限制 → 403 `wallet_restricted`；可用 ≤ 0 → 429 `credit_insufficient`；否则**一律走 hard 分支**（写 pending run binding，不走 turn 预算），与模式无关。credits 时返回的 hard 上下文带 `billing_backend:"credits"`；`_ai_run_prepare`（run/continue/ask/branch 共用）在预占成功后把它写入 `config.billing_subject.billing_backend="credits"`，HistoPilot 据此在授权失败/关闭 hold 客户端/冷启动时 fail-closed。非 credits 用户不加该键。
+- PT `_ai_reserve_run_budget`：role=user 且账户 credits → 限制 → 403 `wallet_restricted`；可用 ≤ 0 → 429 `credit_insufficient`；否则**一律走 hard 分支**（写 pending run binding，不走 turn 预算），与模式无关。credits 时返回的 hard 上下文带 `billing_backend:"credits"`；`_ai_run_prepare`（run/continue/ask/branch 共用）在预占成功后把它写入 `config.billing_subject.billing_backend="credits"`，HistoPilot 据此在授权失败/关闭 hold 客户端/冷启动时 fail-closed。非 credits 用户不加该键。credits 分支若 `ensure_run_binding_pending` 命中 `replayed=True` 且绑定 `created_at` 早于账户 `credit_migrated_at`（浏览器复用迁移前硬闸 run 的 request_id），返回 409 `request_id_reused_across_migration`（不可重试、不转发 sidecar、不写新行）；迁移后创建绑定的正常重试不受影响，账户读取失败 fail-closed 503 `credit_wallet_unavailable`。
 
 ## 7. `credit_payments.py`（充值、到账、退款、补偿）
 

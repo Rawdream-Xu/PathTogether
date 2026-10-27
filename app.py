@@ -18260,7 +18260,7 @@ def _ai_reserve_run_budget(user_ctx, request_id):
         # 写入失败 → 503 fail-closed **不转发 sidecar**（绝不放无主体
         # 绑定的 run 去花真钱）。
         try:
-            budget_store.ensure_run_binding_pending(
+            binding = budget_store.ensure_run_binding_pending(
                 request_id, subject_type, subject_id,
                 installation_id=((_HISTOPILOT_INSTALLATION or {}).get(
                     "installation_id")))
@@ -18275,6 +18275,43 @@ def _ai_reserve_run_budget(user_ctx, request_id):
                         code="run_binding_unavailable"),
                 503,
             ), None
+        if credit_forced and binding.get("replayed"):
+            # 纵深防御：request_id 由浏览器提供，可能把迁移前硬闸 run 的
+            # request_id 再次用于迁移后派发——旧绑定会被当作同主体重放，
+            # 其 created_at（早于迁移）不应成为本次运行的可信迁移证据。
+            # 迁移后创建/重试的绑定 created_at 不早于迁移，照常放行。
+            try:
+                snapshot = credit_store.wallet_snapshot(subject_id)
+            except Exception:
+                app.logger.exception(
+                    "Credit 钱包读取失败（request_id=%s 迁移边界校验，"
+                    "fail-closed 503）", request_id)
+                return None, (
+                    jsonify(error="Credit 钱包状态确认失败，请稍后重试",
+                            code="credit_wallet_unavailable"),
+                    503,
+                ), None
+            if snapshot is None:
+                app.logger.error(
+                    "Credit 账户在硬闸分支重读缺失（request_id=%s，"
+                    "fail-closed 503）", request_id)
+                return None, (
+                    jsonify(error="Credit 钱包状态确认失败，请稍后重试",
+                            code="credit_wallet_unavailable"),
+                    503,
+                ), None
+            migrated_at = snapshot.get("migrated_at")
+            created_at = binding.get("created_at")
+            if migrated_at is not None and created_at is not None \
+                    and float(created_at) < migrated_at.timestamp():
+                app.logger.warning(
+                    "拒绝跨迁移复用 request_id（request_id=%s）", request_id)
+                return None, (
+                    jsonify(error="该 request_id 已在迁移前用于其他运行，"
+                                   "请重新发起请求",
+                            code="request_id_reused_across_migration"),
+                    409,
+                ), None
         hard_ctx = {"hard": True, "mode": mode,
                     "subject_type": subject_type,
                     "subject_id": subject_id}
