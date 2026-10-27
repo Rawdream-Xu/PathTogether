@@ -104,7 +104,8 @@ def test_migration_backfill_takes_max_per_source_and_is_rerunnable():
          "('aud_la_2', now() - interval '2 days', %s, 'user', 'test')",
          (audit_u["user_id"], audit_u["user_id"]))
 
-    # upload_tasks：created_at/updated_at 取 GREATEST（now-1 day 胜出）
+    # upload_tasks：只取用户发起时间 created_at（now-4 days 胜出）；worker
+    # 推进的 updated_at（now-1 day）不代表用户活跃，必须被忽略
     _sql("INSERT INTO upload_tasks (upload_id, owner_user_id, filename, "
          "safe_name, declared_size, chunk_size, expires_at, created_at, "
          "updated_at) VALUES "
@@ -114,11 +115,13 @@ def test_migration_backfill_takes_max_per_source_and_is_rerunnable():
          " now() - interval '4 days', now() - interval '1 day')",
          (upload_u["user_id"], upload_u["user_id"]))
 
-    # ingestion_jobs：updated_at（now-6 hours）
+    # ingestion_jobs：只取 created_at（now-6 hours）；updated_at（now-1 hour）
+    # 是 worker 进度，不代表用户活跃
     _sql("INSERT INTO ingestion_jobs (job_id, owner_user_id, filename, "
-         "safe_name, format_ext, declared_size, updated_at) VALUES "
-         "('inj_la_1', %s, 'c.svs', 'c.svs', 'svs', 10, "
-         " now() - interval '6 hours')", (ingest_u["user_id"],))
+         "safe_name, format_ext, declared_size, created_at, updated_at) "
+         "VALUES ('inj_la_1', %s, 'c.svs', 'c.svs', 'svs', 10, "
+         " now() - interval '6 hours', now() - interval '1 hour')",
+         (ingest_u["user_id"],))
 
     # ai_usage_events：received_at（now-2 hours；unpriced 避开 priced 约束）
     _sql("INSERT INTO ai_usage_events (event_id, call_id, payload_hash, "
@@ -143,7 +146,7 @@ def test_migration_backfill_takes_max_per_source_and_is_rerunnable():
             (user_id, got, offset_hours)
 
     _assert_near(audit_u["user_id"], 48)
-    _assert_near(upload_u["user_id"], 24)
+    _assert_near(upload_u["user_id"], 96)
     _assert_near(ingest_u["user_id"], 6)
     _assert_near(ai_u["user_id"], 2)
     # 只有 last_login_at 的用户：last_active_at 填成 last_login_at
@@ -269,6 +272,76 @@ def test_process_local_throttle_skips_repeat_within_five_minutes(monkeypatch):
     c2 = _login(_client(), other)
     assert c2.get("/app", headers=_NAV_HEADERS).status_code == 200
     assert calls == [user["user_id"], other["user_id"]]
+
+
+def test_uncounted_requests_leave_session_untouched():
+    """静态/插件资源与公开 GET 页面：hook 在判定阶段返回，完全不碰 session。
+
+    Flask 3.1.3 起，只要经 session 代理读取会话，响应就会加 ``Vary: Cookie``。
+    这里用 ``request_ctx._session`` 绕过代理读取 accessed 标志（经代理读取
+    本身会置位）。
+    """
+    user = user_store.create_user("vary@x.com", "userpass12345678")
+    cases = (
+        ("/static/style.css", {}),
+        ("/plugins/pathtogether-admin/ui/main.js", {}),
+        ("/admin/plugin-assets/pathtogether-admin/ui/main.js", {}),
+        ("/site-map", {"Accept": "text/html"}),          # public_site GET
+        ("/legal/terms", {"Accept": "text/html"}),
+        ("/login", {"Accept": "text/html"}),
+        ("/register", {"Accept": "text/html"}),
+        ("/support", {"Accept": "text/html"}),
+        ("/support/orders", {"Accept": "text/html"}),
+        ("/tools/slides", {"Accept": "text/html"}),
+        ("/healthz", {}),
+        ("/favicon.ico", {}),
+        # 未匹配路由（_require_auth 顶部 404）也不碰 session
+        ("/no-such-page", {"Accept": "text/html"}),
+    )
+    for path, headers in cases:
+        ctx = app_mod.app.test_request_context(path, headers=headers)
+        with ctx:
+            # 防御：必须走到「不计入」分支（而不是靠 Accept 恰好不匹配）
+            assert app_mod._is_user_activity_request() is False, path
+            ctx._session["user_id"] = user["user_id"]
+            ctx._session.accessed = False
+            app_mod._record_user_activity(app_mod.Response("x"))
+            assert ctx._session.accessed is False, path
+
+    # 对照：真正计入的导航请求读取 session（accessed 置位），证明上面的
+    # 断言能区分两种情况
+    ctx = app_mod.app.test_request_context("/app", headers=_NAV_HEADERS)
+    with ctx:
+        assert app_mod._is_user_activity_request() is True
+        ctx._session["user_id"] = user["user_id"]
+        ctx._session.accessed = False
+        original = user_store.record_activity
+        user_store.record_activity = lambda uid: True
+        try:
+            app_mod._record_user_activity(app_mod.Response("x"))
+        finally:
+            user_store.record_activity = original
+        assert ctx._session.accessed is True
+
+
+def test_static_and_public_pages_do_not_gain_vary_cookie(monkeypatch):
+    """已登录会话请求静态资源与 public_site 页面：本 hook 不添 Vary: Cookie。
+
+    public_site 页面关闭 site-stats（其 signed_in 采集本身会读 session），
+    隔离后只剩本 hook 可能读 session。
+    """
+    user = user_store.create_user("vary-http@x.com", "userpass12345678")
+    c = _login(_client(), user)
+    app_mod._reset_user_activity_throttle_state()
+
+    r = c.get("/static/style.css")
+    assert r.status_code == 200
+    assert "cookie" not in (r.headers.get("Vary") or "").lower()
+
+    monkeypatch.setattr(app_mod, "site_stats_store", None)
+    r = c.get("/site-map", headers={"Accept": "text/html"})
+    assert r.status_code == 200
+    assert "cookie" not in (r.headers.get("Vary") or "").lower()
 
 
 def test_identity_preview_does_not_mark_subject_active():

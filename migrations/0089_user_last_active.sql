@@ -10,10 +10,12 @@
 --      双重兜底），record_login_success 同时以 GREATEST 推进；
 --   2. 一次性回填：GREATEST(已有 last_active_at, last_login_at, 各业务表
 --      中**确实存在**的归属最近时间)：
---        - audit_events.ts            按 actor_user_id
---        - upload_tasks               按 owner_user_id
---          （GREATEST(created_at, COALESCE(updated_at, created_at))）
---        - ingestion_jobs.updated_at  按 owner_user_id
+--        - audit_events.ts       按 actor_user_id
+--        - upload_tasks.created_at   按 owner_user_id（用户发起上传的时间；
+--                                  updated_at 会被后台进度/回收 worker 推进，
+--                                  不代表用户活跃，**不采用**）
+--        - ingestion_jobs.created_at 按 owner_user_id（同上，不采用
+--                                  updated_at）
 --        - ai_usage_events.received_at 按 user_id
 --      全为空 → 保持 NULL（绝不写 '-infinity' / 伪造时间）。
 --
@@ -38,12 +40,11 @@ WITH activity AS (
         FROM audit_events
         WHERE actor_user_id IS NOT NULL AND actor_user_id <> ''
         UNION ALL
-        SELECT owner_user_id,
-               GREATEST(created_at, COALESCE(updated_at, created_at))
+        SELECT owner_user_id, created_at
         FROM upload_tasks
         WHERE owner_user_id IS NOT NULL AND owner_user_id <> ''
         UNION ALL
-        SELECT owner_user_id, updated_at
+        SELECT owner_user_id, created_at
         FROM ingestion_jobs
         WHERE owner_user_id IS NOT NULL AND owner_user_id <> ''
         UNION ALL

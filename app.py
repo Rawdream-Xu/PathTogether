@@ -1543,7 +1543,10 @@ def _collect_site_visit(resp):
 #     /static/（及插件静态前缀）开头 + Accept 含 text/html；
 #   - 改变状态的请求：POST/PUT/PATCH/DELETE。
 # 不计入：静态资源、瓦片与轮询类 XHR GET（非 navigate）、无用户 session 的
-# 插件/内部 token 请求、/internal/*。身份预览（S4）下 session["user_id"] 仍是
+# 插件/内部 token 请求、/internal/*，以及 _require_auth 公开放行的 GET
+#（public_site、/legal/、账户入口、/support、/tools/slides 等）。请求侧判定
+# 在读取 session **之前**完成——不计入的请求完全不碰 session，避免给可缓存
+# 响应加 Vary: Cookie。身份预览（S4）下 session["user_id"] 仍是
 # **真实管理员**；这里绝不读 current_identity()/effective subject，因此预览
 # 请求不会把被预览用户标为活跃（管理员本人照常算活跃）。
 #
@@ -1577,7 +1580,15 @@ def _warn_user_activity_throttled() -> None:
 
 
 def _is_user_activity_request() -> bool:
-    """本次请求是否计入「最近活跃」（见上方口径注释）。仅请求侧判定。"""
+    """本次请求是否计入「最近活跃」（见上方口径注释）。仅请求侧判定。
+
+    **本函数绝不访问 session**：Flask 3.1.3 起，一旦通过 session 代理读取会话
+    就会给响应加 ``Vary: Cookie``；静态资源、插件资源与公开页面等可缓存响应
+    必须保持原样。公开路径白名单与 ``_require_auth`` 不查用户就放行的分支保持
+    一致（public_site GET/HEAD、/legal/、/login、/register、/support 及其子
+    路径、/tools/slides、/demo、注册公开通道、/api/demo/、/healthz、
+    /favicon.ico）。
+    """
     method = request.method
     if method in ("POST", "PUT", "PATCH", "DELETE"):
         return True
@@ -1586,8 +1597,26 @@ def _is_user_activity_request() -> bool:
     path = request.path or ""
     if path.startswith("/internal/"):
         return False
+    # 未匹配路由（_require_auth 顶部直接 404）：同样不该为活跃采集碰 session。
+    if request.url_rule is None:
+        return False
     # 静态/资源通道（含插件 UI 与 admin iframe 的 CSS/JS）不是用户活跃。
     if path.startswith(_CSRF_STATIC_PREFIXES):
+        return False
+    # _require_auth 不查 session 就放行的公开 GET/HEAD：公开站 blueprint、
+    # 协议页、账户入口、支持页与健康/图标等。hook 不碰 session，这些响应
+    # 才不会因活跃采集多出 Vary: Cookie。
+    if request.blueprint == "public_site" and method in ("GET", "HEAD"):
+        return False
+    if path.startswith("/legal/"):
+        return False
+    if (path in ("/login", "/register", "/demo", "/tools/slides", "/support",
+                 "/healthz", "/favicon.ico")
+            or path.startswith("/support/")):
+        return False
+    if path in _REGISTRATION_PUBLIC_PATHS:
+        return False
+    if path.startswith("/api/demo/"):
         return False
     mode = (request.headers.get("Sec-Fetch-Mode") or "").strip().lower()
     dest = (request.headers.get("Sec-Fetch-Dest") or "").strip().lower()
@@ -1602,10 +1631,16 @@ def _is_user_activity_request() -> bool:
 
 @app.after_request
 def _record_user_activity(resp):
-    """真实登录用户活跃时间 best-effort 写入（0089；见节注释口径）。"""
+    """真实登录用户活跃时间 best-effort 写入（0089；见节注释口径）。
+
+    先做**不碰 session** 的请求侧判定（静态/公开页面等直接返回），只有可能
+    计入的请求才读 session；避免给可缓存响应平白加上 ``Vary: Cookie``。
+    """
     try:
+        if not _is_user_activity_request():
+            return resp
         uid = session.get("user_id")
-        if not uid or not _is_user_activity_request():
+        if not uid:
             return resp
         now = time.monotonic()
         last = _user_activity_last_mono.get(uid)
@@ -11577,8 +11612,9 @@ def admin_v1_users():
       joined_desc）：**分页前**对全量完成排序，user_id 作稳定次键；
       ``last_login_desc`` / ``last_active_desc`` 下对应时间 IS NULL 恒排末尾
       （同样按 user_id 稳定）。``last_login_desc`` 保留兼容（旧前端仍可用），
-      管理台列表默认改用 ``last_active_desc``。前端切换筛选/排序时清空
-      cursor（offset 分页在全量排序后切片，语义稳定）。
+      管理台列表的排序**选项**改为 ``last_active_desc``（默认仍为
+      ``joined_desc``）。前端切换筛选/排序时清空 cursor（offset 分页在全量
+      排序后切片，语义稳定）。
     - ``research=abnormal``（2026-10-20 §三）：只保留**有异常删除任务**
       （重试耗尽的终态 failed，待人工处置）的用户——概览「待处理研究数据
       任务 N」点入即带此参数；其余取值 400（不做隐式兜底）。

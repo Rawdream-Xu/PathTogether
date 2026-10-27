@@ -260,7 +260,8 @@
         // 2026-10-08（§2）：分类筛选与排序。缺键 = 服务端默认
         //（kind=real、sort=joined_desc）；排序在分页前对全量完成，
         // last_active_at / last_login_at IS NULL 恒排末尾（服务端权威）。
-        // 0089：列表改用 last_active_desc；last_login_desc 保留兼容。
+        // 0089：列表排序选项改为 last_active_desc（默认仍 joined_desc）；
+        // last_login_desc 保留兼容。
         kind: { type: "string", enum: ["real", "dogfood", "all"] },
         sort: { type: "string",
                 enum: ["joined_desc", "joined_asc", "last_login_desc",
