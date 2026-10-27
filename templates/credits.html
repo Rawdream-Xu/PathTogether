@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page="credits">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>充值 Credit · HistoPilot</title>
+  <meta name="robots" content="noindex, nofollow" />
+  {% include "_site_icons.html" %}
+  {# 页面级 CSP（_apply_credits_page_headers）: script-src/style-src 'self'；
+     本模板不得出现内联 <script>（bootstrap JSON 除外）、<style> 或 style 属性。 #}
+  <link rel="stylesheet" href="/static/credits.css?v=20261027a" />
+  <script defer src="/static/i18n.js?v=20261027a"></script>
+  <script defer src="/static/credits.js?v=20261027a"></script>
+</head>
+<body id="top">
+  <a class="credit-skip" href="#main" data-i18n="credit.skip">跳到主要内容</a>
+
+  <header class="credit-topbar">
+    <div class="credit-topbar-inner">
+      <a class="credit-brand" href="/app">
+        {% include "_brand_logo.html" %}
+        <span class="credit-brand-name">HistoPilot</span>
+        <span class="credit-brand-sep" aria-hidden="true"></span>
+        <span class="credit-brand-page" data-i18n="credit.nav.page">充值 Credit</span>
+      </a>
+      <nav class="credit-nav" aria-label="页面导航" data-i18n-aria="credit.nav.aria">
+        <a class="credit-nav-link" href="/app">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="M4 11.5 12 4l8 7.5"></path>
+            <path d="M6 10v9.5h12V10"></path>
+          </svg>
+          <span data-i18n="credit.nav.workspace">工作台</span>
+        </a>
+        <button type="button" class="lang-toggle" data-i18n-aria="lang.toggle.aria"
+                aria-label="切换为英文">EN</button>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main" class="credit-main">
+    <div class="credit-heading">
+      <div class="credit-heading-main">
+        <a class="credit-breadcrumb" href="/app">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="1.6" aria-hidden="true"
+               focusable="false"><path d="m14 6-6 6 6 6"/></svg>
+          <span data-i18n="credit.nav.back">返回工作台</span>
+        </a>
+        <h1 id="credit-title">
+          <span data-i18n="credit.heading">充值</span>
+          <span class="credit-h1-mark">Credit</span>
+        </h1>
+        <p class="credit-lead" data-i18n="credit.heading.sub">准备好了，继续你的探索。</p>
+      </div>
+      <div class="credit-account">
+        <span class="credit-dot" aria-hidden="true"></span>
+        <span id="credit-account-line"></span>
+        <span id="credit-preview-tag" class="credit-preview-tag" hidden
+              data-i18n="acct.preview.tag">管理员预览</span>
+      </div>
+    </div>
+
+    <div class="credit-layout">
+      <div class="credit-main-column">
+        <section class="credit-balance" aria-labelledby="credit-balance-title">
+          <div class="credit-balance-body">
+            <div id="credit-balance-title" class="credit-balance-label"
+                 data-i18n="credit.balance.title">可用余额</div>
+            <div id="credit-balance-kind" class="credit-balance-kind"></div>
+            <div class="credit-balance-value">
+              <strong id="credit-balance-available">—</strong>
+              <span id="credit-balance-unit" data-i18n="credit.balance.unit">Credits</span>
+            </div>
+            <div id="credit-balance-account" class="credit-balance-foot"></div>
+            <dl class="credit-balance-rows">
+              <div id="credit-reserved-row" class="credit-balance-row" hidden>
+                <dt data-i18n="credit.balance.reserved">在途预留</dt>
+                <dd id="credit-reserved">—</dd>
+              </div>
+              <div id="credit-refund-row" class="credit-balance-row" hidden>
+                <dt data-i18n="credit.balance.refund_pending">退款冻结</dt>
+                <dd id="credit-refund-pending">—</dd>
+              </div>
+            </dl>
+            <p id="credit-restricted" class="credit-notice" role="status" hidden></p>
+          </div>
+          <div class="credit-wallet-art" aria-hidden="true">
+            <svg width="38" height="38" viewBox="0 0 32 32" fill="none"
+                 stroke="currentColor" stroke-width="1.6">
+              <path d="M25 10V7.5A2.5 2.5 0 0 0 22.5 5H8a4 4 0 0 0-4 4v15a3 3 0 0 0 3 3h19a2 2 0 0 0 2-2V12a2 2 0 0 0-2-2H8a2 2 0 0 1 0-4"/>
+              <path d="M28 16h-6a3 3 0 0 0 0 6h6"/>
+              <circle cx="22" cy="19" r=".8" fill="currentColor"/>
+            </svg>
+          </div>
+        </section>
+
+        {% if not order_view %}
+        <section class="credit-packages" aria-labelledby="credit-package-title">
+          <div class="credit-section-label">
+            <h2 id="credit-package-title" data-i18n="credit.packages.title">选择充值金额</h2>
+            <span data-i18n="credit.packages.to">到账至当前账户</span>
+          </div>
+          <div id="credit-package-list" class="credit-tier-grid" role="radiogroup"
+               aria-labelledby="credit-package-title">
+            {% for pkg in bootstrap.packages %}
+            <label class="credit-tier">
+              <input type="radio" name="credit-package" value="{{ pkg.package_id }}"
+                     data-amount-fen="{{ pkg.amount_fen }}"
+                     data-credit-units="{{ pkg.credit_units }}"
+                     data-package-version="{{ pkg.package_version }}"
+                     {% if pkg.default %}checked{% endif %} />
+              <span class="credit-tier-body">
+                <span class="credit-tier-check" aria-hidden="true">✓</span>
+                <span class="credit-tier-price"><small>¥</small>{{ pkg.amount_yuan }}</span>
+                <span class="credit-tier-credit">{{ pkg.credits_display }} Credits</span>
+              </span>
+            </label>
+            {% endfor %}
+          </div>
+          <p class="credit-rate" data-i18n="credit.rate">¥1 = 100 Credits</p>
+        </section>
+        {% else %}
+        <section class="credit-order" aria-labelledby="credit-order-title">
+          <h2 id="credit-order-title" data-i18n="credit.order.title">充值结果</h2>
+          <div id="credit-order-state" class="credit-order-state">—</div>
+          <p id="credit-order-detail" class="credit-order-detail"></p>
+          <dl class="credit-order-facts">
+            <div>
+              <dt data-i18n="credit.order.id">订单号</dt>
+              <dd id="credit-order-id">{{ order_id }}</dd>
+            </div>
+            <div>
+              <dt data-i18n="credit.order.credits">到账 Credit</dt>
+              <dd id="credit-order-credits">—</dd>
+            </div>
+            <div>
+              <dt data-i18n="credit.order.amount">实付金额</dt>
+              <dd id="credit-order-amount">—</dd>
+            </div>
+          </dl>
+          <a id="credit-order-pay-link" class="credit-pay credit-pay-link" href="#"
+             hidden data-i18n="credit.order.continue">继续支付</a>
+          <div id="credit-order-message" class="credit-state-message"
+               role="status" aria-live="polite" hidden></div>
+          <p class="credit-order-links">
+            <a class="credit-order-back" href="/app/credits"
+               data-i18n="credit.order.back">返回充值页</a>
+          </p>
+        </section>
+        {% endif %}
+      </div>
+
+      {% if not order_view %}
+      <section class="credit-checkout" aria-labelledby="credit-checkout-title">
+        <h2 id="credit-checkout-title" data-i18n="credit.checkout.title">本次充值</h2>
+        <div class="credit-receive">
+          <strong id="credit-receive">—</strong>
+          <span data-i18n="credit.balance.unit">Credits</span>
+        </div>
+        <hr class="credit-rule" />
+        <div class="credit-detail">
+          <span data-i18n="credit.checkout.method">支付方式</span>
+          <span class="credit-alipay">
+            <span class="credit-alipay-icon" aria-hidden="true">支</span>
+            <span data-i18n="credit.checkout.alipay">支付宝</span>
+          </span>
+        </div>
+        <div class="credit-detail">
+          <span data-i18n="credit.checkout.after">充值后余额</span>
+          <strong><span id="credit-after">—</span>
+            <span data-i18n="credit.balance.unit">Credits</span></strong>
+        </div>
+        <div class="credit-detail credit-total">
+          <span data-i18n="credit.checkout.total">实付金额</span>
+          <strong id="credit-amount">—</strong>
+        </div>
+        <button class="credit-pay" id="credit-pay-btn" type="button">
+          <span id="credit-pay-label" data-i18n="credit.checkout.pay">支付宝付款</span>
+          <svg id="credit-pay-arrow" width="16" height="16" viewBox="0 0 24 24"
+               fill="none" stroke="currentColor" stroke-width="1.8"
+               aria-hidden="true" focusable="false">
+            <path d="M4 12h15m-6-6 6 6-6 6"/>
+          </svg>
+        </button>
+        <p id="credit-checkout-note" class="credit-checkout-note"
+           data-i18n="credit.checkout.note">付款完成后，Credit 自动到账</p>
+        <div id="credit-state" class="credit-state-message"
+             role="status" aria-live="polite" hidden></div>
+      </section>
+      {% endif %}
+    </div>
+
+    {% if not order_view %}
+    <section class="credit-history" aria-labelledby="credit-topups-title">
+      <div class="credit-history-head">
+        <h2 id="credit-topups-title" data-i18n="credit.history.topups">充值记录</h2>
+      </div>
+      <div class="credit-history-box">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col" data-i18n="credit.history.time">时间</th>
+              <th scope="col" data-i18n="credit.history.credits">到账 Credit</th>
+              <th scope="col" class="credit-amount-col" data-i18n="credit.history.amount">实付金额</th>
+              <th scope="col" data-i18n="credit.history.payment_state">付款状态</th>
+              <th scope="col" data-i18n="credit.history.credit_state">到账状态</th>
+            </tr>
+          </thead>
+          <tbody id="credit-topups-body"></tbody>
+        </table>
+        <p id="credit-topups-empty" class="credit-empty" hidden
+           data-i18n="credit.history.empty">暂无记录</p>
+      </div>
+      <button id="credit-topups-more" class="credit-more" type="button"
+              data-i18n="credit.history.more" hidden>加载更多</button>
+    </section>
+
+    <section class="credit-history" aria-labelledby="credit-ledger-title">
+      <div class="credit-history-head">
+        <h2 id="credit-ledger-title" data-i18n="credit.history.ledger">Credit 明细</h2>
+      </div>
+      <div class="credit-history-box">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col" data-i18n="credit.history.time">时间</th>
+              <th scope="col" data-i18n="credit.history.label">项目</th>
+              <th scope="col" data-i18n="credit.history.delta">变动</th>
+              <th scope="col" data-i18n="credit.history.model">模型 / 请求</th>
+            </tr>
+          </thead>
+          <tbody id="credit-ledger-body"></tbody>
+        </table>
+        <p id="credit-ledger-empty" class="credit-empty" hidden
+           data-i18n="credit.history.empty">暂无记录</p>
+        <p id="credit-ledger-unavailable" class="credit-empty" hidden
+           data-i18n="credit.history.ledger_unavailable">此账户没有 Credit 明细。</p>
+      </div>
+      <button id="credit-ledger-more" class="credit-more" type="button"
+              data-i18n="credit.history.more" hidden>加载更多</button>
+    </section>
+    {% endif %}
+
+    <noscript>
+      <p class="credit-noscript" data-i18n="credit.noscript">此页面需要 JavaScript 才能完成充值。</p>
+    </noscript>
+
+    <footer class="credit-footer">
+      <span>HistoPilot</span>
+      <a href="mailto:{{ author_email }}" data-i18n="credit.footer.help">遇到问题？联系开发者 ↗</a>
+    </footer>
+  </main>
+
+  <script id="credits-bootstrap" type="application/json">{{ bootstrap | tojson }}</script>
+</body>
+</html>

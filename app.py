@@ -29,7 +29,7 @@ from contextlib import ExitStack, contextmanager
 from collections import OrderedDict, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import quote, urlparse, urlsplit
+from urllib.parse import parse_qs, quote, urlparse, urlsplit
 
 from flask import (
     Flask,
@@ -1060,10 +1060,14 @@ def _require_auth():
     path = request.path
     if request.blueprint == "public_site" and request.method in ("GET", "HEAD"):
         return None
+    # /support/ 前缀：赞助订单族（收银台跳转页/回跳页/支付宝异步通知）
+    # 与 /support 同为公开路径；订单路由自身再按功能闸 404（关闭态）。
     if (path in ("/login", "/register", "/demo", "/tools/slides", "/support")
             or path.startswith("/support/")
-            # /support/ 前缀：赞助订单族（收银台跳转页/回跳页/支付宝异步通知）
-            # 与 /support 同为公开路径；订单路由自身再按功能闸 404（关闭态）。
+            # Credit 充值异步通知（0088）：支付宝服务器无本站会话。**仅精确
+            # 路径 + POST** 放行；其余 /payments/* 与 GET 不在白名单内。
+            or (path == "/payments/alipay/credit-notify"
+                and request.method == "POST")
             or path.startswith("/static/")
             or path.startswith("/plugins/")):
         return None
@@ -1317,6 +1321,14 @@ def _csrf_exempt_path(path: str) -> bool:
     # 全局 CSRF 闸。
     if path == "/support/alipay/notify":
         return True
+    # Credit 充值异步通知（0088）：同上，**仅精确路径 + POST**（GET 不豁免；
+    # 其他 /payments/* 路径不豁免）。验签/业务校验在 credit_http/credit_payments。
+    if path == "/payments/alipay/credit-notify":
+        if not has_request_context():
+            # 无请求上下文（url_map 静态遍历）无法判定方法：按「该路径存在
+            # POST 豁免」处理，避免把通知误判为漏 CSRF 的写端点。
+            return True
+        return request.method == "POST"
     # C5 用户面 grant 端点走 Cookie+CSRF（前缀豁免的显式例外）
     if path == _PLUGIN_USER_FACE_PREFIX or \
             path.startswith(_PLUGIN_USER_FACE_PREFIX + "/"):
@@ -6098,7 +6110,10 @@ def api_account_balance():
 
     subject 只取 current_identity()（预览态 = effective subject，§3.5 余额
     随被预览者）；URL/body 不接受 user_id（不提供查他人余额的口子）。
-    user = 一次性总额度（get_total_allowance 只读）；owner = 当前月窗口
+    user = 一次性总额度（get_total_allowance 只读）；credits 用户（0088）改
+    返回 ``billing_backend:"credits"`` + ``spend_target:"credit_wallet"`` +
+    ``upgrade_required:true``，**不返回** ``*_nano_cny``（旧 UI 不能把
+    Credit 错标为 ¥）；owner = 当前月窗口
     （peek_current_window **不建行**——点开账户不改变账务；窗口未开时以
     策略限额 + 0 用量呈现）。金额一律十进制字符串（JS 大整数安全）；
     Cache-Control: no-store。额度缺失 → 400 spend_total_allowance_missing
@@ -6128,6 +6143,23 @@ def api_account_balance():
     subject = {"username": username, "display_username": local_part,
                "role": role, "preview": preview}
     try:
+        if role == user_store.ROLE_USER:
+            # Credit 用户（0088）：旧 CNY 字段会把 Credit 值错标成 ¥，故只返回
+            # 可识别信息（billing_backend + upgrade_required）；新 UI 用
+            # /api/account/credits。**绝不**返回 *_nano_cny 键。
+            credit_wallet = credit_store.wallet_snapshot(uid)
+            if credit_wallet is not None and \
+                    credit_wallet.get("billing_backend") == \
+                    credit_store.BACKEND_CREDITS:
+                resp = jsonify(
+                    subject=subject,
+                    billing_backend="credits",
+                    spend_target="credit_wallet",
+                    upgrade_required=True,
+                    as_of=as_of,
+                )
+                resp.headers["Cache-Control"] = "no-store"
+                return resp
         if role == user_store.ROLE_OWNER:
             spend_target = "owner_month_window"
             win = spend_store.peek_current_window("owner", uid)
@@ -6199,6 +6231,247 @@ def _require_own_active_account_or_none():
         return (jsonify(error="account_pending",
                         detail="账号尚未完成邀请码激活，请先完成激活"), 403)
     return None
+
+
+# =========================================================================== #
+# Credit 钱包用户面（D1，spec §8）
+#
+# 账务/支付原语在 credit_store / credit_payments；HTTP 形状与错误映射在
+# credit_http（Flask-independent）。本段只做鉴权/预览/响应头与页面渲染的
+# 薄接线：所有写请求仍走全局 CSRF + _preview_write_guard。
+# =========================================================================== #
+#: 充值页/订单页 CSP（与 support/tools 页同口径；无内联脚本与内联样式）。
+_CREDITS_PAGE_CSP = (
+    "default-src 'none'; script-src 'self'; style-src 'self'; "
+    "img-src 'self' data:; connect-src 'self'; form-action 'self'; "
+    "frame-ancestors 'none'; base-uri 'none'"
+)
+#: 支付宝充值通知请求体上限（0088；验签前先拒绝超大 body）
+CREDIT_NOTIFY_MAX_BYTES = 16 * 1024
+#: 订单号形态（ct + 24 hex；与 credit_payments 一致）
+_CREDIT_ORDER_ID_RE = re.compile(r"^ct[0-9a-f]{24}$")
+
+
+def _credit_return_url():
+    """支付宝回跳地址：受信任请求 origin（否则 canonical）+ 订单路径。
+
+    订单号尚不存在时以 ``{order_id}`` 占位，credit_payments 在订单落库后
+    替换（``_format_return_url``）。**不信任**未列入
+    ``_admin_iframe_resource_origins`` 的 Host；canonical origin 缺失/非法
+    时抛 ValueError（调用方 fail-closed，绝不拼任意 Host）。
+    """
+    path = "/app/credits/orders/{order_id}"
+    try:
+        origins = _admin_iframe_resource_origins()
+    except ValueError:
+        origins = []
+        app.logger.warning("Credit return_url origin 配置非法，回退 canonical")
+    request_origin = (request.host_url or "").strip().rstrip("/")
+    if request_origin and request_origin in origins:
+        return request_origin + path
+    return _canonical_public_origin() + path
+
+
+def _credit_return_url_or_error():
+    """``(return_url, error_response)``：配置不可用时 fail-closed 503。"""
+    try:
+        return _credit_return_url(), None
+    except ValueError:
+        app.logger.error(
+            "Credit return_url origin 不可用（PUBLIC_BASE_URL 缺失/非法）")
+        return None, _credit_json_pair(
+            {"error": "充值回跳地址暂不可用，请稍后重试",
+             "code": "credits_unavailable"}, 503)
+
+
+def _credit_json_pair(payload, status):
+    """Credit API 统一出口：JSON + Cache-Control: no-store（含错误响应）。"""
+    resp = make_response(jsonify(payload), status)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+def _credit_page_language():
+    """页面初始语言（``?lang=`` 优先，其次 Accept-Language；缺省 zh）。"""
+    lang = (request.args.get("lang") or "").strip().lower()
+    if lang in ("zh", "en"):
+        return lang
+    try:
+        best = request.accept_languages.best_match(["zh", "en"])
+    except Exception:
+        best = None
+    return best or "zh"
+
+
+def _credit_page_bootstrap(*, order_id=None):
+    """充值页 bootstrap（package/版本/可用性/CSRF/语言；不可执行 JSON 节点）。"""
+    import credit_http
+    import credit_payments
+    ident = current_identity()
+    preview = _preview_subject() is not None
+    packages = credit_payments.packages_payload()
+    package_cards = []
+    for item in packages["packages"]:
+        card = dict(item)
+        card["package_version"] = packages["version"]
+        card["credits_display"] = "{:,}".format(int(card["credits"]))
+        package_cards.append(card)
+    try:
+        availability = credit_payments.topup_availability()
+    except Exception:
+        app.logger.exception("Credit 充值可用性读取失败（页面按不可用呈现）")
+        availability = {"enabled": False, "reason": "config_unavailable"}
+    return {
+        "page": "order" if order_id else "credits",
+        "order_id": order_id,
+        "subject": credit_http.subject_payload(ident, preview=preview),
+        "packages": package_cards,
+        "package_version": packages["version"],
+        "availability": availability,
+        "csrf_token": ensure_csrf_token(),
+        "language": _credit_page_language(),
+    }
+
+
+def _apply_credits_page_headers(resp):
+    """充值页族安全响应头（严格 CSP；no-store；禁嵌入）。"""
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    resp.headers["Content-Security-Policy"] = _CREDITS_PAGE_CSP
+    return resp
+
+
+@app.route("/api/account/credits", methods=["GET"])
+def api_account_credits():
+    """当前 effective subject 的余额/钱包（预览 = 被预览者，只读）。"""
+    guard = _require_own_active_account_or_none()
+    if guard is not None:
+        return guard
+    import credit_http
+    preview = _preview_subject() is not None
+    payload, status = credit_http.wallet(current_identity(), preview=preview)
+    return _credit_json_pair(payload, status)
+
+
+@app.route("/api/account/credits/ledger", methods=["GET"])
+def api_account_credits_ledger():
+    """本人 Credit 明细（仅 credits_v1；keyset cursor；legacy → 409）。"""
+    guard = _require_own_active_account_or_none()
+    if guard is not None:
+        return guard
+    import credit_http
+    payload, status = credit_http.ledger(current_identity(), request.args)
+    return _credit_json_pair(payload, status)
+
+
+@app.route("/api/account/credit-topups", methods=["GET"])
+def api_account_credit_topups():
+    """本人充值订单列表（cursor 分页；不返回他人订单）。"""
+    guard = _require_own_active_account_or_none()
+    if guard is not None:
+        return guard
+    import credit_http
+    payload, status = credit_http.list_topups(
+        current_identity(), request.args)
+    return _credit_json_pair(payload, status)
+
+
+@app.route("/api/account/credit-topups", methods=["POST"])
+def api_account_credit_topup_create():
+    """创建充值订单：登录 + CSRF + 真实身份 + Idempotency-Key。
+
+    预览态写由全局 _preview_write_guard 先行 403 preview_readonly；body 只
+    接受 package_id/package_version（其余键 400 invalid_request）。
+    """
+    guard = _require_own_active_account_or_none()
+    if guard is not None:
+        return guard
+    import credit_http
+    return_url, error = _credit_return_url_or_error()
+    if error is not None:
+        return error
+    payload, status = credit_http.create_topup(
+        actor_identity(), request.get_json(silent=True),
+        request.headers.get("Idempotency-Key"), return_url)
+    return _credit_json_pair(payload, status)
+
+
+@app.route("/api/account/credit-topups/<order_id>", methods=["GET"])
+def api_account_credit_topup_get(order_id):
+    """本人单笔订单（他人/不存在统一 404；未决时触发一次节流查单）。"""
+    guard = _require_own_active_account_or_none()
+    if guard is not None:
+        return guard
+    import credit_http
+    return_url, error = _credit_return_url_or_error()
+    if error is not None:
+        return error
+    payload, status = credit_http.get_topup(
+        current_identity(), order_id, return_url)
+    return _credit_json_pair(payload, status)
+
+
+@app.route("/app/credits")
+def credits_page():
+    """充值 Credit 轻量页（不加载 Viewer/app shell；登录由全局闸收口）。"""
+    bootstrap = _credit_page_bootstrap()
+    resp = make_response(render_template(
+        "credits.html",
+        order_view=False,
+        order_id=None,
+        bootstrap=bootstrap,
+        subject=bootstrap["subject"],
+        author_email=REGISTRATION_HELP_AUTHOR_EMAIL,
+    ))
+    return _apply_credits_page_headers(resp)
+
+
+@app.route("/app/credits/orders/<order_id>")
+def credits_order_page(order_id):
+    """充值结果/支付回跳页（订单号在路径中，登录只保留 path）。"""
+    if not _CREDIT_ORDER_ID_RE.match(order_id or ""):
+        abort(404)
+    bootstrap = _credit_page_bootstrap(order_id=order_id)
+    resp = make_response(render_template(
+        "credits.html",
+        order_view=True,
+        order_id=order_id,
+        bootstrap=bootstrap,
+        subject=bootstrap["subject"],
+        author_email=REGISTRATION_HELP_AUTHOR_EMAIL,
+    ))
+    return _apply_credits_page_headers(resp)
+
+
+@app.route("/payments/alipay/credit-notify", methods=["POST"])
+def payments_alipay_credit_notify():
+    """支付宝充值异步通知（公开；精确路径 + POST 免认证/CSRF）。
+
+    先按 Content-Length/限量读取拒绝 >16 KiB（413，验签前）；params 只交给
+    credit_http.notify → credit_payments.process_credit_notify（验签、业务
+    校验、幂等入账），本路由**绝不记录原始参数/签名**。
+    """
+    content_length = request.content_length
+    if content_length is not None and content_length > CREDIT_NOTIFY_MAX_BYTES:
+        return Response("failure", status=413, mimetype="text/plain")
+    if content_length is None:
+        raw = request.stream.read(CREDIT_NOTIFY_MAX_BYTES + 1)
+        if len(raw) > CREDIT_NOTIFY_MAX_BYTES:
+            return Response("failure", status=413, mimetype="text/plain")
+        try:
+            decoded = raw.decode("utf-8", "replace")
+            pairs = parse_qs(decoded, keep_blank_values=True)
+        except Exception:
+            pairs = {}
+        params = {key: values[0] for key, values in pairs.items()}
+    else:
+        params = request.form.to_dict()
+    import credit_http
+    text, status = credit_http.notify(params)
+    return Response(text, status=status, mimetype="text/plain")
 
 
 @app.route("/api/account/email/change/start", methods=["POST"])

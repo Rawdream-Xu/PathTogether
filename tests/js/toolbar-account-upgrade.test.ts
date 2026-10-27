@@ -5,7 +5,7 @@
  *   - 账户 chip：display_username = 邮箱 local-part（非邮箱回退完整 login_id）；
  *     未登录不显示；预览态显示被预览 subject 并在 popover 顶部标「管理员预览」；
  *     真实 actor 的账户设置入口在预览态隐藏；
- *   - 账户 popover：打开时拉 GET /api/account/balance（apiFetch 路径）；
+ *   - 账户 popover：打开时拉 GET /api/account/credits（apiFetch 路径）；
  *     user=一次性总额度口径 / owner=当月窗口口径；nano-CNY 十进制字符串精确
  *     换算两位小数（半分进位锚点 17806450800→17.81）；额度缺失（400
  *     spend_total_allowance_missing）/503/网络失败显示「暂不可用（原因）」，
@@ -259,6 +259,7 @@ const BALANCE_OK = {
 		preview: false,
 	},
 	currency: "CNY",
+	billing_backend: "legacy",
 	spend_target: "total_allowance",
 	limit_nano_cny: "50000000000",
 	spent_nano_cny: "12000000000",
@@ -284,7 +285,7 @@ function loggedIn(overrides: Partial<AuthInfo> = {}): AuthInfo {
 async function openAcctPop(h: ReturnType<typeof bootApp>) {
 	h.els["acct-btn"].dispatch("click", clickEvt());
 	await vi.waitFor(() => {
-		expect(h.fetchCalls).toContain("/api/account/balance");
+		expect(h.fetchCalls).toContain("/api/account/credits");
 	});
 }
 
@@ -350,7 +351,7 @@ describe("账户 chip：display_username（§3.5）", () => {
 	});
 });
 
-describe("账户 popover 余额（GET /api/account/balance）", () => {
+describe("账户 popover 余额（GET /api/account/credits）", () => {
 	afterEach(() => {
 		delete (globalThis as { window?: unknown }).window;
 		delete (globalThis as { document?: unknown }).document;
@@ -371,7 +372,7 @@ describe("账户 popover 余额（GET /api/account/balance）", () => {
 	it("打开 popover 拉取余额；user 口径=一次性总额度；剩余/明细精确两位", async () => {
 		const h = bootApp();
 		h.HP_AUTH.applyAuthInfo(loggedIn());
-		h.fetchRoutes.set("/api/account/balance", () => ({ status: 200, body: BALANCE_OK }));
+		h.fetchRoutes.set("/api/account/credits", () => ({ status: 200, body: BALANCE_OK }));
 		await openAcctPop(h);
 		await vi.waitFor(() => {
 			expect(h.els["acct-pop-remaining"].textContent).toContain("37.00 CNY");
@@ -395,7 +396,7 @@ describe("账户 popover 余额（GET /api/account/balance）", () => {
 				actor: { username: "boss@x.com", role: "owner", user_id: "a1" },
 			}),
 		);
-		h.fetchRoutes.set("/api/account/balance", () => ({
+		h.fetchRoutes.set("/api/account/credits", () => ({
 			status: 200,
 			body: {
 				...BALANCE_OK,
@@ -415,7 +416,7 @@ describe("账户 popover 余额（GET /api/account/balance）", () => {
 	it("额度缺失 400 spend_total_allowance_missing：显示暂不可用（未设置总额度），绝不显示 ¥0", async () => {
 		const h = bootApp();
 		h.HP_AUTH.applyAuthInfo(loggedIn());
-		h.fetchRoutes.set("/api/account/balance", () => ({
+		h.fetchRoutes.set("/api/account/credits", () => ({
 			status: 400,
 			body: { error: "spend_total_allowance_missing", code: "spend_total_allowance_missing" },
 		}));
@@ -431,7 +432,7 @@ describe("账户 popover 余额（GET /api/account/balance）", () => {
 	it("DB 不可用 503：显示暂不可用（数据库暂不可用），不显示 ¥0", async () => {
 		const h = bootApp();
 		h.HP_AUTH.applyAuthInfo(loggedIn());
-		h.fetchRoutes.set("/api/account/balance", () => ({
+		h.fetchRoutes.set("/api/account/credits", () => ({
 			status: 503,
 			body: { error: "database_unavailable" },
 		}));
@@ -445,10 +446,10 @@ describe("账户 popover 余额（GET /api/account/balance）", () => {
 	it("网络失败：fetch reject 同样走「暂不可用（网络异常）」，不显示 ¥0", async () => {
 		const h = bootApp();
 		h.HP_AUTH.applyAuthInfo(loggedIn());
-		h.rejectRoutes.add("/api/account/balance");
+		h.rejectRoutes.add("/api/account/credits");
 		h.els["acct-btn"].dispatch("click", clickEvt());
 		await vi.waitFor(() => {
-			expect(h.fetchCalls).toContain("/api/account/balance");
+			expect(h.fetchCalls).toContain("/api/account/credits");
 		});
 		await vi.waitFor(() => {
 			expect(h.els["acct-pop-detail"].textContent).toContain("acct.balance.reason.network");

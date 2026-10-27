@@ -613,6 +613,16 @@ def _runtime_for_order(order):
     return runtime
 
 
+def _format_return_url(return_url, order_id):
+    """把 ``{order_id}`` 占位符替换为真实订单号（HTTP 层建单前不知道订单号）。
+
+    只做字面替换（不用 str.format：return_url 的其余花括号保持原样）。
+    """
+    if not isinstance(return_url, str):
+        return return_url
+    return return_url.replace("{order_id}", order_id)
+
+
 def _build_pay_url(order, return_url):
     """生成支付跳转 URL（不持锁；qr_embed 显式 False）。"""
     runtime = _runtime_for_order(order)
@@ -807,7 +817,8 @@ def create_topup_order(user_id, *, package_id, package_version,
     pay_url = None
     if _order_payable(order):
         try:
-            pay_url = _build_pay_url(order, return_url)
+            pay_url = _build_pay_url(
+                order, _format_return_url(return_url, order["order_id"]))
         except Exception as exc:
             _update_order_error(order["order_id"], _short_error(exc))
             raise CreditTopupUnavailableError(
@@ -1615,7 +1626,8 @@ def get_order_for_user(user_id, order_id, *, return_url=None):
     pay_url = None
     if return_url and _order_payable(order):
         try:
-            pay_url = _build_pay_url(order, return_url)
+            pay_url = _build_pay_url(
+                order, _format_return_url(return_url, order["order_id"]))
         except Exception:
             pay_url = None
     return order_public_view(order, pay_url=pay_url)
