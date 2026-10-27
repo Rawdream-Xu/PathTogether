@@ -602,7 +602,8 @@ def test_not_ready_error_envelope_carries_enforcement_mode():
     err = _assert_envelope(r, 409, "usage_subject_not_ready", retryable=True)
     assert err["details"]["enforcement_mode"] == "all"
     assert err["details"]["capabilities"] == {
-        "spend_enforcement": "all", "settle_with_usage_event": True}
+        "spend_enforcement": "all", "settle_with_usage_event": True,
+        "credit_wallet_v1": True}
     # 主体冲突（确定性 409，pending 行解析出的主体与 body assertion 不一致）
     # 同样携带模式（同一路由信封纪律）
     other = user_store.create_user("hold-mode2@x.com", "pass123456789012")
@@ -876,7 +877,8 @@ def test_wire_amounts_strings_or_null():
     # 能力探测字段（批次 C）：authorize 响应带 enforcement_mode + capabilities
     assert out["enforcement_mode"] == "shadow"
     assert out["capabilities"] == {"settle_with_usage_event": True,
-                                   "spend_enforcement": "shadow"}
+                                   "spend_enforcement": "shadow",
+                                   "credit_wallet_v1": True}
     assert out4["enforcement_mode"] == "shadow"
     assert out4["capabilities"]["settle_with_usage_event"] is True
 

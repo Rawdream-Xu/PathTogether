@@ -255,7 +255,7 @@ owner-only（`_require_owner_admin_v1`，预览态 403），admin v1 信封，�
 - `billing-holds.ts`：`HARD_DENY_CODES` 增加 `credit_insufficient`、`wallet_restricted`、`credit_pricing_unavailable`、`credit_client_upgrade_required`；ok/错误信封中 `billing_backend === "credits"` → 本次按 hard 处理；settle 结果新增终态 `pending_reconciliation`（`retryable=false`，指标 `billing_hold_settle_pending_reconciliation_total`）。
 - `platform/http-client.ts`：billing 三端点请求带 `X-HistoPilot-Billing-Capabilities: credit_wallet_v1`；settle 2xx 接受 `pending_reconciliation`；解析 `billing_backend` / `capabilities.credit_wallet_v1`。
 - `billing-settle-outbox.ts`：`pending_reconciliation` 视为完成（移出 pending，不进 dead）。
-- `agent-runner.ts`：Credit 拒绝码给出可读文案（余额不足 → 提示到“我的账户 → 充值 Credit”）；**不改**模型请求参数。补重试身份契约测试（瞬时重试复用 call/event 且只在未收到 delta 前发生；重授权同 call_id 幂等）。
+- `agent-runner.ts`：Credit 拒绝码给出可读文案（余额不足 → 提示到“我的账户 → 充值 Credit”）；**不改**模型请求参数。补重试身份契约测试（瞬时重试复用 call/event 与同一 hold；收到 delta 后断流的重试同样不改号——结果未知不改号，前一次部分执行的成本无法计量、由平台承担；重授权同 call_id 幂等）。
 - 契约测试：`PATHTOGETHER_REPO` 指向 PT `credit-wallet` worktree。
 
 ## 12. 测试纪律

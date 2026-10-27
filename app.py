@@ -119,6 +119,9 @@ import acquisition_store
 # Decimal 精确换算），Admin API v1 的 provider balance refresh 复用。
 import billing_store
 import billing_pricing
+# Credit 钱包（docs/credit-wallet-implementation-spec-20261027.md）：账务原语
+# 与插件机器通道错误码/能力探测；billing_store 内惰性 import 防环。
+import credit_store
 import conversion_store
 import slide_format_registry
 from kfb import KfbError
@@ -12231,7 +12234,9 @@ def admin_v1_spend_reconcile():
 def _admin_v1_spend_error_response(exc):
     """spend_store.SpendError → admin v1 错误信封（code 稳定）。"""
     status = 400
-    if isinstance(exc, spend_store.SpendVersionConflictError):
+    if isinstance(exc, spend_store.SpendCreditWalletMigratedError):
+        status = 409
+    elif isinstance(exc, spend_store.SpendVersionConflictError):
         status = 409
     elif isinstance(exc, (spend_store.SpendPolicyMissingError,
                           spend_store.SpendWindowUnavailableError)):
@@ -16567,6 +16572,18 @@ def _plugin_rate_limited_response(message, retry_after, details=None):
     return resp
 
 
+def _billing_client_capabilities():
+    """解析 ``X-HistoPilot-Billing-Capabilities``（逗号分隔、去空白、小写）。
+
+    spec §6：PT 只在 credits 用户 authorize 时强制 ``credit_wallet_v1``；
+    usage/settle 永不因缺头拒收（不能丢用量）。头按 token 列表容忍空项与
+    重复项，大小写不敏感。
+    """
+    raw = request.headers.get("X-HistoPilot-Billing-Capabilities") or ""
+    return frozenset(
+        part.strip().lower() for part in raw.split(",") if part.strip())
+
+
 def _billing_plugin_error(status: int, code: str, message: str,
                           retryable=None, details=None):
     """billing 机器通道（usage-events / billing holds）错误信封（0028 P1-2）。
@@ -16593,7 +16610,8 @@ def _billing_plugin_error(status: int, code: str, message: str,
     merged.setdefault("enforcement_mode", mode)
     merged.setdefault("capabilities",
                       {"spend_enforcement": mode,
-                       "settle_with_usage_event": True})
+                       "settle_with_usage_event": True,
+                       "credit_wallet_v1": True})
     return _plugin_error(status, code, message, retryable=retryable,
                          details=merged)
 
@@ -17446,6 +17464,42 @@ def _spend_mode_snapshot():
         return spend_store.DEFAULT_ENFORCEMENT_MODE
 
 
+def _ai_credit_wallet_gate(user_id):
+    """起跑前 Credit 钱包闸（spec §6 PT ``_ai_reserve_run_budget``）。
+
+    返回 ``(is_credits, error_response)``：
+      - 非 credits / 无账户 → ``(False, None)``（继续 legacy/模式分流）；
+      - credits 受限 → 403 ``wallet_restricted``；
+      - credits 可用 ≤ 0 → 429 ``credit_insufficient``；
+      - 正常 credits → ``(True, None)``（调用方强制走 hard 分支）；
+      - 读取失败 → 503 fail-closed（**不转发 sidecar**）。
+    """
+    try:
+        snapshot = credit_store.wallet_snapshot(user_id)
+    except Exception:
+        app.logger.exception("Credit 钱包读取失败（fail-closed 503，不转发 sidecar）")
+        return False, (
+            jsonify(error="Credit 钱包状态确认失败，请稍后重试",
+                    code="credit_wallet_unavailable"),
+            503,
+        )
+    if snapshot is None or snapshot.get("billing_backend") != "credits":
+        return False, None
+    if snapshot.get("restricted_reason"):
+        return True, (
+            jsonify(error="Credit 钱包受限：%s" % snapshot["restricted_reason"],
+                    code="wallet_restricted"),
+            403,
+        )
+    if int(snapshot.get("available_units") or 0) <= 0:
+        return True, (
+            jsonify(error="Credit 可用余额不足，请充值后再试",
+                    code="credit_insufficient"),
+            429,
+        )
+    return True, None
+
+
 def _ai_reserve_run_budget(user_ctx, request_id):
     """起跑前的消费闸分流（docs §5.3/§9.4 + 批次 F §7.3 阶段 2）。
 
@@ -17474,14 +17528,18 @@ def _ai_reserve_run_budget(user_ctx, request_id):
     if source is None:
         return None, None, None
     subject_type, subject_id = _ai_budget_subject(user_ctx)
+    credit_forced = False
     if subject_type == "user":
         denied = _user_ai_access_denied(subject_id)
         if denied is not None:
             return None, denied, None
+        credit_forced, credit_error = _ai_credit_wallet_gate(subject_id)
+        if credit_error is not None:
+            return None, credit_error, None
     mode = None
     # 模式快照；同一请求内不重读，避免中途切模式撕裂
     mode = _spend_mode_snapshot()
-    if spend_store.mode_is_hard(mode, subject_type):
+    if credit_forced or spend_store.mode_is_hard(mode, subject_type):
         # 金额硬闸分支：turn 消费闸关闭（不写 reservations、不做 usage
         # 平移、不查任何 turn 闸）。绑定两阶段化（0028，P1-2 fail-closed）：
         # 阶段 1 在调用 HistoPilot **之前**写 pending 绑定行（subject +
@@ -23816,9 +23874,12 @@ def plugin_v1_usage_events():
         duplicate=result["duplicate"],
         status=result["status"],
         priced=result["priced"],
+        billing_backend=result.get("billing_backend") or "legacy",
+        credit_settlement=result.get("credit_settlement"),
         enforcement_mode=mode,
         capabilities={"settle_with_usage_event": True,
-                      "spend_enforcement": mode},
+                      "spend_enforcement": mode,
+                      "credit_wallet_v1": True},
     )
 
 
@@ -23906,7 +23967,8 @@ def plugin_v1_billing_hold_authorize():
     try:
         result = billing_store.authorize_hold(
             body, installation_id=claims.get("sub") or "",
-            plugin_id=claims.get("plugin_id") or "")
+            plugin_id=claims.get("plugin_id") or "",
+            client_capabilities=_billing_client_capabilities())
     except billing_store.InvalidHoldRequestError as exc:
         # details 只含字段级校验信息，不含请求体内容
         return _billing_plugin_error(400, "invalid_request", "hold 请求校验失败",
@@ -23936,11 +23998,24 @@ def plugin_v1_billing_hold_authorize():
         return _billing_plugin_error(503, "spend_window_unavailable",
                              "金额窗口不可用（hard 模式 fail-closed）",
                              retryable=True)
+    except (credit_store.CreditInsufficientError,
+            credit_store.WalletRestrictedError,
+            credit_store.CreditPricingUnavailableError,
+            credit_store.CreditClientUpgradeRequiredError,
+            credit_store.CreditIdempotencyConflictError,
+            credit_store.CreditStateConflictError) as exc:
+        # spec §6：状态/错误码/retryable 一律取异常类属性，不在路由复制。
+        return _billing_plugin_error(
+            getattr(exc, "http_status", 409), exc.code, str(exc),
+            retryable=exc.retryable,
+            details={"billing_backend": "credits"})
     except Exception:
         app.logger.exception("billing hold authorize 失败（call_id=%s）",
                              body.get("call_id"))
         return _billing_plugin_error(500, "internal", "内部错误", retryable=True)
     mode = result.get("enforcement_mode") or "shadow"
+    backend = result.get("billing_backend") or "legacy"
+    credit_available = result.get("credit_available_units")
     return jsonify(
         ok=True,
         authorized=True,  # 硬拒绝走错误信封；成功行必已过当前模式硬闸
@@ -23950,14 +24025,20 @@ def plugin_v1_billing_hold_authorize():
         status=result["status"],
         subject_type=result["subject_type"],
         model=result["model"],
+        billing_backend=backend,
+        credit_available_units=(None if credit_available is None
+                                else str(int(credit_available))),
         estimated_nano_cny=_hold_nano_wire(result["estimated_nano_cny"]),
-        balance_nano_cny=_hold_nano_wire(result["balance_nano_cny"]),
+        balance_nano_cny=(str(int(credit_available))
+                          if backend == "credits" and credit_available is not None
+                          else _hold_nano_wire(result["balance_nano_cny"])),
         open_holds_nano_cny=_hold_nano_wire(result["open_holds_nano_cny"]),
-        would_deny=result["would_deny"],
+        would_deny=False if backend == "credits" else result["would_deny"],
         denial_reason=result.get("denial_reason"),
         enforcement_mode=mode,
         capabilities={"settle_with_usage_event": True,
-                      "spend_enforcement": mode},
+                      "spend_enforcement": mode,
+                      "credit_wallet_v1": True},
         expires_at=_hold_rfc3339(result["expires_at"]),
     )
 
@@ -23987,63 +24068,78 @@ def plugin_v1_billing_hold_settle(hold_id):
     if err is not None:
         return err
     if (claims.get("plugin_id") or "") not in _USAGE_INGEST_PLUGIN_IDS:
-        return _plugin_error(403, "forbidden",
+        return _billing_plugin_error(403, "forbidden",
                              "仅 HistoPilot 插件安装可结算计费 hold")
     body = request.get_json(silent=True)
     if body is not None and not isinstance(body, dict):
-        return _plugin_error(400, "invalid_request",
+        return _billing_plugin_error(400, "invalid_request",
                              "request body 需为 JSON object 或空（release）")
     try:
         result = billing_store.settle_hold(
             hold_id, body, installation_id=claims.get("sub") or "",
             plugin_id=claims.get("plugin_id") or "")
     except billing_store.InvalidHoldRequestError as exc:
-        return _plugin_error(400, "invalid_request", "hold 请求校验失败",
+        return _billing_plugin_error(400, "invalid_request", "hold 请求校验失败",
                              details={"errors": exc.errors[:10]})
     except billing_store.InvalidUsageEventError as exc:
         # settle 新 body 内嵌 usage event：schema 校验失败同样 400
-        return _plugin_error(400, "invalid_request", "usage event 校验失败",
+        return _billing_plugin_error(400, "invalid_request", "usage event 校验失败",
                              details={"errors": exc.errors[:10]})
     except billing_store.SettlePayloadRequiredError:
-        return _plugin_error(
+        return _billing_plugin_error(
             400, "settle_payload_required",
             "hard 模式 settle 必须携带完整 usage_event（旧 event_id body 会"
             "少记金额）")
     except billing_store.HoldNotFoundError:
-        return _plugin_error(404, "hold_not_found", "hold 不存在或不可访问")
+        return _billing_plugin_error(404, "hold_not_found", "hold 不存在或不可访问")
     except billing_store.HoldConflictError:
-        return _plugin_error(409, "hold_conflict",
+        return _billing_plugin_error(409, "hold_conflict",
                              "hold 已结算/事件与本 hold 不一致，不能再次结算或改绑")
     except billing_store.HoldNotOpenError:
-        return _plugin_error(409, "hold_not_open", "hold 已终局（released/expired），不可再结算")
+        return _billing_plugin_error(409, "hold_not_open", "hold 已终局（released/expired），不可再结算")
     except billing_store.UsageEventConflictError:
-        return _plugin_error(409, "usage_event_conflict",
+        return _billing_plugin_error(409, "usage_event_conflict",
                              "同 event_id/call_id 的 payload 与原记录不一致")
     except billing_store.UsageSubjectConflictError:
-        return _plugin_error(409, "usage_subject_conflict",
+        return _billing_plugin_error(409, "usage_subject_conflict",
                              "事件主体 assertion 与权威绑定不一致")
     except billing_store.UsageSubjectNotReadyError:
         return _billing_plugin_error(409, "usage_subject_not_ready",
                              "权威主体绑定尚未就绪，请退避后重试", retryable=True)
     except spend_store.SpendWindowUnavailableError:
         # 结算链归还 reserved 时窗口行缺失（数据异常）：可重试，整体已回滚
-        return _plugin_error(503, "spend_window_unavailable",
+        return _billing_plugin_error(503, "spend_window_unavailable",
                              "金额窗口不可用，结算未生效，请重试", retryable=True)
+    except (credit_store.CreditInsufficientError,
+            credit_store.CreditStateConflictError,
+            credit_store.CreditAccountNotFoundError,
+            credit_store.CreditInvalidRequestError,
+            credit_store.CreditIdempotencyConflictError) as exc:
+        return _billing_plugin_error(
+            getattr(exc, "http_status", 409), exc.code, str(exc),
+            retryable=exc.retryable,
+            details={"billing_backend": "credits"})
     except Exception:
         app.logger.exception("billing hold settle 失败（hold_id=%s）", hold_id)
-        return _plugin_error(500, "internal", "内部错误", retryable=True)
+        return _billing_plugin_error(500, "internal", "内部错误", retryable=True)
     mode = result.get("enforcement_mode") or "shadow"
+    backend = result.get("billing_backend") or "legacy"
+    pending = result.get("status") == "pending_reconciliation"
     return jsonify(
         ok=True,
         hold_id=result["hold_id"],
         status=result["status"],
         duplicate=result["duplicate"],
         usage_duplicate=result.get("usage_duplicate", False),
+        pending_reconciliation=pending,
         event_id=result["event_id"],
         actual_nano_cny=_hold_nano_wire(result.get("actual_nano_cny")),
+        billing_backend=backend,
+        credit_settlement=result.get("credit_settlement"),
         enforcement_mode=mode,
         capabilities={"settle_with_usage_event": True,
-                      "spend_enforcement": mode},
+                      "spend_enforcement": mode,
+                      "credit_wallet_v1": True},
         settled_at=_hold_rfc3339(result["settled_at"]),
         expires_at=_hold_rfc3339(result["expires_at"]),
     )

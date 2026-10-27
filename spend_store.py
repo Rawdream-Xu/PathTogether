@@ -233,6 +233,17 @@ class ProvisioningMaintenanceError(SpendError):
     retryable = True
 
 
+class SpendCreditWalletMigratedError(SpendError):
+    """用户已迁移 Credit 钱包：legacy 总额度只读冻结（spec §5.6）。
+
+    ``set_user_total_limit`` / ``restore_user_total_default`` 对 credits 用户
+    一律拒绝（0088 触发器也会拒绝改 limit/spent/reserved），admin 路由映射
+    409 ``credit_wallet_migrated``。
+    """
+
+    code = "credit_wallet_migrated"
+
+
 #: 用户开通（建号/邀请兑换）与 cutover 脚本共用的 advisory lock 键
 #: （review R2 竞态修复）：建号/兑换事务内 ``pg_advisory_xact_lock``；
 #: cutover apply/rollback 持同键**会话级** ``pg_advisory_lock`` 全程——
@@ -1096,9 +1107,27 @@ def total_allowance_overage_nano(allowance) -> int:
 
 
 def _validate_user_subject_id(subject_id):
+    """user 主体 id 校验（总额度行/账户均以 user_id 为键）。"""
     if not isinstance(subject_id, str) or not subject_id.strip():
         raise InvalidSpendRequestError("user_id 需为非空字符串")
     return subject_id
+
+
+def _user_billing_backend_tx(cur, user_id):
+    """用户账户账务后端（未开户按 legacy；spec §5.6 判定用）。"""
+    cur.execute(
+        "SELECT billing_backend FROM billing_accounts WHERE user_id=%s",
+        (user_id,))
+    row = cur.fetchone()
+    return row["billing_backend"] if row is not None else "legacy"
+
+
+def _reject_credit_wallet_tx(cur, user_id):
+    """credits 用户拒绝 legacy 总额度写（0088 触发器兜底，这里给稳定码）。"""
+    if _user_billing_backend_tx(cur, user_id) == "credits":
+        raise SpendCreditWalletMigratedError(
+            "该用户已迁移 Credit 钱包，legacy 总额度只读冻结",
+            user_id=user_id)
 
 
 def _fetch_total_allowance_locked(cur, subject_id) -> dict:
@@ -1395,6 +1424,7 @@ def set_user_total_limit(user_id, new_limit_nano_cny, expected_version, *,
     try:
         with pg_store.transaction(conn) as c:
             with c.cursor() as cur:
+                _reject_credit_wallet_tx(cur, user_id)
                 allowance = _fetch_total_allowance_locked(cur, user_id)
                 cur.execute(
                     "UPDATE ai_spend_total_allowances SET "
@@ -1579,6 +1609,7 @@ def restore_user_total_default(user_id, expected_version, *,
     try:
         with pg_store.transaction(conn) as c:
             with c.cursor() as cur:
+                _reject_credit_wallet_tx(cur, user_id)
                 allowance = _fetch_total_allowance_locked(cur, user_id)
                 at = datetime.now(timezone.utc)
                 default_limit, default_source, _default_version = \
@@ -1767,7 +1798,10 @@ def reconcile_total_allowances(*, at=None):
       - **只报告不修账**（修数必须走人工/强一致路径）。
 
     返回 ``{"checked", "drift_allowances", "items", "pricing_cutover_epoch",
-    "enforcement_mode"}``（原 ``user_spend_target`` 键随双轨拆除移除）。
+    "enforcement_mode", "skipped_credit_wallet"}``（原
+    ``user_spend_target`` 键随双轨拆除移除）。已迁移 credits 的用户总额度
+    行只读冻结（0088 触发器），对账跳过并计入 ``skipped_credit_wallet``
+    （spec §5.6）。
     """
     at_dt = _as_aware_at(at if at is not None else datetime.now(timezone.utc))
     conn = _connect()
@@ -1782,6 +1816,7 @@ def reconcile_total_allowances(*, at=None):
                     "ORDER BY subject_id")
                 rows = cur.fetchall()
                 items = []
+                skipped_credit_wallet = 0
                 marker = None
                 cur.execute(
                     "SELECT value FROM platform_settings WHERE key=%s",
@@ -1791,6 +1826,10 @@ def reconcile_total_allowances(*, at=None):
                     marker = datetime.fromtimestamp(float(m["value"]),
                                                     tz=timezone.utc)
                 for row in rows:
+                    if _user_billing_backend_tx(cur, row["subject_id"]) \
+                            == "credits":
+                        skipped_credit_wallet += 1
+                        continue
                     baseline = row["cutover_at"] or row["created_at"]
                     effective_from = baseline
                     cutover_missing = False
@@ -1842,6 +1881,7 @@ def reconcile_total_allowances(*, at=None):
             "pricing_cutover_epoch":
                 marker.timestamp() if marker is not None else None,
             "enforcement_mode": mode,
+            "skipped_credit_wallet": skipped_credit_wallet,
         }
     finally:
         conn.close()
@@ -1917,6 +1957,9 @@ def admin_users_spend_summaries(subjects, *, at=None):
                             "spend_target": ("total_allowance"
                                              if subject_type == "user"
                                              else "window")}
+                    # spec §5.6：管理 UI 按账务后端显示 Credit 或旧额度。
+                    item["billing_backend"] = _user_billing_backend_tx(
+                        cur, subject_id)
                     try:
                         if subject_type == "user":
                             item["total"] = total_allowance_summary_tx(
