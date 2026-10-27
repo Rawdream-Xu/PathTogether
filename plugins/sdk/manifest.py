@@ -82,6 +82,10 @@ MANIFEST_ADMIN_PERMISSIONS = (
     "admin:plugins:write",
     "admin:settings:read",
     "admin:settings:write",
+    # 2026-10-27 Credit 钱包管理（spec §9）：赠送/退款/待核对处置/解冻等
+    # 资金写动作的独立权限域；读复用 admin:billing:read。旧
+    # admin:billing:write 继续退役，不因新增本权限而恢复。
+    "admin:credits:write",
 )
 
 # semver core：major.minor.patch（不带 prerelease/build，保持 parse 简单；与

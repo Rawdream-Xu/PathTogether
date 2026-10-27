@@ -699,3 +699,19 @@ button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); 
   .adm-kind-actions { display: flex; flex-wrap: wrap; gap: 6px; }
   .adm-kind-actions button { margin: 0; }
 }
+
+/* 2026-10-27 Credit 钱包（spec §9）：用户抽屉钱包区 / 行内动作表单 */
+.adm-credit-wallet { margin-top: 16px; border-top: 1px solid var(--separator); padding-top: 12px; }
+.adm-credit-wallet h3 { font-size: 16px; margin: 0 0 8px; }
+.adm-credit-section { margin-top: 16px; }
+.adm-credit-section h4 { font-size: 14px; margin: 0 0 8px; }
+.adm-credit-section .adm-field { margin-bottom: 8px; }
+.adm-credit-table { font-size: 13px; }
+.adm-credit-actions-cell { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; }
+.adm-credit-actions-cell input { max-width: 180px; min-height: 36px; }
+.adm-credit-actions-cell button { margin: 0; }
+.adm-credit-action-form {
+  margin-top: 10px; padding: 10px; border: 1px solid var(--separator);
+  border-radius: 8px;
+}
+.adm-credit-action-form .adm-status { margin-top: 6px; }

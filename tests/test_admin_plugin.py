@@ -601,11 +601,12 @@ def test_admin_manifest_v1_1_validates():
     # §4/§6）：邀请页退役——admin.invites.* 桥方法整行删除，manifest 同步
     # 移除 admin:invites:read/write（SDK 词表 plugins/sdk/manifest.py 保留
     # 这两个枚举值——非本线文件；manifest 是其真子集，校验器允许）。
-    # 期望集合 = SDK 词表 − 邀请两项 = 11 项。
+    # 期望集合 = SDK 词表 − 邀请两项 = 12 项（2026-10-27 新增
+    # admin:credits:write：Credit 钱包管理写动作独立权限域）。
     expected_perms = (set(M.MANIFEST_ADMIN_PERMISSIONS)
                       - {"admin:invites:read", "admin:invites:write"})
     assert set(data["adminPermissions"]) == expected_perms
-    assert len(data["adminPermissions"]) == 11
+    assert len(data["adminPermissions"]) == 12
     for retired in ("admin:turn-budgets:read", "admin:turn-budgets:write",
                     "admin:billing:write", "admin:acquisition:read",
                     "admin:invites:read", "admin:invites:write"):
@@ -614,6 +615,7 @@ def test_admin_manifest_v1_1_validates():
     assert "admin:overview:read" in data["adminPermissions"]
     assert "admin:settings:read" in data["adminPermissions"]
     assert "admin:settings:write" in data["adminPermissions"]
+    assert "admin:credits:write" in data["adminPermissions"]
 
 
 def test_admin_permissions_enum_and_type_enforced():
@@ -980,7 +982,11 @@ def test_admin_manifest_plugin_version_bumped_with_hashes():
     # 任务行遵守统一筛选与 totals 口径、列表行批投影权威生命周期状态、
     # 展开面板独立有效性令牌、原始调用分页保留完整筛选；0.4.18 的 bundle
     # 已在 homePC 以不可变版本目录暂存，修复必须换新版本号。hashes/pin 同步。
-    assert data["pluginVersion"] == "0.4.19"  # hashes/pin 同步
+    # 2026-10-27 0.4.20（Credit 钱包 D2/spec §9）：余额列 Credit 口径 +
+    # 用户抽屉 Credit 钱包（赠送/退款/待核对处置/解冻）+ 费用页「Credit 待办」
+    # 标签；新增桥方法 admin.credits.*（读 billing:read / 写 credits:write），
+    # hashes/pin 同步。
+    assert data["pluginVersion"] == "0.4.20"  # hashes/pin 同步
     assert "admin:settings:read" in data["adminPermissions"]
     assert "admin:settings:write" in data["adminPermissions"]
     assert "admin:slides:read" in data["adminPermissions"]

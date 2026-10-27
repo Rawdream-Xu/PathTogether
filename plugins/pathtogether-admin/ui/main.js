@@ -1412,12 +1412,89 @@
     return "未授权";
   }
 
+  // ------------------------------------------------------------------
+  // Credit 钱包（2026-10-27，spec §9）：管理台余额列与用户抽屉。
+  // 金额运算全程 BigInt/String；units → Credits 显示 4 位小数（截断），
+  // 非零但不足 0.0001 显示「小于 0.0001」。
+  // ------------------------------------------------------------------
+  var CREDIT_UNIT_SCALE = 10000000n; // 1 Credit = 1e7 credit_units
+
+  function creditBackendOf(u) {
+    if (!u) return null;
+    if (u.billing_backend) return String(u.billing_backend);
+    if (u.billing && u.billing.billing_backend) {
+      return String(u.billing.billing_backend);
+    }
+    if (u.spend && u.spend.billing_backend) {
+      return String(u.spend.billing_backend);
+    }
+    return u.credit ? "credits" : null;
+  }
+
+  function isCreditsUser(u) {
+    return creditBackendOf(u) === "credits";
+  }
+
+  function creditSummaryOf(u) {
+    if (!isCreditsUser(u)) return null;
+    if (u.credit) return u.credit;
+    var b = u.billing || {};
+    return {
+      balance_units: b.credit_balance_units,
+      reserved_units: b.credit_reserved_units,
+      refund_pending_units: b.credit_refund_pending_units,
+      available_units: b.credit_available_units,
+      restricted_reason: b.credit_restricted_reason,
+    };
+  }
+
+  // units（十进制字符串/BigInt）→ Credits 文本（4 位小数截断）。
+  function creditUnitsText(value) {
+    if (value === null || value === undefined || value === "") return null;
+    var raw = String(value);
+    var negative = raw.charAt(0) === "-";
+    if (negative) raw = raw.slice(1);
+    if (!/^[0-9]+$/.test(raw)) return null;
+    var units = BigInt(raw);
+    var whole = units / CREDIT_UNIT_SCALE;
+    var frac = units % CREDIT_UNIT_SCALE;
+    if (!negative && whole === 0n && frac > 0n && frac < 1000n) {
+      return "小于 0.0001";
+    }
+    var fracText = String(frac).padStart(7, "0").slice(0, 4);
+    return (negative ? "-" : "") + String(whole) + "." + fracText;
+  }
+
+  function creditRestrictedText(u) {
+    var summary = creditSummaryOf(u);
+    var reason = summary && summary.restricted_reason;
+    return reason ? String(reason) : null;
+  }
+
   // 余额单元格（2026-10-09 round4 §2.2 恢复）：沿用旧表/抽屉同一
   // remainingInfo 短文案（剩余 X CNY / 已用尽 / 超支 X CNY / 不可用），
-  // 超支 danger 色（颜色判断按原始 nano）。
+  // 超支 danger 色（颜色判断按原始 nano）。credits 用户显示可用 Credit
+  // 与限制标记（legacy 行保持原 CNY 口径）。
   function renderRemainCell(u) {
-    var info = remainingInfo(u);
     var cell = document.createElement("td");
+    if (isCreditsUser(u)) {
+      var summary = creditSummaryOf(u);
+      var text;
+      if (!summary || summary.available_units === null ||
+          summary.available_units === undefined) {
+        text = "Credit 不可用";
+      } else {
+        var amount = creditUnitsText(summary.available_units);
+        text = amount === null ? "Credit 不可用" : "Credit 可用 " + amount;
+      }
+      var restricted = creditRestrictedText(u);
+      if (restricted) text += "（受限：" + restricted + "）";
+      cell.className = "adm-cell-remaining" +
+        (restricted ? " adm-usage-overage" : "");
+      cell.textContent = text;
+      return cell;
+    }
+    var info = remainingInfo(u);
     cell.className = "adm-cell-remaining" +
       (info.danger ? " adm-usage-overage" : "");
     cell.textContent = info.text;
@@ -1842,6 +1919,540 @@
     return details;
   }
 
+  // ------------------------------------------------------------------
+  // Credit 钱包抽屉区（2026-10-27，spec §9）
+  //
+  // - 数据源：admin.credits.user.get（钱包投影 + 批次 + 最近订单/退款 +
+  //   待核对 hold）；
+  // - 写动作：赠送 / 退款（可选金额）/ 退款查询/取消/重试 / 待核对处置 /
+  //   解冻。每个用户动作生成一次幂等键，重试同一动作复用；字段内容改变
+  //   视为新动作（新键）；
+  // - 金额全程字符串/BigInt：Credits 直接传十进制文本，退款金额元 → 分
+  //   用整数运算（不接受浮点）。
+  // ------------------------------------------------------------------
+  var creditDetailSeq = 0;
+
+  function newIdempotencyKey() {
+    var out = "k" + Date.now().toString(36);
+    for (var i = 0; i < 4; i += 1) {
+      out += Math.random().toString(36).slice(2, 10);
+    }
+    out = out.replace(/[^A-Za-z0-9_-]/g, "");
+    return out.slice(0, 64) || "k";
+  }
+
+  function idempotencyFor(state, fingerprint) {
+    if (!state.key || state.fingerprint !== fingerprint) {
+      state.key = newIdempotencyKey();
+      state.fingerprint = fingerprint;
+    }
+    return state.key;
+  }
+
+  function creditSection(titleText) {
+    var section = document.createElement("section");
+    section.className = "adm-credit-section";
+    var title = document.createElement("h4");
+    title.textContent = titleText;
+    section.appendChild(title);
+    return section;
+  }
+
+  function creditTable(headers) {
+    var wrap = document.createElement("div");
+    wrap.className = "adm-table-wrap";
+    var table = document.createElement("table");
+    table.className = "adm-table adm-credit-table";
+    var thead = document.createElement("thead");
+    var htr = document.createElement("tr");
+    headers.forEach(function (h) {
+      var th = document.createElement("th");
+      th.textContent = h;
+      htr.appendChild(th);
+    });
+    thead.appendChild(htr);
+    table.appendChild(thead);
+    var tbody = document.createElement("tbody");
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    return { wrap: wrap, tbody: tbody };
+  }
+
+  function creditField(labelText, placeholder, id) {
+    var field = document.createElement("div");
+    field.className = "adm-field";
+    var label = document.createElement("label");
+    label.className = "adm-field-label";
+    label.textContent = labelText;
+    if (id) label.htmlFor = id;
+    var input = document.createElement("input");
+    input.type = "text";
+    if (id) input.id = id;
+    input.placeholder = placeholder || "";
+    input.autocomplete = "off";
+    field.appendChild(label);
+    field.appendChild(input);
+    return { field: field, input: input };
+  }
+
+  function creditStatusLine() {
+    var status = document.createElement("p");
+    status.className = "adm-status";
+    return status;
+  }
+
+  // 元（文本）→ 分（十进制字符串）；空串 = 不限额（返回 null）；非法 = undefined。
+  function yuanTextToFen(text) {
+    var s = String(text == null ? "" : text).trim();
+    if (!s) return null;
+    var m = /^(0|[1-9][0-9]*)(?:\.([0-9]{1,2}))?$/.exec(s);
+    if (!m) return undefined;
+    var frac = (m[2] || "").padEnd(2, "0");
+    return String(BigInt(m[1]) * 100n + BigInt(frac || "0"));
+  }
+
+  function creditKindLabel(kind) {
+    return { promotional: "赠送", legacy_grant: "迁移", paid: "充值" }[kind] ||
+      String(kind || "—");
+  }
+
+  function creditOutcomeText(execution) {
+    if (!execution) return "—";
+    var result = execution.result;
+    if (result === "applied") return "已退款";
+    if (result === "unknown") return "渠道结果未知（继续冻结，稍后查询）";
+    if (result === "failed") return "渠道明确拒绝（已解冻，可重试）";
+    if (result === "duplicate") return "该退款已完成（幂等重放）";
+    if (result === "not_executed") {
+      return "未执行（退款状态：" + (execution.state || "?") + "）";
+    }
+    if (result === "error") {
+      return "退款已登记（requested，继续冻结）；执行失败：" +
+        (execution.code || "error") + " " + (execution.message || "");
+    }
+    return String(result || "—");
+  }
+
+  function loadCreditUserDetail(u, box) {
+    creditDetailSeq += 1;
+    var seq = creditDetailSeq;
+    box.textContent = "";
+    var loading = creditStatusLine();
+    loading.textContent = "正在读取 Credit 钱包…";
+    box.appendChild(loading);
+    request("admin.credits.user.get", { user_id: u.user_id })
+      .then(function (detail) {
+        if (seq !== creditDetailSeq) return;
+        renderCreditDetail(u, box, detail || {});
+      })
+      .catch(function (err) {
+        if (seq !== creditDetailSeq) return;
+        box.textContent = "";
+        var status = creditStatusLine();
+        status.textContent = "Credit 钱包读取失败：" + errText(err);
+        box.appendChild(status);
+      });
+  }
+
+  function renderCreditDetail(u, box, detail) {
+    box.textContent = "";
+    if (!detail.credits_enabled || detail.billing_backend !== "credits") {
+      var note = document.createElement("p");
+      note.className = "adm-note";
+      note.textContent = "该用户未启用 Credit 钱包（billing_backend: " +
+        (detail.billing_backend || "未开户") + "）。";
+      box.appendChild(note);
+      return;
+    }
+    var reload = function () { loadCreditUserDetail(u, box); };
+    var acct = detail.account || {};
+    var title = document.createElement("h3");
+    title.textContent = "Credit 钱包";
+    box.appendChild(title);
+    var dl = document.createElement("dl");
+    dl.className = "adm-kv";
+    kvRow(dl, "可用 Credit",
+      "Credit " + (creditUnitsText(acct.available_units) || "—"));
+    kvRow(dl, "余额（含预占/退款冻结）",
+      "Credit " + (creditUnitsText(acct.balance_units) || "—"));
+    kvRow(dl, "预占", "Credit " + (creditUnitsText(acct.reserved_units) || "—"));
+    kvRow(dl, "退款冻结",
+      "Credit " + (creditUnitsText(acct.refund_pending_units) || "—"));
+    var comp = acct.composition || {};
+    kvRow(dl, "构成（充值 / 赠送 / 迁移）",
+      "Credit " + (creditUnitsText(comp.paid_units) || "0.0000") + " / " +
+      "Credit " + (creditUnitsText(comp.promotional_units) || "0.0000") + " / " +
+      "Credit " + (creditUnitsText(comp.legacy_grant_units) || "0.0000"));
+    kvRow(dl, "账户限制", acct.restricted_reason || "无");
+    if (acct.frozen_reason) {
+      kvRow(dl, "冻结原因", String(acct.frozen_reason) +
+        (acct.frozen_at ? "（" + fmtTs(acct.frozen_at) + "）" : ""));
+    }
+    if (acct.migrated_at) kvRow(dl, "迁移时间", fmtTs(acct.migrated_at));
+    box.appendChild(dl);
+    if (acct.frozen_reason) box.appendChild(renderCreditUnfreeze(u, reload));
+    box.appendChild(renderCreditGrant(u, reload));
+    box.appendChild(renderCreditLots(detail));
+    box.appendChild(renderCreditOrders(u, detail, reload));
+    box.appendChild(renderCreditRefunds(u, detail, reload));
+    box.appendChild(renderCreditHolds(u, detail, reload));
+  }
+
+  function creditWriteDone(err, status, okText, reload) {
+    if (err) {
+      status.textContent = errText(err);
+      showError(err && err.code, err && err.message);
+      return false;
+    }
+    status.textContent = okText;
+    if (reload) reload();
+    loadUsers(false);
+    return true;
+  }
+
+  function renderCreditUnfreeze(u, reload) {
+    var section = creditSection("钱包解冻");
+    var reason = creditField("解冻理由（必填）", "如 渠道退款已人工核实",
+      "adm-credit-unfreeze-reason");
+    var status = creditStatusLine();
+    var idem = { key: null, fingerprint: null };
+    var btn = actionBtn("解冻钱包", function () {
+      var text = (reason.input.value || "").trim();
+      if (!text) { status.textContent = "请填写解冻理由"; return; }
+      var payload = { user_id: u.user_id, reason: text };
+      askConfirm($("adm-drawer-confirm"),
+        "确认解除 " + identityText(u) + " 的钱包冻结？解冻后该账户可继续消费；" +
+        "资金历史与批次不变。",
+        function () {
+          payload.idempotency_key = idempotencyFor(
+            idem, JSON.stringify(payload));
+          status.textContent = "解冻中…";
+          request("admin.credits.unfreeze", payload).then(function (res) {
+            creditWriteDone(null, status,
+              res && res.unfrozen ? "已解冻（原冻结原因：" +
+                (res.previous_reason || "—") + "）" : "账户当前未冻结（幂等 no-op）",
+              reload);
+          }).catch(function (err) {
+            creditWriteDone(err, status, null, null);
+          });
+        });
+    }, "primary");
+    section.appendChild(reason.field);
+    section.appendChild(btn);
+    section.appendChild(status);
+    return section;
+  }
+
+  function renderCreditGrant(u, reload) {
+    var section = creditSection("运营赠送（promotional）");
+    var credits = creditField("Credit 数量（最多 7 位小数，必填）", "如 12.5",
+      "adm-credit-grant-credits");
+    var reason = creditField("赠送理由（必填）", "如 活动补偿",
+      "adm-credit-grant-reason");
+    var status = creditStatusLine();
+    var idem = { key: null, fingerprint: null };
+    var btn = actionBtn("赠送 Credits", function () {
+      var text = (credits.input.value || "").trim();
+      if (!/^(0|[1-9][0-9]*)(\.[0-9]{1,7})?$/.test(text) ||
+          /^0(\.0+)?$/.test(text)) {
+        status.textContent = "Credit 数量非法（正数，最多 7 位小数）";
+        return;
+      }
+      var why = (reason.input.value || "").trim();
+      if (!why) { status.textContent = "请填写赠送理由"; return; }
+      var payload = { user_id: u.user_id, credits: text, reason: why };
+      askConfirm($("adm-drawer-confirm"),
+        "确认向 " + identityText(u) + " 赠送 " + text +
+        " Credits（promotional 批次，不能原路退款）？操作写审计。",
+        function () {
+          payload.idempotency_key = idempotencyFor(
+            idem, JSON.stringify(payload));
+          status.textContent = "赠送中…";
+          request("admin.credits.grant", payload).then(function (res) {
+            creditWriteDone(null, status,
+              (res && res.duplicate ? "该请求已处理（幂等重放）" : "已赠送") +
+              "：" + text + " Credits（批次 " +
+              ((res && res.lot && res.lot.lot_id) || "?") + "）", reload);
+          }).catch(function (err) {
+            creditWriteDone(err, status, null, null);
+          });
+        });
+    }, "primary");
+    section.appendChild(credits.field);
+    section.appendChild(reason.field);
+    section.appendChild(btn);
+    section.appendChild(status);
+    return section;
+  }
+
+  function renderCreditLots(detail) {
+    var section = creditSection("批次（消费顺序：赠送 → 迁移 → 充值）");
+    var lots = detail.lots || [];
+    if (!lots.length) {
+      var empty = document.createElement("p");
+      empty.className = "adm-note";
+      empty.textContent = "暂无批次。";
+      section.appendChild(empty);
+      return section;
+    }
+    var table = creditTable(
+      ["类型", "已发行", "剩余", "预占", "退款冻结", "创建时间", "来源"]);
+    lots.forEach(function (lot) {
+      var tr = document.createElement("tr");
+      tr.appendChild(td(creditKindLabel(lot.kind)));
+      tr.appendChild(td(creditUnitsText(lot.issued_units)));
+      tr.appendChild(td(creditUnitsText(lot.remaining_units)));
+      tr.appendChild(td(creditUnitsText(lot.reserved_units)));
+      tr.appendChild(td(creditUnitsText(lot.refund_pending_units)));
+      tr.appendChild(td(fmtTs(lot.created_at), "adm-cell-time"));
+      tr.appendChild(td(lot.order_id || lot.source_key || "—"));
+      table.tbody.appendChild(tr);
+    });
+    section.appendChild(table.wrap);
+    return section;
+  }
+
+  function renderCreditOrders(u, detail, reload) {
+    var section = creditSection("最近充值订单");
+    var orders = detail.orders || [];
+    if (!orders.length) {
+      var empty = document.createElement("p");
+      empty.className = "adm-note";
+      empty.textContent = "暂无充值订单。";
+      section.appendChild(empty);
+      return section;
+    }
+    var table = creditTable(
+      ["订单", "金额", "Credits", "支付", "到账", "创建", "异常", "操作"]);
+    var formHost = document.createElement("div");
+    orders.forEach(function (order) {
+      var tr = document.createElement("tr");
+      tr.appendChild(td(order.order_id, "adm-cell-time"));
+      tr.appendChild(td(order.amount_yuan + " CNY"));
+      tr.appendChild(td(order.credits));
+      tr.appendChild(td(order.payment_state));
+      tr.appendChild(td(order.credit_state));
+      tr.appendChild(td(fmtTs(order.created_at), "adm-cell-time"));
+      tr.appendChild(td(order.anomaly || "—"));
+      var cell = document.createElement("td");
+      if (order.payment_state === "paid" && order.credit_state === "credited") {
+        cell.appendChild(actionBtn("退款", function () {
+          formHost.textContent = "";
+          formHost.appendChild(renderCreditRefundForm(u, order, reload));
+        }, "secondary"));
+      } else {
+        cell.textContent = "—";
+      }
+      tr.appendChild(cell);
+      table.tbody.appendChild(tr);
+    });
+    section.appendChild(table.wrap);
+    section.appendChild(formHost);
+    return section;
+  }
+
+  function renderCreditRefundForm(u, order, reload) {
+    var wrap = document.createElement("div");
+    wrap.className = "adm-credit-action-form";
+    var amount = creditField("退款金额（元，可空 = 当前可退全额）", "如 6.00",
+      "adm-credit-refund-amount");
+    var reason = creditField("退款理由（必填，≤500 字）", "如 用户申请未使用退款",
+      "adm-credit-refund-reason");
+    var status = creditStatusLine();
+    var idem = { key: null, fingerprint: null };
+    var btn = actionBtn("发起原路退款", function () {
+      var fen = yuanTextToFen(amount.input.value);
+      if (fen === undefined) {
+        status.textContent = "退款金额非法（元，最多 2 位小数；留空=全额）";
+        return;
+      }
+      var why = (reason.input.value || "").trim();
+      if (!why) { status.textContent = "请填写退款理由"; return; }
+      var payload = { order_id: order.order_id, reason: why };
+      if (fen !== null) payload.amount_fen = fen;
+      askConfirm($("adm-drawer-confirm"),
+        "确认对订单 " + order.order_id + " 发起原路退款 " +
+        (fen === null ? "（当前可退全额）" : (fen + " 分")) + "？" +
+        "退款成功后对应 paid 批次等额冲减；网络结果未知时继续冻结并需查询确认。",
+        function () {
+          payload.idempotency_key = idempotencyFor(
+            idem, JSON.stringify(payload));
+          status.textContent = "退款处理中…";
+          request("admin.credits.refund.create", payload)
+            .then(function (res) {
+              var refund = res && res.refund ? res.refund : {};
+              creditWriteDone(null, status,
+                "退款 " + (refund.refund_id || "?") + "：" +
+                creditOutcomeText(res && res.execution), reload);
+            })
+            .catch(function (err) {
+              creditWriteDone(err, status, null, null);
+            });
+        });
+    }, "primary");
+    wrap.appendChild(amount.field);
+    wrap.appendChild(reason.field);
+    wrap.appendChild(btn);
+    wrap.appendChild(status);
+    return wrap;
+  }
+
+  function renderCreditRefunds(u, detail, reload) {
+    var section = creditSection("最近退款");
+    var refunds = detail.refunds || [];
+    if (!refunds.length) {
+      var empty = document.createElement("p");
+      empty.className = "adm-note";
+      empty.textContent = "暂无退款记录。";
+      section.appendChild(empty);
+      return section;
+    }
+    var table = creditTable(
+      ["退款", "订单", "金额", "状态", "尝试", "创建", "操作"]);
+    refunds.forEach(function (refund) {
+      var tr = document.createElement("tr");
+      tr.appendChild(td(refund.refund_id, "adm-cell-time"));
+      tr.appendChild(td(refund.order_id, "adm-cell-time"));
+      tr.appendChild(td(refund.amount_yuan + " CNY"));
+      tr.appendChild(td(refund.state));
+      tr.appendChild(td(refund.attempts));
+      tr.appendChild(td(fmtTs(refund.created_at), "adm-cell-time"));
+      var cell = document.createElement("td");
+      cell.className = "adm-credit-actions-cell";
+      var reasonInput = document.createElement("input");
+      reasonInput.type = "text";
+      reasonInput.placeholder = "操作理由";
+      reasonInput.maxLength = 500;
+      reasonInput.autocomplete = "off";
+      cell.appendChild(reasonInput);
+      var status = creditStatusLine();
+      var idem = { key: null, fingerprint: null };
+
+      function run(action, method, confirmText) {
+        var why = (reasonInput.value || "").trim();
+        if (!why) { status.textContent = "请填写操作理由"; return; }
+        var payload = { refund_id: refund.refund_id, reason: why };
+        function fire() {
+          payload.idempotency_key = idempotencyFor(
+            idem, action + "|" + JSON.stringify(payload));
+          status.textContent = "处理中…";
+          request(method, payload).then(function (res) {
+            var result = res && res.result ? res.result : "";
+            var state = res && res.refund ? res.refund.state : "";
+            creditWriteDone(null, status,
+              action + "：" + (result || "完成") +
+              (state ? "（退款状态 " + state + "）" : ""), reload);
+          }).catch(function (err) {
+            creditWriteDone(err, status, null, null);
+          });
+        }
+        if (confirmText) askConfirm($("adm-drawer-confirm"), confirmText, fire);
+        else fire();
+      }
+
+      if (refund.state === "sending" || refund.state === "unknown") {
+        cell.appendChild(actionBtn("查询", function () {
+          run("查询", "admin.credits.refund.query", null);
+        }, "secondary"));
+      }
+      if (refund.state === "requested" || refund.state === "failed") {
+        cell.appendChild(actionBtn("取消", function () {
+          run("取消", "admin.credits.refund.cancel",
+            "确认取消退款 " + refund.refund_id + "？仅未发送或已确定失败可取消，" +
+            "取消会解冻对应 Credit。");
+        }, "danger-outline"));
+      }
+      if (refund.state === "failed") {
+        cell.appendChild(actionBtn("重试", function () {
+          run("重试", "admin.credits.refund.retry",
+            "确认重试退款 " + refund.refund_id + "？将重新冻结并复用原请求号。");
+        }, "primary"));
+      }
+      cell.appendChild(status);
+      tr.appendChild(cell);
+      table.tbody.appendChild(tr);
+    });
+    section.appendChild(table.wrap);
+    return section;
+  }
+
+  function renderCreditHolds(u, detail, reload) {
+    var section = creditSection("待核对 / 释放后用量 hold");
+    var holds = detail.holds || [];
+    if (!holds.length) {
+      var empty = document.createElement("p");
+      empty.className = "adm-note";
+      empty.textContent = "该账户没有待核对 hold。";
+      section.appendChild(empty);
+      return section;
+    }
+    var table = creditTable(
+      ["hold", "call 后缀", "状态", "原因", "短差", "实际", "创建", "操作"]);
+    holds.forEach(function (hold) {
+      var tr = document.createElement("tr");
+      tr.appendChild(td(hold.hold_id, "adm-cell-time"));
+      tr.appendChild(td(hold.call_id_suffix || "—", "adm-cell-time"));
+      tr.appendChild(td(hold.status));
+      tr.appendChild(td(hold.reconciliation_reason || "—"));
+      tr.appendChild(td(creditUnitsText(hold.credit_shortfall_units)));
+      tr.appendChild(td(creditUnitsText(hold.actual_nano_cny)));
+      tr.appendChild(td(fmtTs(hold.created_at), "adm-cell-time"));
+      var cell = document.createElement("td");
+      cell.className = "adm-credit-actions-cell";
+      if (hold.status === "pending_reconciliation") {
+        var reasonInput = document.createElement("input");
+        reasonInput.type = "text";
+        reasonInput.placeholder = "处置理由（waive ≥4 字）";
+        reasonInput.maxLength = 500;
+        reasonInput.autocomplete = "off";
+        cell.appendChild(reasonInput);
+        var status = creditStatusLine();
+        var idem = { key: null, fingerprint: null };
+
+        function resolve(action, confirmText) {
+          var why = (reasonInput.value || "").trim();
+          if (!why) { status.textContent = "请填写处置理由"; return; }
+          if (action === "waive" && why.length < 4) {
+            status.textContent = "waive 的理由至少 4 个字";
+            return;
+          }
+          var payload = { hold_id: hold.hold_id, action: action, reason: why };
+          function fire() {
+            payload.idempotency_key = idempotencyFor(
+              idem, action + "|" + JSON.stringify(payload));
+            status.textContent = "处置中…";
+            request("admin.credits.hold.resolve", payload).then(function (res) {
+              creditWriteDone(null, status,
+                "已处置：" + ((res && res.status) || "?") +
+                "（" + ((res && res.resolution) || action) + "）", reload);
+            }).catch(function (err) {
+              creditWriteDone(err, status, null, null);
+            });
+          }
+          if (confirmText) askConfirm($("adm-drawer-confirm"), confirmText, fire);
+          else fire();
+        }
+
+        cell.appendChild(actionBtn("重试结算", function () {
+          resolve("retry", "确认用已固化事件重试结算该 hold？仍不足将保持待核对。");
+        }, "primary"));
+        cell.appendChild(actionBtn("释放", function () {
+          resolve("release", "确认按无事件释放该 hold 的预占？");
+        }, "secondary"));
+        cell.appendChild(actionBtn("核销（waive）", function () {
+          resolve("waive", "确认核销该错误计量 hold？释放预占、不扣费。");
+        }, "danger-outline"));
+        cell.appendChild(status);
+      } else {
+        cell.textContent = hold.resolution || "—";
+      }
+      tr.appendChild(cell);
+      table.tbody.appendChild(tr);
+    });
+    section.appendChild(table.wrap);
+    return section;
+  }
+
   function openUserDrawer(u, trigger) {
     if (!els.drawer || !els.drawerBody) return;
     drawerUser = u;
@@ -1868,9 +2479,13 @@
     kvRow(dl, "注册方式", u.registration_method);
     kvRow(dl, "最近 AI 调用", u.last_ai_call_at === null || u.last_ai_call_at === undefined
           ? "—" : fmtTs(u.last_ai_call_at) + "（Asia/Shanghai）");
-    // 金额主视图按形态渲染（§4.3）
+    // 金额主视图按形态渲染（§4.3）；credits 用户改为下方 Credit 钱包区
+    // （legacy 总额度投影已被服务端冻结，不再作为可用余额展示）。
+    var creditsUser = isCreditsUser(u);
     var info = userSpendInfo(u);
-    if (info.shape === "total") {
+    if (creditsUser) {
+      kvRow(dl, "账务后端", "Credit 钱包（可用 Credit 见下方 Credit 钱包）");
+    } else if (info.shape === "total") {
       kvRow(dl, "总额度", fmtCny(info.limit));
       kvRow(dl, "累计已用", fmtCny(info.spent));
       kvRow(dl, "预占", fmtCny(info.reserved));
@@ -1900,6 +2515,14 @@
     // 研究数据折叠区（2026-10-20 评审 §三）：「研究删除」页退役后，授权
     // 状态与删除任务进度都收在这里（只读；写动作仅终态 failed 的重新执行）
     els.drawerBody.appendChild(renderResearchSection(u));
+    // Credit 钱包（2026-10-27）：钱包投影/批次/订单/退款/待核对 hold + 写操作
+    var creditBox = null;
+    if (creditsUser) {
+      creditBox = document.createElement("div");
+      creditBox.className = "adm-credit-wallet";
+      els.drawerBody.appendChild(creditBox);
+      loadCreditUserDetail(u, creditBox);
+    }
     // 低频技术细节默认折叠在底部
     els.drawerBody.appendChild(drawerTechDetails(u));
     var actions = document.createElement("div");
@@ -1907,8 +2530,16 @@
     actions.appendChild(renderUserActions(u));
     els.drawerBody.appendChild(actions);
     // 金额动作按形态二选一（互斥）：total → 总额度编辑器；window → 既有
-    // 当前窗口调整；invalid → 不提供任何金额动作（显式报错态）
-    if (info.shape === "total") {
+    // 当前窗口调整；invalid → 不提供任何金额动作（显式报错态）；
+    // credits → 不提供旧总额度编辑（服务端 409 credit_wallet_migrated）。
+    if (creditsUser) {
+      var note = document.createElement("p");
+      note.className = "adm-note";
+      note.textContent = "该账户使用 Credit 钱包：旧「设置总额度/恢复默认」" +
+        "已冻结（服务端返回 409 credit_wallet_migrated）；请使用上方" +
+        "Credit 钱包的赠送/退款/待核对处置。";
+      els.drawerBody.appendChild(note);
+    } else if (info.shape === "total") {
       els.drawerBody.appendChild(renderTotalLimitEditor(u));
     } else if (info.shape === "window") {
       els.drawerBody.appendChild(renderWindowAdjustEditor(u));
@@ -2633,7 +3264,8 @@
   // 费用页（§4.6 wave 2）：KPI → [仅异常]计费异常条 → Demo 消耗卡 →
   // 费用明细（三个页内标签、单一内容区、只有当前标签发请求）。
   // ------------------------------------------------------------------
-  var BILL_TABS = ["usage", "ledger", "unpriced"];
+  // Credit 待办（2026-10-27）作为第四个页内标签；仍是「只有当前标签发请求」。
+  var BILL_TABS = ["usage", "ledger", "unpriced", "credit"];
   var billTab = "usage";
   // 标签激活代际：每次切换 ++；迟到的旧标签响应按代际丢弃（§4.6：
   // 切换标签时取消/忽略旧请求结果，防止迟到响应覆盖当前视图）
@@ -2851,6 +3483,137 @@
     }
   }
 
+  // ------------------------------------------------------------------
+  // Credit 待办（2026-10-27，spec §9）：跨账户待核对 hold + 异常订单 +
+  // unknown/failed 退款 + 冻结账户 + 对账状态。只读；单独页内标签，跨页
+  // 迟到响应按 billTabSeq 丢弃。
+  // ------------------------------------------------------------------
+  function fillCreditRows(tbodyId, rows, renderRow) {
+    var tbody = $(tbodyId);
+    if (!tbody) return;
+    tbody.textContent = "";
+    (rows || []).forEach(function (row) {
+      tbody.appendChild(renderRow(row));
+    });
+  }
+
+  function creditRow(cells, cls) {
+    var tr = document.createElement("tr");
+    if (cls) tr.className = cls;
+    (cells || []).forEach(function (cell) {
+      tr.appendChild(cell);
+    });
+    return tr;
+  }
+
+  function renderCreditTodoPending(data) {
+    fillCreditRows("adm-credit-pending-holds-tbody",
+      data.pending_holds || [], function (hold) {
+        return creditRow([
+          td(hold.hold_id, "adm-cell-time"),
+          td(hold.user_id || "—", "adm-cell-time"),
+          td(hold.call_id_suffix || "—", "adm-cell-time"),
+          td(hold.status),
+          td(hold.reconciliation_reason || "—"),
+          td(creditUnitsText(hold.credit_shortfall_units)),
+          td(creditUnitsText(hold.actual_nano_cny)),
+          td(fmtTs(hold.created_at), "adm-cell-time"),
+        ]);
+      });
+    fillCreditRows("adm-credit-anomalous-orders-tbody",
+      data.anomalous_orders || [], function (order) {
+        return creditRow([
+          td(order.order_id, "adm-cell-time"),
+          td(order.user_id || "—", "adm-cell-time"),
+          td(order.amount_yuan + " CNY"),
+          td(order.payment_state),
+          td(order.anomaly || "—"),
+          td(fmtTs(order.created_at), "adm-cell-time"),
+        ], "adm-usage-overage");
+      });
+    fillCreditRows("adm-credit-problem-refunds-tbody",
+      data.problem_refunds || [], function (refund) {
+        return creditRow([
+          td(refund.refund_id, "adm-cell-time"),
+          td(refund.user_id || "—", "adm-cell-time"),
+          td(refund.order_id, "adm-cell-time"),
+          td(refund.amount_yuan + " CNY"),
+          td(refund.state),
+          td(refund.last_error || "—"),
+          td(fmtTs(refund.created_at), "adm-cell-time"),
+        ], "adm-usage-overage");
+      });
+    fillCreditRows("adm-credit-frozen-accounts-tbody",
+      data.frozen_accounts || [], function (account) {
+        return creditRow([
+          td(account.account_id, "adm-cell-time"),
+          td(account.user_id || "—", "adm-cell-time"),
+          td(account.status),
+          td(creditUnitsText(account.balance_units)),
+          td(creditUnitsText(account.reserved_units)),
+          td(account.frozen_reason || "—"),
+          td(fmtTs(account.frozen_at), "adm-cell-time"),
+        ], "adm-usage-overage");
+      });
+  }
+
+  function renderCreditTodoReconcile(report) {
+    var badge = $("adm-credit-reconcile-status");
+    var dl = $("adm-credit-reconcile-dl");
+    var listEl = $("adm-credit-reconcile-list");
+    if (dl) dl.textContent = "";
+    if (listEl) listEl.textContent = "";
+    var discrepancies = (report && report.discrepancies) || [];
+    if (badge) {
+      badge.textContent = report && report.ok
+        ? "对账一致（ok）"
+        : "发现 " + discrepancies.length + " 项差异（只报告、不自动修账）";
+      badge.className = "adm-status" +
+        (report && report.ok ? "" : " adm-usage-overage");
+    }
+    var summary = (report && report.summary) || {};
+    if (dl) {
+      kvRow(dl, "credits 账户", fmtNum(summary.accounts));
+      kvRow(dl, "批次", fmtNum(summary.lots));
+      kvRow(dl, "credits_v1 流水", fmtNum(summary.ledger_entries));
+      kvRow(dl, "流水分配", fmtNum(summary.allocations));
+      kvRow(dl, "充值订单", fmtNum(summary.credit_topup_orders));
+      kvRow(dl, "已退款记录", fmtNum(summary.refunded_credit_refunds));
+    }
+    if (listEl) {
+      discrepancies.slice(0, 50).forEach(function (item) {
+        var li = document.createElement("li");
+        li.textContent = (item.kind || "discrepancy") +
+          " · account " + (item.account_id || "—") +
+          " · ref " + (item.ref || "—") +
+          " · expected " + (item.expected === null ||
+                            item.expected === undefined ? "—" : item.expected) +
+          " · actual " + (item.actual === null ||
+                          item.actual === undefined ? "—" : item.actual);
+        listEl.appendChild(li);
+      });
+    }
+  }
+
+  function loadCreditTodo() {
+    var status = $("adm-credit-todo-status");
+    var seq = billTabSeq;
+    if (status) status.textContent = "读取中…";
+    Promise.all([
+      request("admin.credits.pending.list", { limit: 50 }),
+      request("admin.credits.reconcile.get", {}),
+    ]).then(function (results) {
+      if (seq !== billTabSeq) return;
+      renderCreditTodoPending(results[0] || {});
+      renderCreditTodoReconcile(results[1] || {});
+      if (status) status.textContent = "已更新（" + nowText() + "）";
+    }).catch(function (err) {
+      if (seq !== billTabSeq) return;
+      if (status) status.textContent = "Credit 待办读取失败：" + errText(err);
+      showError(err && err.code, err && err.message);
+    });
+  }
+
   // ---- 页内标签（§4.6）：aria-selected / 键盘方向键 / 可见焦点 ----
   function setBillingTab(name) {
     if (BILL_TABS.indexOf(name) === -1) name = "usage";
@@ -2870,7 +3633,8 @@
     var panel = $("adm-tabpanel-detail");
     if (panel) panel.setAttribute("aria-labelledby", "adm-tab-" + name);
     var sections = { usage: "adm-usage-section", ledger: "adm-ledger-section",
-                     unpriced: "adm-unpriced-section" };
+                     unpriced: "adm-unpriced-section",
+                     credit: "adm-credit-section" };
     Object.keys(sections).forEach(function (t) {
       var sec = $(sections[t]);
       if (sec) sec.hidden = t !== name;
@@ -2878,6 +3642,7 @@
     // 只有当前标签发请求；同一激活代际内的迟到旧响应按代际丢弃
     if (name === "usage") loadUsageSummary(false, billUsageSeq);
     else if (name === "ledger") loadLedger(false, seq);
+    else if (name === "credit") loadCreditTodo();
     else loadUnpriced(false, seq);
   }
 
@@ -5054,6 +5819,8 @@
       loadDemoStats(sel ? sel.value : "current").catch(function () { /* 已在卡内中性呈现 */ });
     });
     onClick("adm-bill-alert-goto", function () { setBillingTab("unpriced"); });
+    // Credit 待办（2026-10-27）：手动刷新；页内标签切换走统一入口
+    onClick("adm-credit-refresh-btn", function () { loadCreditTodo(); });
     BILL_TABS.forEach(function (t) {
       onClick("adm-tab-" + t, function () { setBillingTab(t); });
     });
@@ -5191,6 +5958,11 @@
     fmtNano: fmtNano,
     fmtCny: fmtCny,
     fmtTs: fmtTs,
+    // 2026-10-27 Credit 钱包：units→Credits（4 位截断）、元→分整数换算、
+    // 幂等键生成（测试锁定字符串/BigInt 口径与键形态）。
+    creditUnitsText: creditUnitsText,
+    yuanTextToFen: yuanTextToFen,
+    newIdempotencyKey: newIdempotencyKey,
     tempViewStatusOf: tempViewStatusOf,
     handshakeState: function () {
       return {
