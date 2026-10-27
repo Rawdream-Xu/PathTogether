@@ -276,3 +276,20 @@ owner-only（`_require_owner_admin_v1`，预览态 403），admin v1 信封，�
 - 注意：沙箱模式下订单页轮询会让服务端按同单 3 秒节流向支付宝沙箱网关发 `alipay.trade.query`。本地验收若要求零外网，验收服务须桩掉 `support_payments.query_trade`。
 - 待用户批准、尚未执行：生产库迁移（运维手册 §3）、开启充值（`CREDIT_TOPUP_ENABLED` + 公网 notify_url）、定时 sweep / 每日 reconcile、真实小额充值 → 消费 → 退款全链路（需手机付款）。admin 插件 0.4.20 与其他未发布分支撞号，发布时需重新编号。
 - 不改现有测试断言来迁就新行为；行为确有变化时在提交说明里列出并说明理由。
+
+### 13.1 独立验收修复与最终门禁（2026-10-28）
+
+独立验收（`docs/credit-wallet-independent-acceptance-20261027.md`，原文收录于 2cf73436）以四项 P1 判定暂不通过，均已修复：
+
+- P1-1 授权失败仍调用模型：PathTogether 对 credits 用户在每次官方派发（run/continue/ask/branch）注入 `config.billing_subject.billing_backend="credits"`；HistoPilot 据此及进程内按主体的 Credit 记忆，在网络/超时/HTTP 错误、hold 客户端关闭、冷启动或重启后都不调用模型。owner/demo/legacy 行为不变。HistoPilot 必须以 `BILLING_HOLDS_ENABLED=true` 运行（生产已是）。
+- P1-2 缺最终用量释放预占：provider 一旦被调用，Credit hold 一律携带完整 usage 事件结算，unpriced 事件进入 `pending_reconciliation`；只有授权后、调用前已中止的情形释放预占；已调用但没有可用事件时不发 settle，留给到期扫描。
+- P1-3 无 hold 事件扣钱包：改为零预占 `pending_reconciliation` 待办（`missing_authorization`），不扣费、不分配批次，冻结账户同样不扣；重复与并发投递只有一条待办；已授权调用在冻结后照常结算。
+- P1-4 迁移路由只信客户端时间：改按 `ai_run_bindings.created_at`（同主体、同会话）→ `ai_budget_reservations.reserved_at` 判定；无可信证据且客户端时间早于迁移 → `migration_boundary_unverified` 待办（禁止 retry，只能 waive 或走迁移更正）；迁移前已入库事件重放只做幂等确认；跨迁移复用 request_id 的派发返回 409 `request_id_reused_across_migration`。
+- 审查方 5 个边界断言原样入仓：PT `tests/test_credit_independent_acceptance.py` 与原文件字节一致；HP `test/billing-holds-credit-acceptance.test.ts` 仅 import 路径不同。另用审查方原始文件对最终代码独立复跑：财务 3/3、HP 2/2（`/mnt/ssd2/tests/run-credit-p1verify-HjAFZ5`）。
+- 同批：管理台用户列表「最近登录」列改为「最近活跃」（0089 `users.last_active_at`：页面导航与写请求，5 分钟节流，不为静态/公开页面访问 session；回填取登录、审计、上传/转换创建与 AI 用量时间的最大值），详情抽屉保留「最近登录」。
+- 提交：PT bbc904de → 423088db → 228bfe1a（合并 fedba1b9、6d438ea5）→ 2cf73436；HP 8bcf687 → ec24a22。均未推送、未部署。
+- 最终门禁（`/mnt/ssd2/tests/run-credit-final-gate-CD0dKX`，PT 2cf73436 / HP ec24a22，2026-10-27T16:40Z–17:21Z）：
+  - PT 全量 pytest：3910 passed / 113 skipped / 0 failed（日志末尾的 PG「shutting down」是会话收尾时后台对账线程的连接报错，位于汇总行之后）；vitest 92 files / 1565 passed / 2 skipped；Playwright 156 passed / 43 skipped。
+  - HP unit + integration：90 files / 1719 passed；契约对真实 PT（2cf73436）56 passed；`tsconfig.build.json` 0 错误；全量 `tsconfig.json` 116 个错误，与基线逐条一致。
+- 行为提示（上线前需确认）：Credit 调用只要发出后缺最终用量（用户中途停止、发出后断流、终态错误无 usage）就会进入待核对，而现有规则是任何待核对都会暂停该账户新的付费调用，直到管理员处置。
+- 新增待批事项：0089 迁移随 0088 一起进入生产迁移演练；回填对 `audit_events`、`ai_usage_events` 各做一次全表扫描，宜在低峰执行。
