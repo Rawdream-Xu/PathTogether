@@ -11,7 +11,7 @@ COPY pg_store.py share_store_pg.py user_store_pg.py share_shared.py annotation_a
 COPY slide_store.py slide_storage.py slide_publish.py task_storage_lock.py ./
 COPY platform_features.py settings_store.py budget_store.py auth_limit_store.py demo_store.py registration_store.py registration_mail_worker.py registration_antibot.py identity_store.py ./
 COPY billing_pricing.py billing_store.py acquisition_store.py ./
-COPY credit_store.py ./
+COPY credit_store.py credit_payments.py ./
 COPY spend_store.py site_stats_store.py ./
 COPY public_site.py ./
 COPY crop_guard.py upload_content.py upload_guard.py upload_task_store.py useradmin.py ./
