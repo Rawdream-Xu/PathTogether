@@ -1135,10 +1135,15 @@ def lazy_activate_pending_user(user_id):
                         cur, datetime.now(timezone.utc))
                     if limit is None:
                         raise PublicRegistrationError("total_default_missing")
-                    spend_store.create_user_total_allowance_tx(
+                    allowance = spend_store.create_user_total_allowance_tx(
                         cur, user_id, limit, source=LAZY_ACTIVATION_SOURCE,
                         default_version=dver,
                         updated_by="lazy:" + user_id)
+                    # Credit 钱包（spec §10）：仅本次新建总额度行时赠送，
+                    # 幂等补齐分支不重复发。
+                    import credit_migration
+                    credit_migration.provision_signup_wallet_tx(
+                        cur, user_id, int(allowance["limit_nano_cny"]))
                 if activated_now:
                     _insert_audit(
                         cur, "registration.lazy_activated", user_id,
@@ -1624,6 +1629,11 @@ def complete_public_registration(token, password, *, research_opt_in=None,
                     cur, user["user_id"], limit,
                     source="public_registration", default_version=dver,
                     updated_by="public:" + row["registration_request_id"])
+                # Credit 钱包（spec §10）：默认额度同事务转为 promotional
+                # 批次；旧总额度行照常保留（此后被触发器冻结）。
+                import credit_migration
+                credit_migration.provision_signup_wallet_tx(
+                    cur, user["user_id"], int(limit))
                 # 10) 必选协议凭据
                 cur.execute(
                     "INSERT INTO user_agreement_acceptances "

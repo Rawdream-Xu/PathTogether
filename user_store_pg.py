@@ -410,6 +410,12 @@ def create_user_with_total_allowance(login_id, password, display_name=None,
                         default_version=dver,
                         actor_user_id=actor_user_id,
                         updated_by=actor_user_id or "admin")
+                    # Credit 钱包（spec §10）：backend=credits 时同事务按
+                    # 默认额度 1:1 发 promotional 批次；旧总额度行照常保留。
+                    import credit_migration
+                    credit_migration.provision_signup_wallet_tx(
+                        cur, uid, int(allowance["limit_nano_cny"]),
+                        actor_user_id=actor_user_id)
                     # 审计 detail 只含非敏感字段（§9.6：无密码/token/IP）
                     share_store_pg.record_audit_tx(
                         cur, "user.create", actor_user_id=actor_user_id,
