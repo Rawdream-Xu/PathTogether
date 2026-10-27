@@ -1876,6 +1876,22 @@ def resolve_pending_hold(hold_id, *, action, reason, actor_user_id,
                     raise CreditStateConflictError(
                         "hold 不处于待核对状态", hold_id=hold_id,
                         status=hold["status"])
+                migration_boundary_reason = \
+                    billing_store.RECONCILIATION_MIGRATION_BOUNDARY_UNVERIFIED
+                if action == "retry" \
+                        and hold.get("reconciliation_reason") \
+                        == migration_boundary_reason:
+                    # 原方案 §9.2：无 hold 且无可信服务端运行证据的迁移边界
+                    # 事件不能按新 Credit 消费自动结算（会消耗用户迁移后购买
+                    # 的 paid 批次）。必须先核实归属；确认不应收费时用 waive，
+                    # 确属旧费走迁移更正流程调整仍存在的 legacy_grant。
+                    raise CreditStateConflictError(
+                        "迁移边界未核实，不能 retry 自动扣费：须先核实该调用"
+                        "属于迁移前 legacy 还是迁移后 Credit；确认不应向用户"
+                        "收费时用 waive，确属迁移前旧费时走迁移更正流程调整"
+                        " legacy_grant（不得自动消耗迁移后购买的 paid 批次）",
+                        hold_id=hold_id,
+                        reconciliation_reason=hold.get("reconciliation_reason"))
 
                 now = _utcnow()
                 event = None

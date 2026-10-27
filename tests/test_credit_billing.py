@@ -774,7 +774,13 @@ def test_unpriced_no_evidence_no_hold_no_synthetic():
         conn.close()
 
 
-def test_priced_usage_without_hold_creates_synthetic_settled():
+def test_priced_usage_without_hold_pending_no_debit():
+    """无调用前授权（无 hold）的 priced 事件不得扣钱包（P1-3）。
+
+    产品约束：保留成本证据并建 ``pending_reconciliation`` 待办
+    （reason=missing_authorization、零预占、actual=charge），账户因待办受限；
+    重复投递不新增待办、不扣费。
+    """
     _seed_prices()
     user, acct = _user()
     call_id, session_id, request_id = _ids()
@@ -783,13 +789,14 @@ def test_priced_usage_without_hold_creates_synthetic_settled():
                            occurred=T0, request_id=request_id,
                            user_id=user["user_id"])
     charge = ch.expected_charge(T0)
+    before = _account(acct["account_id"])
     out = _ingest(event)
-    assert out["credit_settlement"] == "settled"
-    account = _account(acct["account_id"])
-    assert account["credit_balance_units"] == 10 * CNY - charge
-    assert account["credit_reserved_units"] == 0
-    debits = _credits_debits(acct["account_id"])
-    assert len(debits) == 1 and int(debits[0]["amount_nano_cny"]) == -charge
+    assert out["billing_backend"] == "credits"
+    assert out["credit_settlement"] == "pending_reconciliation"
+    after = _account(acct["account_id"])
+    assert after["credit_balance_units"] == before["credit_balance_units"]
+    assert after["credit_reserved_units"] == 0
+    assert not _credits_debits(acct["account_id"])
     conn = ch.connect()
     try:
         with ch.tx(conn) as cur:
@@ -798,9 +805,36 @@ def test_priced_usage_without_hold_creates_synthetic_settled():
             hold = dict(cur.fetchone())
     finally:
         conn.close()
-    assert hold["status"] == "settled"
-    assert hold["metadata"]["synthetic"] is True
+    assert hold["billing_backend"] == "credits"
+    assert hold["status"] == "pending_reconciliation"
+    assert hold["reconciliation_reason"] == \
+        billing_store.RECONCILIATION_MISSING_AUTHORIZATION
+    assert hold["reconciliation_at"] is not None
+    assert hold["event_id"] == event["event_id"]
+    assert hold["estimated_nano_cny"] is None
+    assert int(hold["reserved_nano_cny"]) == 0
     assert int(hold["actual_nano_cny"]) == charge
+    assert hold["metadata"]["synthetic"] is True
+    assert hold["metadata"]["missing_authorization"] is True
+    assert hold["metadata"]["request_hash"] is None
+    # 待办让账户进入受限（暂停新付费调用）
+    assert credit_store.wallet_snapshot(user["user_id"])[
+        "restricted_reason"] == "pending_reconciliation"
+    # 重复投递：pending duplicate，不新增待办、不扣费
+    replay = _ingest(event)
+    assert replay["duplicate"] is True
+    assert replay["credit_settlement"] == "pending_reconciliation"
+    conn = ch.connect()
+    try:
+        with ch.tx(conn) as cur:
+            cur.execute("SELECT COUNT(*)::int AS n FROM billing_holds "
+                        "WHERE call_id=%s", (call_id,))
+            assert cur.fetchone()["n"] == 1
+    finally:
+        conn.close()
+    assert _account(acct["account_id"])["credit_balance_units"] == \
+        before["credit_balance_units"]
+    assert not _credits_debits(acct["account_id"])
 
 
 def test_usage_after_release_records_nonblocking_todo():
@@ -873,14 +907,16 @@ def test_migration_late_legacy_event_writes_legacy_scope_only():
         "adj-" + uuid.uuid4().hex, actor_user_id="pytest")
     account_before = billing_store.get_billing_account_by_user(user["user_id"])
     # 切到 credits（写迁移快照；无赠送批次）
+    # 运行绑定必须在**迁移前**创建：这才是真正迁移前的运行（原方案 §9.2：
+    # 按可信服务端运行边界分类，不能只按客户端 occurred_at）。
+    call_id, session_id, request_id = _ids()
+    bh.bind_run_binding(request_id, session_id, "user", user["user_id"])
     acct = ch.provision_user(
         user["user_id"], grant_units=0, migration={"legacy_grant_units": 0},
         source_key="legacy:%s:v1" % user["user_id"])
     assert acct["billing_backend"] == "credits"
     migrated_at = acct["credit_migrated_at"]
     allowance_before = _allowance(user["user_id"])
-    call_id, session_id, request_id = _ids()
-    bh.bind_run_binding(request_id, session_id, "user", user["user_id"])
     occurred = migrated_at - timedelta(hours=1)
     event = ch.usage_event(call_id, session_id, user["user_id"],
                            occurred=occurred, request_id=request_id,
@@ -1293,8 +1329,10 @@ def test_usage_events_endpoint_credit_fields():
     assert r.status_code == 200, r.get_data(as_text=True)
     out = r.get_json()
     assert out["billing_backend"] == "credits"
-    assert out["credit_settlement"] == "settled"
+    # 无 hold 的旧客户端事件：只保留待办，不无授权扣费（P1-3）。
+    assert out["credit_settlement"] == "pending_reconciliation"
     assert out["capabilities"]["credit_wallet_v1"] is True
+    assert _account(acct["account_id"])["credit_balance_units"] == 10 * CNY
 
 
 def test_ai_reserve_run_budget_credits_branches(monkeypatch):

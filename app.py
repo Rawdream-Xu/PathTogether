@@ -18275,9 +18275,15 @@ def _ai_reserve_run_budget(user_ctx, request_id):
                         code="run_binding_unavailable"),
                 503,
             ), None
-        return None, None, {"hard": True, "mode": mode,
-                            "subject_type": subject_type,
-                            "subject_id": subject_id}
+        hard_ctx = {"hard": True, "mode": mode,
+                    "subject_type": subject_type,
+                    "subject_id": subject_id}
+        if credit_forced:
+            # P1-1：把可信的账务后端随运行上下文交给 HistoPilot；Credit
+            # 调用据此在授权失败/关闭 hold 客户端/冷启动时 fail-closed，
+            # 不依赖单次 authorize 响应推断后端。非 credits 不加该键。
+            hard_ctx["billing_backend"] = "credits"
+        return None, None, hard_ctx
     try:
         resv = budget_store.reserve_turn(request_id, subject_type, subject_id, source)
         return resv, None, None
@@ -18775,6 +18781,12 @@ def _ai_run_prepare(user_ctx, body, slide, need_grant, slide_id=None):
         # §3.10 P0-C：预算拒绝 → 已签发的 grant 立即撤销（不留给 TTL）。
         _revoke_grant_in_config(config, reason="run_rejected")
         return budget_err
+    if hard_ctx and hard_ctx.get("billing_backend") == "credits" \
+            and isinstance(config.get("billing_subject"), dict):
+        # P1-1：Credit 运行上下文（可信服务端判定，与钱包账户状态同源）。
+        # HistoPilot 按 billing_subject.billing_backend == "credits" 强制
+        # 每次调用都拿到有效 hold；非 credits 用户保持既有配置形状。
+        config["billing_subject"]["billing_backend"] = "credits"
     on_accepted, on_rejected = _ai_budget_lifecycle(rid, resv, hard_ctx=hard_ctx)
     _budget_on_accepted = on_accepted
     _principal_uid = (user_ctx or {}).get("user_id") or ""

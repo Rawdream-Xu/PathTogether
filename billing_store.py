@@ -1114,6 +1114,14 @@ def _project_window_spent_tx(cur, *, subject_type, subject_id, occurred,
 #: 待核对原因（spec §5.4）
 RECONCILIATION_INSUFFICIENT_BALANCE = "insufficient_balance"
 RECONCILIATION_USAGE_AFTER_RELEASE = "usage_after_release"
+#: 无 hold（没有调用前授权）但 priced/有用量证据：保留成本证据，不扣钱包
+#: （原方案 §6.3：只有授权成功的调用才走已授权结算；P1-3）。
+RECONCILIATION_MISSING_AUTHORIZATION = "missing_authorization"
+#: 已迁移账户、无可信服务端运行证据且客户端 occurred_at 早于迁移边界：
+#: 不能只按客户端时间归 legacy，也不能按新 Credit 消费扣费（原方案 §9.2）。
+RECONCILIATION_MIGRATION_BOUNDARY_UNVERIFIED = "migration_boundary_unverified"
+#: 无 hold 事件的观测指标名（reason 区分两类待办与无证据 unpriced）。
+CREDIT_USAGE_WITHOUT_HOLD_METRIC = "credit_usage_without_hold_total"
 RESOLUTION_LATE_USAGE_SETTLED = "late_usage_settled"
 RESOLUTION_CLIENT_RELEASE_AFTER_EXPIRY = "client_release_after_expiry"
 
@@ -1143,16 +1151,23 @@ def _fetch_hold_locked(cur, hold_id):
 
 
 def _create_synthetic_credit_hold_tx(cur, acct, event, *, installation_id,
-                                     now):
-    """无 hold 的 Credit 事件补建 synthetic hold（spec §5.4）。
+                                     now, reason, charge=None):
+    """无 hold 的 Credit 事件补建**待核对**占位 hold（spec §5.4；P1-3）。
 
-    旧客户端 / 关闭 hold 的客户端只投 usage-events；事件 priced 或带用量
-    证据时必须建立同 call_id 的 hold 再结算（同事务），否则真实成本无处
-    落账。之后同 call_id 的 authorize 会因 request_hash 不同得到 409。
+    旧客户端 / 关闭 hold 的客户端只投 usage-events，或调用前授权失败：事件
+    priced 或带用量证据时必须保留成本证据，但**不得**在事后扣可用余额——
+    没有调用前授权的事件不是「原已授权调用」（原方案 §6.3）。因此这里直接
+    以 ``pending_reconciliation`` 插入零预占 hold：不分配批次、不改账户余额/
+    预占/批次，由管理员经 ``credit_store.resolve_pending_hold`` 处置。
+
+    ``reason`` 为 :data:`RECONCILIATION_MISSING_AUTHORIZATION` 或
+    :data:`RECONCILIATION_MIGRATION_BOUNDARY_UNVERIFIED`；``charge`` 仅
+    priced 事件有值（记入 ``actual_nano_cny`` 供核对，不产生扣费）。
     """
     hold_id = _HOLD_ID_PREFIX + secrets.token_hex(12)
     metadata = {"synthetic": True, "request_hash": None,
-                "provider": event["provider"]}
+                "provider": event["provider"],
+                "missing_authorization": True}
     mode = _spend()._enforcement_mode_tx(cur)
     cur.execute(
         "INSERT INTO billing_holds "
@@ -1160,13 +1175,32 @@ def _create_synthetic_credit_hold_tx(cur, acct, event, *, installation_id,
         " installation_id, session_id, model, estimated_nano_cny, "
         " balance_nano_cny, would_deny, status, expires_at, metadata, "
         " reserved_nano_cny, enforcement_mode, denial_reason, "
-        " billing_backend) "
-        "VALUES (%s,%s,%s,'user',%s,%s,%s,%s,NULL,NULL,false,'open',%s,%s,0,"
-        "%s,NULL,'credits') RETURNING " + _HOLD_SEL,
+        " billing_backend, reconciliation_reason, reconciliation_at, "
+        " event_id, actual_nano_cny) "
+        "VALUES (%s,%s,%s,'user',%s,%s,%s,%s,NULL,NULL,false,"
+        "'pending_reconciliation',%s,%s,0,%s,NULL,'credits',%s,%s,%s,%s) "
+        "RETURNING " + _HOLD_SEL,
         (hold_id, event["call_id"], acct["account_id"], event["subject_id"],
          installation_id, event["session_id"], event["model"], now,
-         psycopg.types.json.Jsonb(metadata), mode))
-    return _hold_out(cur.fetchone())
+         psycopg.types.json.Jsonb(metadata), mode, reason, now,
+         event["event_id"],
+         int(charge) if charge is not None else None))
+    hold = _hold_out(cur.fetchone())
+    _credit_hold_settle_audit_tx(
+        cur, hold, settlement="pending_reconciliation", now=now,
+        installation_id=installation_id)
+    _hold_metric(CREDIT_USAGE_WITHOUT_HOLD_METRIC, reason=reason,
+                 call_id_suffix=hold["call_id"][-8:],
+                 has_usage_evidence=_row_or_input_has_usage_evidence(event),
+                 billing_backend="credits")
+    return hold
+
+
+def _row_or_input_has_usage_evidence(event):
+    """事件 dict（输入或已入库行）是否带用量证据（两种形态统一判定）。"""
+    if "status" in event or "raw_usage" in event:
+        return _row_has_usage_evidence(event)
+    return _input_has_usage_evidence(event)
 
 
 def _credit_hold_settle_audit_tx(cur, hold, *, settlement, now,
@@ -1278,9 +1312,29 @@ def _apply_credit_hold_settlement_tx(cur, *, acct, hold, event_id, status,
     return "pending_reconciliation", updated
 
 
+def _legacy_duplicate_result(row, mode):
+    """legacy 路由的重复事件结果（终态无副作用）。"""
+    out = _duplicate_result(row)
+    out.update(subject_type=row["subject_type"],
+               subject_id=row["subject_id"], user_id=row["user_id"],
+               charge=(int(row["charge_nano_cny"])
+                       if row["charge_nano_cny"] is not None else None),
+               charge_price_book_id=row["charge_price_book_id"],
+               enforcement_mode=mode, window_projection=None,
+               billing_backend="legacy", credit_settlement=None,
+               hold_status=None, hold_id=None)
+    return out
+
+
 def _credit_duplicate_result_tx(cur, row, *, acct, hold, source, now,
-                                installation_id):
-    """credits 路由的重复事件：终态无副作用；open/pending(无事件) 恢复结算。"""
+                                installation_id,
+                                migration_unverified=False):
+    """credits 路由的重复事件：终态无副作用；open/pending(无事件) 恢复结算。
+
+    ``hold is None``（旧客户端/授权失败）时与首次投递同规则：priced 或带
+    用量证据只补建 ``pending_reconciliation`` 待办（不扣费，P1-3），无证据
+    unpriced 仅返回事件状态。
+    """
     out = _duplicate_result(row)
     out.update(subject_type=row["subject_type"],
                subject_id=row["subject_id"], user_id=row["user_id"],
@@ -1291,11 +1345,15 @@ def _credit_duplicate_result_tx(cur, row, *, acct, hold, source, now,
                billing_backend="credits")
 
     if hold is None:
-        # 无 hold：原事件 priced 或有用量证据才会补建 synthetic hold（与首次
-        # 投递同规则），否则仅返回事件状态。
         if row["status"] == "priced" or _row_has_usage_evidence(row):
             hold = _create_synthetic_credit_hold_tx(
-                cur, acct, row, installation_id=installation_id, now=now)
+                cur, acct, row, installation_id=installation_id, now=now,
+                reason=(RECONCILIATION_MIGRATION_BOUNDARY_UNVERIFIED
+                        if migration_unverified
+                        else RECONCILIATION_MISSING_AUTHORIZATION),
+                charge=(int(row["charge_nano_cny"])
+                        if row["status"] == "priced"
+                        and row["charge_nano_cny"] is not None else None))
         else:
             out.update(credit_settlement=None, hold_status=None, hold_id=None)
             return out
@@ -1361,8 +1419,11 @@ def _ingest_usage_event_tx(cur, event, *, installation_id, plugin_id,
     # -- 步骤 2a：Credit 路由 + 账户/hold 锁（必须在事件读写之前；spec §5.4） --
     acct = None
     credit_hold = None
+    route = None
     route_backend = "legacy"
     late_legacy = False
+    migration_unverified = False
+    migration_evidence_at = None
     if credit_ctx is not None:
         route_backend = "credits"
         acct = credit_ctx.get("acct")
@@ -1371,14 +1432,18 @@ def _ingest_usage_event_tx(cur, event, *, installation_id, plugin_id,
         route = _credit_route_tx(
             cur, call_id=event.get("call_id"),
             subject_type=event.get("subject_type"),
-            subject_id=event.get("subject_id"), occurred_at=occurred)
+            subject_id=event.get("subject_id"), occurred_at=occurred,
+            request_id=event.get("request_id"))
         route_backend = route["billing_backend"]
         late_legacy = bool(route["late_legacy"])
+        migration_unverified = bool(route.get("migration_unverified"))
+        migration_evidence_at = route.get("migration_evidence_at")
         if route_backend == "credits":
             acct = credit.lock_account_tx(cur, route["account_id"])
-            if route["hold_exists"]:
-                credit_hold = _fetch_hold_locked_by_call(
-                    cur, event["call_id"])
+            # 无锁探测（_credit_route_tx）之后必须锁后重读：并发投递同一
+            # 无 hold 事件时，后者要看到前者已建好的 pending hold（P1-3）。
+            credit_hold = _fetch_hold_locked_by_call(
+                cur, event["call_id"])
 
     raw_usage = dict(event.get("raw_usage") or {})
     # -- 步骤 2：dedup（先比对，重放幂等返回原行，不重复计价/扣费/投影） --
@@ -1389,23 +1454,23 @@ def _ingest_usage_event_tx(cur, event, *, installation_id, plugin_id,
                 "同 event_id 重放的 payload 与原记录不一致",
                 event_id=event["event_id"])
         if route_backend == "credits":
+            if credit_ctx is None and _event_received_before_migration(
+                    existing, route):
+                # 迁移前已入库（已计入迁移 spent）的事件重放：只做幂等确认，
+                # 不建待办、不扣费（原方案 §9.2）。
+                _hold_metric(
+                    "credit_migration_already_accounted_total",
+                    event_id=existing["event_id"])
+                return _legacy_duplicate_result(existing, mode)
             out = _credit_duplicate_result_tx(
                 cur, existing, acct=acct, hold=credit_hold,
                 source=("settle" if credit_ctx is not None else "usage"),
-                now=received, installation_id=installation_id)
+                now=received, installation_id=installation_id,
+                migration_unverified=migration_unverified)
             out["enforcement_mode"] = mode
             return out
-        out = _duplicate_result(existing)
-        out.update(subject_type=existing["subject_type"],
-                   subject_id=existing["subject_id"],
-                   user_id=existing["user_id"],
-                   charge=(int(existing["charge_nano_cny"])
-                           if existing["charge_nano_cny"] is not None
-                           else None),
-                   charge_price_book_id=existing["charge_price_book_id"],
-                   enforcement_mode=mode, window_projection=None,
-                   billing_backend="legacy", credit_settlement=None,
-                   hold_status=(credit_hold["status"]
+        out = _legacy_duplicate_result(existing, mode)
+        out.update(hold_status=(credit_hold["status"]
                                 if credit_hold is not None else None),
                    hold_id=(credit_hold["hold_id"]
                             if credit_hold is not None else None))
@@ -1510,24 +1575,24 @@ def _ingest_usage_event_tx(cur, event, *, installation_id, plugin_id,
         again = _fetch_event_locked(cur, event["event_id"])
         if again is not None and again["payload_hash"] == payload_hash:
             if route_backend == "credits":
+                if credit_hold is None:
+                    # 竞态：对方在同一 call 上先建了 pending hold。
+                    credit_hold = _fetch_hold_locked_by_call(
+                        cur, event["call_id"])
+                if credit_ctx is None and _event_received_before_migration(
+                        again, route):
+                    _hold_metric(
+                        "credit_migration_already_accounted_total",
+                        event_id=again["event_id"])
+                    return _legacy_duplicate_result(again, mode)
                 out = _credit_duplicate_result_tx(
                     cur, again, acct=acct, hold=credit_hold,
                     source=("settle" if credit_ctx is not None else "usage"),
-                    now=received, installation_id=installation_id)
+                    now=received, installation_id=installation_id,
+                    migration_unverified=migration_unverified)
                 out["enforcement_mode"] = mode
                 return out
-            out = _duplicate_result(again)
-            out.update(subject_type=again["subject_type"],
-                       subject_id=again["subject_id"],
-                       user_id=again["user_id"],
-                       charge=(int(again["charge_nano_cny"])
-                               if again["charge_nano_cny"] is not None
-                               else None),
-                       charge_price_book_id=again["charge_price_book_id"],
-                       enforcement_mode=mode, window_projection=None,
-                       billing_backend="legacy", credit_settlement=None,
-                       hold_status=None, hold_id=None)
-            return out
+            return _legacy_duplicate_result(again, mode)
         raise UsageEventConflictError(
             "并发投递冲突：event_id/call_id 已被其他 payload 占用",
             event_id=event["event_id"]) from exc
@@ -1539,20 +1604,39 @@ def _ingest_usage_event_tx(cur, event, *, installation_id, plugin_id,
     window_projection = None
     credit_settlement = None
     credit_hold_out = credit_hold
+    missing_authorization = False
     if route_backend == "credits":
         if subject_type != "user":
             raise UsageSubjectConflictError(
                 "Credit 账户事件的权威主体必须为 user",
                 resolved=(subject_type, subject_id))
-        if credit_hold is None \
-                and (status == "priced" or _input_has_usage_evidence(event)):
-            # 旧客户端 / 关闭 hold 的客户端：priced 或有用量证据才补建
-            # synthetic hold；无证据 unpriced 只作证据入库。
-            credit_hold = _create_synthetic_credit_hold_tx(
-                cur, acct, event, installation_id=installation_id,
-                now=received)
-            credit_hold_out = credit_hold
-        if credit_hold is not None:
+        created_missing_authorization_hold = False
+        if credit_hold is None:
+            if status == "priced" or _input_has_usage_evidence(event):
+                # 无调用前授权（旧客户端 / 关闭 hold 的客户端 / 授权失败）：
+                # 只保留成本证据与待办，**禁止**事后扣可用余额（P1-3）。
+                credit_hold = _create_synthetic_credit_hold_tx(
+                    cur, acct, event, installation_id=installation_id,
+                    now=received,
+                    reason=(RECONCILIATION_MIGRATION_BOUNDARY_UNVERIFIED
+                            if migration_unverified
+                            else RECONCILIATION_MISSING_AUTHORIZATION),
+                    charge=(charge if status == "priced" else None))
+                credit_hold_out = credit_hold
+                credit_settlement = "pending_reconciliation"
+                missing_authorization = True
+                created_missing_authorization_hold = True
+            else:
+                # 无证据 unpriced：只作证据入库，不建 hold、不扣费；审计与指标
+                # 标记「无授权」，供事后核对。
+                missing_authorization = True
+                _hold_metric(
+                    CREDIT_USAGE_WITHOUT_HOLD_METRIC,
+                    reason="unpriced_without_evidence",
+                    event_id=event["event_id"],
+                    has_usage_evidence=False,
+                    billing_backend="credits")
+        if credit_hold is not None and not created_missing_authorization_hold:
             credit_settlement, updated = _apply_credit_hold_settlement_tx(
                 cur, acct=acct, hold=credit_hold, event_id=event["event_id"],
                 status=status, charge=charge, unpriced_reason=reason,
@@ -1612,6 +1696,10 @@ def _ingest_usage_event_tx(cur, event, *, installation_id, plugin_id,
         audit_detail["credit_settlement"] = credit_settlement
         audit_detail["credit_hold_id"] = (
             credit_hold_out["hold_id"] if credit_hold_out is not None else None)
+        if missing_authorization:
+            audit_detail["credit_missing_authorization"] = True
+        if migration_unverified:
+            audit_detail["migration_boundary_unverified"] = True
     if late_legacy:
         audit_detail["migration_late_legacy"] = True
     if window_projection is not None:
@@ -1656,6 +1744,8 @@ def _ingest_usage_event_tx(cur, event, *, installation_id, plugin_id,
                         if credit_hold_out is not None else None),
         "hold_id": (credit_hold_out["hold_id"]
                     if credit_hold_out is not None else None),
+        "migration_unverified": migration_unverified,
+        "migration_evidence_at": migration_evidence_at,
     }
 
 
@@ -2011,22 +2101,70 @@ def _fetch_hold_by_call(cur, call_id):
     return cur.fetchone()
 
 
+def _migration_evidence_tx(cur, *, request_id, subject_type, subject_id):
+    """可信服务端运行开始时间（原方案 §9.2）→ ``(datetime|None, source)``。
+
+    优先 ``ai_run_bindings.created_at``（金额时代 run→主体权威绑定，0027；
+    request_id 与主体都必须一致）；回退 ``ai_budget_reservations.reserved_at``
+    （pre-F 历史行，同 request_id、同主体）。两者都是服务端时间，不能用
+    客户端 ``occurred_at`` 代替迁移边界判断。
+    """
+    if not request_id or not subject_type or not subject_id:
+        return None, None
+    cur.execute(
+        "SELECT created_at FROM ai_run_bindings "
+        "WHERE request_id=%s AND subject_type=%s AND subject_id=%s",
+        (request_id, subject_type, subject_id))
+    row = cur.fetchone()
+    if row is not None and row["created_at"] is not None:
+        return row["created_at"], "run_binding"
+    cur.execute(
+        "SELECT reserved_at FROM ai_budget_reservations "
+        "WHERE request_id=%s AND subject_type=%s AND subject_id=%s",
+        (request_id, subject_type, subject_id))
+    row = cur.fetchone()
+    if row is not None and row["reserved_at"] is not None:
+        return row["reserved_at"], "budget_reservation"
+    return None, None
+
+
+def _event_received_before_migration(row, route):
+    """事件行是否在迁移前已入库（= 已计入迁移 spent，重放只做幂等确认）。
+
+    ``row["received_at"]`` 是 epoch 秒（``_EVENT_SEL``）；``route`` 为
+    :func:`_credit_route_tx` 结果（仅 credits 路由调用）。
+    """
+    migrated_at = (route or {}).get("migrated_at")
+    received = row.get("received_at")
+    if migrated_at is None or received is None:
+        return False
+    return float(received) < migrated_at.timestamp()
+
+
 def _credit_route_tx(cur, *, call_id, subject_type, subject_id,
-                     occurred_at=None):
-    """无锁判定一次调用/事件应走 legacy 还是 Credit 账务（spec §5.1）。
+                     occurred_at=None, request_id=None):
+    """无锁判定一次调用/事件应走 legacy 还是 Credit 账务（spec §5.1/原方案 §9.2）。
 
     优先级：已有 hold（call_id 唯一）以 ``hold.billing_backend`` 为准；
-    否则 ``subject_type='user'`` 且账户 ``billing_backend='credits'`` →
-    credits；但账户已迁移（``credit_migrated_at`` 非空）且 ``occurred_at``
-    早于迁移时刻 → legacy（迁移前迟到事件，按历史口径入账）。
+    否则 ``subject_type='user'`` 且账户 ``billing_backend='credits'``：
+      - ``credit_migrated_at`` 为空（注册即 credits）→ credits；
+      - 已迁移且 ``occurred_at`` 非空（ingest 路径）→ 取**可信服务端运行
+        起始时间**（``ai_run_bindings.created_at``，回退
+        ``ai_budget_reservations.reserved_at``，均要求 request_id 与主体
+        一致）：
+          * 早于迁移时刻 → legacy + late_legacy（真正迁移前的运行）；
+          * 不早于迁移时刻 → credits（与客户端 occurred_at 无关）；
+          * 无证据 → credits；若客户端 occurred_at 早于迁移时刻，标记
+            ``migration_unverified``，由 ingest 建
+            ``migration_boundary_unverified`` 待办（两边都不扣）。
+      - authorize 路径（``occurred_at is None``）行为不变。
 
-    返回足够的路由上下文：
-      ``{billing_backend, account_id, hold_exists, hold,
-         account_is_credits, account_migrated, migrated_at, late_legacy}``。
-
-    ``late_legacy`` 为 True 表示「账户已迁移 but 本次按 legacy 处理」：
-    legacy hold 迟到，或无 hold 且事件发生在迁移前。调用方据此跳过窗口
-    投影并在 audit 标注 ``migration_late_legacy``。
+    返回 ``{billing_backend, account_id, hold_exists, hold,
+    account_is_credits, account_migrated, migrated_at, late_legacy,
+    migration_unverified, migration_evidence_at, migration_evidence_source}``。
+    ``late_legacy`` = True 表示「账户已迁移 but 本次按 legacy 处理」：legacy
+    hold 迟到，或可信证据表明运行开始于迁移前。调用方据此跳过窗口投影并在
+    audit 标注 ``migration_late_legacy``。
     """
     hold = _fetch_hold_by_call(cur, call_id) if call_id else None
     account = None
@@ -2039,18 +2177,31 @@ def _credit_route_tx(cur, *, call_id, subject_type, subject_id,
 
     backend = "legacy"
     late_legacy = False
+    migration_unverified = False
+    evidence_at = None
+    evidence_source = None
     if hold is not None:
         backend = hold["billing_backend"] or "legacy"
         if backend == "legacy" and account_is_credits:
             # legacy hold 迟到：账户迁移前授权、迁移后才结算/投递。
             late_legacy = True
     elif account_is_credits:
-        if migrated_at is not None and occurred_at is not None \
-                and occurred_at < migrated_at:
-            backend = "legacy"
-            late_legacy = True
-        else:
+        if migrated_at is None:
             backend = "credits"
+        else:
+            evidence_at, evidence_source = _migration_evidence_tx(
+                cur, request_id=request_id, subject_type=subject_type,
+                subject_id=subject_id)
+            if evidence_at is not None:
+                if evidence_at < migrated_at:
+                    backend = "legacy"
+                    late_legacy = True
+                else:
+                    backend = "credits"
+            else:
+                backend = "credits"
+                if occurred_at is not None and occurred_at < migrated_at:
+                    migration_unverified = True
 
     return {
         "billing_backend": backend,
@@ -2062,6 +2213,9 @@ def _credit_route_tx(cur, *, call_id, subject_type, subject_id,
         "account_migrated": migrated_at is not None,
         "migrated_at": migrated_at,
         "late_legacy": late_legacy,
+        "migration_unverified": migration_unverified,
+        "migration_evidence_at": evidence_at,
+        "migration_evidence_source": evidence_source,
     }
 
 

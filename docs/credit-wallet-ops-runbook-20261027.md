@@ -37,6 +37,11 @@
   `billing_backend='credits'` 走钱包。
 - 账户冻结（`credit_frozen_reason`）只禁止新消费，不阻止已付款入账、退款与
   对账。
+- **HistoPilot 必须设置 `BILLING_HOLDS_ENABLED=true`**：PathTogether 对
+  credits 用户派发时在 `config.billing_subject.billing_backend` 写入
+  `"credits"`，HistoPilot 据此强制每次调用先拿到有效 hold；关闭 hold 客户端
+  或授权失败时 Credit 运行 **fail-closed（不调用模型）**，不会产生无授权
+  消费。legacy/owner/demo 不受此开关影响。
 
 ## 2. 定时任务
 
@@ -194,6 +199,8 @@ python scripts/migrate_credit_wallets.py set-new-user-backend \
 | paid 未 credited | 订单 `payment_state='paid'` 且 `credited_at IS NULL` 超过 10 分钟（`reconcile` 报 `paid_uncredited`） | 先跑 `sweep` 自动重试；仍失败用 `query --order-id` 取通道证据；核对订单金额/交易号/应用归属。禁止手工加余额，修复后重跑同一 fulfill 路径（`topup:<order_id>` 幂等）。 |
 | unknown 退款 | `credit_refunds.state='unknown'`（网络超时/结果未知） | **保持冻结**，用 `refund-query` 轮询；确认成功 → `refunded` + `cash_refund` 流水；确认未退款且渠道终止 → 才允许重新冻结后重试。未知状态禁止人工解冻或再次发起退款。 |
 | 待核对 hold 超 24h | `pending_reconciliation` 且 `reconciliation_at` 超 24 小时（`reconcile` 报 `pending_reconciliation_overdue`） | 管理员按第 6 节 `retry/release/waive` 处置；保留预占直到有结论，不自动释放、不自动扣负。 |
+| 无授权消费待办（`missing_authorization`） | 无 hold 的 priced/有用量事件（旧客户端、关闭 hold 客户端或调用前授权失败）；`billing.hold_settle` audit 与指标 `credit_usage_without_hold_total` 可见 | 核对 HistoPilot `BILLING_HOLDS_ENABLED` 与调用链；确认事件真实且应收费 → 管理员审核后 `retry`（按其 `charge_nano_cny` 扣费）；确认未执行/错误计量 → `waive` 或 `release`（无 priced 事件时）。**不得**把该待办当成已授权调用自动处置。 |
+| 迁移边界未核实（`migration_boundary_unverified`） | 已迁移账户、无可信服务端运行开始时间、客户端 `occurred_at` 早于 `credit_migrated_at`；audit detail `migration_boundary_unverified=true` | 先核实该调用属于迁移前 legacy 还是迁移后 Credit：**禁止 retry**（会消耗迁移后购买的 paid 批次）。确认不向用户收费 → `waive`；确属迁移前旧费且未计入迁移 spent → 走迁移更正流程，最多调整仍存在的 `legacy_grant`，不足时人工核对/平台承担，不形成用户债务。 |
 | `channel_refund_unmatched` | 支付通知带退款特征但匹配不到本地退款单：订单 `anomaly='channel_refund_unmatched'`，账户 `credit_frozen_reason='payment_reversal'` | 立即核对支付宝后台退款/撤回记录；先核实已消费部分，再决定调整或平台承担。禁止直接解冻继续消费；处理留审计。 |
 | 迁移后迟到 legacy 扣费 | `reconcile` 报 `late_legacy_usage_debit` | 按原 call/hold 的 backend 与迁移边界核对：若该费用已包含在迁移 `spent` → 幂等确认即可；若确属未纳入的新旧费 → 进入迁移差异处理，人工评估调整仍存在的 legacy_grant，**不得自动消耗之后购买的 paid 批次或形成用户债务**。 |
 | 投影/流水/批次不一致 | `reconcile` 报 `account_*` / `lot_*` / `entry_*` 差异 | 停止相关写操作，保存报告，按 `account_id/ref` 人工核对；修复必须走审计流程，禁止直接改余额。 |
@@ -209,9 +216,14 @@ python scripts/migrate_credit_wallets.py set-new-user-backend \
 
 | action | 前置 | 结果 |
 |---|---|---|
-| `retry` | hold 为 `pending_reconciliation` 且 `event_id` 非空 | 用已入库事件的 `charge_nano_cny` 重跑同一结算内核；成功 → `settled`（`resolution='retried'`）；仍不足 → `credit_insufficient`，hold 不变。 |
+| `retry` | hold 为 `pending_reconciliation` 且 `event_id` 非空；`reconciliation_reason` **不是** `migration_boundary_unverified` | 用已入库事件的 `charge_nano_cny` 重跑同一结算内核；成功 → `settled`（`resolution='retried'`）；仍不足 → `credit_insufficient`，hold 不变。 |
 | `release` | hold 为 pending 且无 priced 事件（`event_id` 为空或事件未计价） | 释放预占、不扣费 → `released`（`resolution='released_by_admin'`）。 |
-| `waive` | hold 为 pending 且有 priced 事件（核实为错误计量） | 释放预占、不扣费 → `released`（`resolution='waived_erroneous_metering'`）；reason 必填。 |
+| `waive` | hold 为 pending 且有 priced 事件（核实为错误计量 / 无授权消费 / 迁移前旧费） | 释放预占、不扣费 → `released`（`resolution='waived_erroneous_metering'`）；reason 必填。 |
+
+`migration_boundary_unverified` 的待办**拒绝 retry**（返回
+`credit_state_conflict`）：须先核实归属，再按上表 `waive` 或走迁移更正流程；
+`missing_authorization` 的 `retry` 是「管理员审核确认应收费」后的正式扣费，
+不得由充值到账或定时任务自动触发。
 
 纪律：
 
@@ -230,5 +242,10 @@ python scripts/migrate_credit_wallets.py set-new-user-backend \
 - [ ] `plan` 的 `counts.ready` 与预期一致；`skip_*` 项均有处置结论。
 - [ ] `verify.ok=true` 且 `reconcile.ok=true`。
 - [ ] 小额真实充值 → 消费 → 未消费退款 → 待核对处置全链路已验证。
+- [ ] HistoPilot 以 `BILLING_HOLDS_ENABLED=true` 启动；credits 运行在授权
+      失败/关闭 hold 客户端时 provider 调用数为 0（fail-closed）；legacy /
+      owner / demo 行为未变。
+- [ ] `missing_authorization` 与 `migration_boundary_unverified` 两类待办的
+      处置演练已完成（含 `migration_boundary_unverified` retry 被拒）。
 - [ ] 定时 `sweep`（2 分钟）与每日 `reconcile` 已配置并验证告警可达。
 - [ ] 回滚预案与兼容版本已就绪（理解新账务的版本）。

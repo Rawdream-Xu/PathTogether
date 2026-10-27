@@ -114,16 +114,16 @@ ID 前缀：`lot_<24hex>`、`cla_<24hex>`、`ct<24hex>`（订单号 = 支付宝 
 ### 4.5 待核对处置（管理员）
 
 `resolve_pending_hold(hold_id, *, action, reason, actor_user_id, idempotency_key)`（连接壳，锁顺序 account → hold）：
-- `retry`：hold 为 pending 且 `event_id` 非空 → 用 `ai_usage_events.charge_nano_cny` 重跑 `settle_hold_charge_tx`；成功 → settled（resolution=`retried`）；仍不足 → `CreditInsufficientError`（hold 不变）。
+- `retry`：hold 为 pending 且 `event_id` 非空 → 用 `ai_usage_events.charge_nano_cny` 重跑 `settle_hold_charge_tx`；成功 → settled（resolution=`retried`）；仍不足 → `CreditInsufficientError`（hold 不变）。`reconciliation_reason='migration_boundary_unverified'` 的待办**拒绝 retry**（`CreditStateConflictError`）：须先核实归属，确认不应收费用 waive，确属迁移前旧费走迁移更正流程调整仍存在的 legacy_grant，不得自动消耗迁移后购买的 paid 批次。
 - `release`：hold 为 pending 且无 priced 事件（event_id 为空，或事件 unpriced）→ 释放 → released（resolution=`released_by_admin`）。
-- `waive`：hold 为 pending 且有 priced 事件（核实为错误计量）→ 释放、不扣费 → released（resolution=`waived_erroneous_metering`）。reason 必填 ≥ 4 字。
+- `waive`：hold 为 pending 且有 priced 事件（核实为错误计量或迁移前旧费不向用户收费）→ 释放、不扣费 → released（resolution=`waived_erroneous_metering`）。reason 必填 ≥ 4 字。
 - 全部写 audit `credit.pending_resolved`（含 action/reason/actor）；同 idempotency_key 重放返回原结果。
 
 ## 5. `billing_store.py` 改动（授权 / 结算 / 入库）
 
 ### 5.1 路由判定
 
-- `_credit_route_tx(cur, *, call_id, subject_type, subject_id)`（无锁读取）：hold(call_id) 存在 → 以 `hold.billing_backend` 为准；否则 subject_type='user' 且账户 `billing_backend='credits'` → credits；否则 legacy。
+- `_credit_route_tx(cur, *, call_id, subject_type, subject_id, occurred_at=None, request_id=None)`（无锁读取）：hold(call_id) 存在 → 以 `hold.billing_backend` 为准；否则 subject_type='user' 且账户 `billing_backend='credits'`：未迁移（`credit_migrated_at` 为空）→ credits；已迁移且 ingest 路径 → 取可信服务端运行起始时间（`ai_run_bindings.created_at`，回退 `ai_budget_reservations.reserved_at`，均要求 request_id 与主体一致）：早于迁移 → legacy + late_legacy，不早于 → credits；无证据 → credits，客户端 `occurred_at` 早于迁移时标 `migration_unverified`。authorize 路径（occurred_at=None）不变。
 - `authorize_hold(..., client_capabilities=frozenset())`：新增参数（路由层从请求头 `X-HistoPilot-Billing-Capabilities` 逗号分隔解析）。
 
 ### 5.2 authorize（Credit 分支 `_authorize_credit_hold_tx`）
@@ -159,17 +159,17 @@ pending(event_id 为空)（到期扫描标记）随后收到合法用量并结�
 
 - 新增参数 `credit_ctx=None`（settle 路径传入已锁的 `{acct, hold}`）。
 - 未传 `credit_ctx` 时，在 dedup 之前用 `_credit_route_tx`（主体用 body assertion；随后的权威解析不一致仍 409 回滚）决定路由；credits → 先锁账户、再锁 hold（若有），之后才 `_fetch_event_locked` 与 INSERT。
-- 账户已迁移且路由为 legacy（legacy hold 迟到、或无 hold 且 `occurred_at < credit_migrated_at`）→ **迟到旧事件**：照常入库 + legacy debit（ledger_scope=legacy），**跳过** `_project_window_spent_tx`，audit detail `migration_late_legacy=true`。
+- 账户已迁移且路由为 legacy（legacy hold 迟到、或可信运行证据表明开始于迁移前）→ **迟到旧事件**：照常入库 + legacy debit（ledger_scope=legacy），**跳过** `_project_window_spent_tx`，audit detail `migration_late_legacy=true`。
 - credits 路由（事件为新插入时）：
   - hold 为 open / pending(无事件) → priced：`settle_hold_charge_tx(charge_units=charge)`（charge=0 时只释放，hold settled、actual=0）；
   - unpriced 分两类（“有用量证据” = 事件五个 token 字段任一非空）：
-    - **有用量证据**（真实发生但无法计价，如 `no_active_price_book` / `arithmetic_mismatch` / 时钟越界且带 token）→ 不扣费，hold → pending（`reconciliation_reason='unpriced_usage:<unpriced_reason>'`，event_id 记入，保留预占）；无 hold 时照样建 synthetic hold 后置 pending。两条投递路径一致。
+    - **有用量证据**（真实发生但无法计价，如 `no_active_price_book` / `arithmetic_mismatch` / 时钟越界且带 token）→ 不扣费，hold → pending（`reconciliation_reason='unpriced_usage:<unpriced_reason>'`，event_id 记入，保留预占）；无 hold 时建零预占待核对 hold（见下）。两条投递路径一致。
     - **无用量证据**（五字段全空，含 `no_final_usage`）：settle 路径（`credit_ctx` 非空，客户端声明这是终态用量）→ 同上置 pending（`unpriced_usage:<reason>`）；`/usage-events` 路径 → **不改 hold**、不建 synthetic hold，事件仅作证据入库，`credit_settlement=None`（hold 由随后的 release 或到期扫描决定）。这样 usage outbox 与 settle release 的先后顺序不影响结果。
   - insufficient → hold `pending_reconciliation`（`reconciliation_reason='insufficient_balance'`、`credit_shortfall_units`、`event_id`、`actual_nano_cny=charge`），**保留预占**；
   - hold 已 released → 不扣费，hold 保持 released、记 `reconciliation_reason='usage_after_release'`、`reconciliation_at`（非阻塞待办）；
-  - 无 hold（旧客户端 / hold client 关闭）且事件 priced 或有用量证据 → 同事务建 synthetic hold（`billing_backend='credits'`、`status='open'`、`account_id`、`subject_type='user'`、`call_id`/`session_id`/`model`/`installation_id` 取自事件与调用方、`reserved_nano_cny=0`、`estimated_nano_cny=NULL`、`would_deny=false`、`enforcement_mode`=当前快照、`metadata={synthetic:true, request_hash:null, provider}`、`expires_at=received`），再按上面规则结算（全部从可用余额补充；不足即 pending）。之后同 call_id 的 authorize 因 request_hash 不符得到 `hold_conflict`。
+  - 无 hold（旧客户端 / hold client 关闭 / 调用前授权失败）且事件 priced 或有用量证据 → 同事务直接建 `status='pending_reconciliation'` 的零预占 hold（`billing_backend='credits'`、`reserved_nano_cny=0`、`estimated_nano_cny=NULL`、`event_id`=本事件、`reconciliation_reason='missing_authorization'`（迁移边界无证据时为 `migration_boundary_unverified`）、`reconciliation_at=now`、`actual_nano_cny=charge`（priced）或 NULL、`metadata={synthetic:true, request_hash:null, provider, missing_authorization:true}`、`expires_at=received`）；**不调用** `settle_hold_charge_tx`/批次分配，余额、预占、批次都不变，返回 `credit_settlement='pending_reconciliation'`，写 hold settle audit + 指标 `credit_usage_without_hold_total`。无证据 unpriced 时只入库事件，audit detail 标 `credit_missing_authorization=true` 并记同一指标。之后同 call_id 的 authorize 因 request_hash 不符得到 `hold_conflict`；重复投递返回 pending duplicate，不新增待办。
   - **不调用** `_apply_real_usage_debit_tx` / `_apply_simulated_usage_debit` / `_project_window_spent_tx`。
-- 事件已存在（duplicate，hash 一致）：credits 路由下先看 hold：settled / released / pending(有 event) → 原样返回状态，无副作用；hold 为 open 或 pending(无事件) → **恢复结算**：用已入库事件的 status/charge 按上面的新事件规则执行一次（方案 §6.3“遇到已有相同事件仍检查资金结算状态”），幂等由 `usage:<event_id>` 与 hold 状态保证。`_ingest_usage_event_tx` 返回 dict 追加 `billing_backend`、`credit_settlement`（`settled|pending_reconciliation|released|None`）、`hold_status`、`hold_id`。
+- 事件已存在（duplicate，hash 一致）：credits 路由下先看 hold：settled / released / pending(有 event) → 原样返回状态，无副作用；hold 为 open 或 pending(无事件) → **恢复结算**：用已入库事件的 status/charge 按上面的新事件规则执行一次（方案 §6.3“遇到已有相同事件仍检查资金结算状态”），幂等由 `usage:<event_id>` 与 hold 状态保证。事件行 `received_at` 早于 `credit_migrated_at`（迁移前已入库 = 已计入迁移 spent）的重放只做幂等确认，返回 legacy duplicate，不建待办、不扣费。`_ingest_usage_event_tx` 返回 dict 追加 `billing_backend`、`credit_settlement`（`settled|pending_reconciliation|released|None`）、`hold_status`、`hold_id`、`migration_unverified`。
 - legacy 守卫（迁移后安全）：`_expire_stale_holds_tx`、`_release_hold_reserved_tx`、`_project_window_spent_tx` 在目标是总额度行且该用户账户为 credits 时**跳过** allowance 更新（总额度已被触发器冻结），记指标 `legacy_allowance_update_skipped_credit_wallet_total`；不抛错、不阻断计量。
 - hold 结果写回：settled 时 `status='settled'`、`event_id`、`settled_at`、`actual_nano_cny`；audit `billing.hold_settle` detail 含 `billing_backend:'credits'`、`credit_settlement`。
 
@@ -195,7 +195,7 @@ pending(event_id 为空)（到期扫描标记）随后收到合法用量并结�
 - authorize 错误（credits）：`credit_insufficient` 429、`wallet_restricted` 403、`credit_pricing_unavailable` 503 retryable、`credit_client_upgrade_required` 409；`error.details` 带 `billing_backend:"credits"`。
 - settle 成功：`status` 可为 `pending_reconciliation`（HTTP 200，`ok:true`，`pending_reconciliation:true`）——终态，客户端不得重投；`settled|released` 语义不变；追加 `billing_backend`。
 - usage-events 成功：追加 `billing_backend`、`credit_settlement`（可为 `pending_reconciliation`）。2xx 即投递完成。
-- PT `_ai_reserve_run_budget`：role=user 且账户 credits → 限制 → 403 `wallet_restricted`；可用 ≤ 0 → 429 `credit_insufficient`；否则**一律走 hard 分支**（写 pending run binding，不走 turn 预算），与模式无关。
+- PT `_ai_reserve_run_budget`：role=user 且账户 credits → 限制 → 403 `wallet_restricted`；可用 ≤ 0 → 429 `credit_insufficient`；否则**一律走 hard 分支**（写 pending run binding，不走 turn 预算），与模式无关。credits 时返回的 hard 上下文带 `billing_backend:"credits"`；`_ai_run_prepare`（run/continue/ask/branch 共用）在预占成功后把它写入 `config.billing_subject.billing_backend="credits"`，HistoPilot 据此在授权失败/关闭 hold 客户端/冷启动时 fail-closed。非 credits 用户不加该键。
 
 ## 7. `credit_payments.py`（充值、到账、退款、补偿）
 
