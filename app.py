@@ -10808,6 +10808,95 @@ def _admin_v1_nano_out(value):
 
 
 # --------------------------------------------------------------------------- #
+# Credit 钱包管理出口（spec §9）：units / 分同样是金额整数，wire 十进制字符串
+#
+# 与 nano-CNY 同一理由（JS Number > 2^53 静默失真）：``*_units``、``units``、
+# ``amount_fen`` 一律字符串出线；入口（amount_fen）只接受十进制字符串。
+# --------------------------------------------------------------------------- #
+_ADMIN_CREDIT_IDEM_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_ADMIN_CREDIT_AMOUNT_IN_RE = re.compile(r"^[0-9]{1,19}$")
+
+
+def _admin_v1_credit_amounts_out(value):
+    """递归把 credit_units / amount_fen 整数转为十进制字符串。"""
+    if isinstance(value, dict):
+        out = {}
+        for key, raw in value.items():
+            if (key.endswith("_units") or key in ("units", "amount_fen")) \
+                    and isinstance(raw, int) and not isinstance(raw, bool):
+                out[key] = str(int(raw))
+            else:
+                out[key] = _admin_v1_credit_amounts_out(raw)
+        return out
+    if isinstance(value, list):
+        return [_admin_v1_credit_amounts_out(v) for v in value]
+    return value
+
+
+def _admin_v1_credits_text(units):
+    """credit_units → Credits 十进制字符串（最多 7 位小数，去尾零）。"""
+    import credit_store as _cs
+    units = int(units)
+    whole, frac = divmod(units, _cs.UNITS_PER_CREDIT)
+    if frac == 0:
+        return str(whole)
+    return "%d.%s" % (whole, str(frac).rjust(7, "0").rstrip("0"))
+
+
+def _admin_credit_actor_user_id():
+    """管理写操作的审计主体（真实 owner，不被预览替换；无认证时归一 owner）。"""
+    return actor_identity().get("user_id") or "owner"
+
+
+def _admin_v1_credit_error_response(exc):
+    """Credit 管理错误 → admin v1 信封（code/http_status/retryable 原样映射）。"""
+    code = getattr(exc, "code", None)
+    status = getattr(exc, "http_status", None)
+    if status is None:
+        status = {"hold_not_found": 404, "hold_conflict": 409,
+                  "hold_not_open": 409}.get(code, 400)
+    if not code:
+        code = "credit_error"
+    payload = {
+        "code": code,
+        "message": str(exc) or code,
+        "retryable": bool(getattr(exc, "retryable", False)),
+    }
+    context = getattr(exc, "context", None)
+    if isinstance(context, dict) and context:
+        payload["details"] = context
+    return jsonify(error=payload), int(status)
+
+
+def _admin_v1_credit_write_args(*, min_reason=1):
+    """管理写端点公共入参：``Idempotency-Key`` 头 + body.reason。
+
+    返回 ``(idempotency_key, body, reason, error_response_or_None)``。
+    """
+    idempotency_key = (
+        request.headers.get("Idempotency-Key") or "").strip()
+    if not _ADMIN_CREDIT_IDEM_RE.match(idempotency_key):
+        return None, None, None, _admin_v1_error(
+            400, "invalid_request",
+            "Idempotency-Key 头必填（1–128 位字母/数字/下划线/连字符）")
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        body = {}
+    reason = body.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return None, None, None, _admin_v1_error(
+            400, "invalid_request", "reason 必填")
+    reason = reason.strip()
+    if len(reason) > 500:
+        return None, None, None, _admin_v1_error(
+            400, "invalid_request", "reason 长度超过 500")
+    if len(reason) < min_reason:
+        return None, None, None, _admin_v1_error(
+            400, "invalid_request", "reason 至少 %d 个字符" % min_reason)
+    return idempotency_key, body, reason, None
+
+
+# --------------------------------------------------------------------------- #
 # 2026-10-20（review 一.1/一.3/二）：费用/账务的身份投影与聚合出口
 #
 # 要点（与 review 逐条对应）：
@@ -11527,6 +11616,31 @@ def admin_v1_users():
         spend = _admin_v1_user_spend_wire(spend_by_user.get(uid), u)
         email_norm = str(u.get("email_normalized")
                          or u.get("email") or "") or None
+        # Credit 钱包（spec §9）：每行带 billing_backend；credits 用户附
+        # 钱包摘要（units 十进制字符串），供插件「余额」列显示 Credit 而非
+        # 已冻结的 legacy 总额度。legacy/未开户行保持原样（credit=null）。
+        billing_row = accounts.get(uid)
+        billing_out = None
+        billing_backend = (spend or {}).get("billing_backend")
+        credit_summary = None
+        if billing_row is not None:
+            billing_backend = billing_row.get("billing_backend") \
+                or billing_backend
+            billing_out = _admin_v1_credit_amounts_out(
+                _admin_v1_nano_out(billing_row))
+            if billing_row.get("billing_backend") == "credits":
+                credit_summary = {
+                    "balance_units": str(int(
+                        billing_row.get("credit_balance_units") or 0)),
+                    "reserved_units": str(int(
+                        billing_row.get("credit_reserved_units") or 0)),
+                    "refund_pending_units": str(int(
+                        billing_row.get("credit_refund_pending_units") or 0)),
+                    "available_units": str(int(
+                        billing_row.get("credit_available_units") or 0)),
+                    "restricted_reason": billing_row.get(
+                        "credit_restricted_reason"),
+                }
         items.append({
             "user_id": uid,
             "display_name": u.get("display_name"),
@@ -11555,8 +11669,11 @@ def admin_v1_users():
             # 批次 F：turn_used/turn_limit 字段删除（turn 消费闸退役；
             # 金额侧见 billing/spend 字段）
             # 金额余额（billing；未开户 null，绝不伪造 0 余额账户；金额字段
-            # 十进制字符串化，§5 v0.3）
-            "billing": _admin_v1_nano_out(accounts.get(uid)),
+            # 十进制字符串化，§5 v0.3）；credits 行 units 同样字符串（§9）
+            "billing": billing_out,
+            # spec §9：账务后端 + credits 钱包摘要（余额列显示 Credit）
+            "billing_backend": billing_backend,
+            "credit": credit_summary,
             # Batch B wave 2：按角色/target 互斥的金额投影
             "spend": spend,
             # 2026-10-09 §2：研究数据授权（已授权 granted / 已撤回 withdrawn /
@@ -11673,6 +11790,326 @@ def admin_v1_billing_ledger():
     return jsonify(items=_admin_v1_nano_out(items),
                    next_cursor=next_cursor, limit=limit,
                    identity_search_truncated=search_truncated)
+
+
+# --------------------------------------------------------------------------- #
+# Credit 钱包管理（spec §9；docs/credit-wallet-implementation-spec-20261027.md）
+#
+# - owner-only（_require_owner_admin_v1：预览态 403），admin v1 信封；
+# - credits/units/分全部十进制字符串出线；写端点必带
+#   ``Idempotency-Key``（1–128 位 [A-Za-z0-9_-]）与 body.reason（≤500）；
+# - 数据层全部在 credit_admin.py（惰性 import），本层只做参数/信封/错误映射。
+# --------------------------------------------------------------------------- #
+@app.route("/api/admin/v1/credits/users/<user_id>", methods=["GET"])
+def admin_v1_credits_user(user_id):
+    """用户 Credit 钱包详情：钱包投影 + 批次 + 最近订单/退款 + 待核对 hold。
+
+    未开户/legacy 用户返回 ``billing_backend``（legacy/null）与
+    ``credits_enabled=false``，不伪造 0 Credit 账户；未知用户 404。
+    """
+    auth = _require_owner_admin_v1()
+    if auth:
+        return auth
+    import credit_admin
+    try:
+        detail = credit_admin.user_wallet_detail(user_id)
+    except billing_store.BillingError as exc:
+        return _admin_v1_credit_error_response(exc)
+    except Exception:
+        app.logger.exception("admin v1 credits user detail 读取失败")
+        return _admin_v1_error(500, "internal", "Credit 钱包读取失败")
+    if detail is None:
+        return _admin_v1_error(404, "user_not_found", "用户不存在")
+    return jsonify(_admin_v1_credit_amounts_out(
+        _admin_v1_nano_out(detail)))
+
+
+@app.route("/api/admin/v1/credits/pending", methods=["GET"])
+def admin_v1_credits_pending():
+    """跨账户待办：待核对 hold（最旧优先）+ 异常订单 + unknown/failed 退款
+    + 冻结账户。只读；不含 prompt/密钥/完整支付参数。"""
+    auth = _require_owner_admin_v1()
+    if auth:
+        return auth
+    limit = _admin_v1_limit_arg()
+    import credit_admin
+    try:
+        overview = credit_admin.pending_overview(limit=limit)
+    except billing_store.BillingError as exc:
+        return _admin_v1_credit_error_response(exc)
+    except Exception:
+        app.logger.exception("admin v1 credits pending 读取失败")
+        return _admin_v1_error(500, "internal", "Credit 待办读取失败")
+    return jsonify(_admin_v1_credit_amounts_out(
+        _admin_v1_nano_out(overview)))
+
+
+@app.route("/api/admin/v1/credits/orders", methods=["GET"])
+def admin_v1_credits_orders():
+    """充值订单 keyset 分页（created_at DESC, order_id DESC）。
+
+    可选 ``user_id`` / ``payment_state``（created|paying|paid|closed）；
+    cursor 为服务端不透明编码。
+    """
+    auth = _require_owner_admin_v1()
+    if auth:
+        return auth
+    limit = _admin_v1_limit_arg()
+    raw_cursor = _admin_v1_decode_cursor(request.args.get("cursor"))
+    cursor = None
+    if raw_cursor and "k" in raw_cursor and isinstance(raw_cursor["k"], list) \
+            and len(raw_cursor["k"]) == 2:
+        cursor = (raw_cursor["k"][0], raw_cursor["k"][1])
+    user_id = (request.args.get("user_id") or "").strip() or None
+    payment_state = (request.args.get("payment_state") or "").strip() or None
+    import credit_admin
+    try:
+        page = credit_admin.orders_page(
+            cursor=cursor, limit=limit, user_id=user_id,
+            payment_state=payment_state)
+    except ValueError as exc:
+        return _admin_v1_error(400, "invalid_request", str(exc))
+    except billing_store.BillingError as exc:
+        return _admin_v1_credit_error_response(exc)
+    except Exception:
+        app.logger.exception("admin v1 credits orders 读取失败")
+        return _admin_v1_error(500, "internal", "Credit 订单读取失败")
+    next_cursor = None
+    if page["next_cursor"] is not None:
+        next_cursor = _admin_v1_encode_cursor({"k": list(page["next_cursor"])})
+    return jsonify(items=_admin_v1_credit_amounts_out(
+        _admin_v1_nano_out(page["items"])),
+        next_cursor=next_cursor, limit=limit)
+
+
+@app.route("/api/admin/v1/credits/reconcile", methods=["GET"])
+def admin_v1_credits_reconcile():
+    """Credit 账务对账（只读）：ok + 差异项 + 汇总。"""
+    auth = _require_owner_admin_v1()
+    if auth:
+        return auth
+    import credit_admin
+    try:
+        report = credit_admin.reconcile_status()
+    except billing_store.BillingError as exc:
+        return _admin_v1_credit_error_response(exc)
+    except Exception:
+        app.logger.exception("admin v1 credits reconcile 失败")
+        return _admin_v1_error(500, "internal", "Credit 对账失败")
+    return jsonify(_admin_v1_credit_amounts_out(
+        _admin_v1_nano_out(report)))
+
+
+@app.route("/api/admin/v1/credits/users/<user_id>/grants", methods=["POST"])
+def admin_v1_credits_grant(user_id):
+    """运营赠送 Credits（promotional 批次；幂等键即批次来源键的一部分）。
+
+    body: ``{credits: "12.5"}`` 或 ``{units: "125000000"}``（二选一）+
+    ``reason``；同 key 同内容 → duplicate，不同内容 → 409
+    ``credit_idempotency_conflict``。
+    """
+    auth = _require_owner_admin_v1()
+    if auth:
+        return auth
+    idempotency_key, body, reason, error = _admin_v1_credit_write_args()
+    if error:
+        return error
+    credits_text = body.get("credits")
+    units_raw = body.get("units")
+    units = None
+    if units_raw is not None:
+        if not isinstance(units_raw, str) \
+                or not _ADMIN_CREDIT_AMOUNT_IN_RE.match(units_raw):
+            return _admin_v1_error(
+                400, "invalid_request",
+                "units 须为十进制整数字符串（防 float 失真）")
+        units = int(units_raw)
+    import credit_admin
+    try:
+        result = credit_admin.grant(
+            user_id, credits_text=credits_text, units=units, reason=reason,
+            actor_user_id=_admin_credit_actor_user_id(),
+            idempotency_key=idempotency_key)
+    except billing_store.BillingError as exc:
+        return _admin_v1_credit_error_response(exc)
+    except Exception:
+        app.logger.exception("admin v1 credits grant 失败")
+        return _admin_v1_error(500, "internal", "Credit 赠送失败")
+    result["credits"] = _admin_v1_credits_text(
+        result["lot"]["issued_units"])
+    return jsonify(_admin_v1_credit_amounts_out(result))
+
+
+@app.route("/api/admin/v1/credits/orders/<order_id>/refunds",
+           methods=["POST"])
+def admin_v1_credits_refund_create(order_id):
+    """对已到账充值订单发起原路退款并立即尝试执行。
+
+    body: ``{amount_fen?: "600", reason}``（缺省 amount_fen = 当前可退全额）。
+    执行抛错（如支付配置不可用）时退款保持 ``requested``（继续冻结），
+    响应 ``execution.result="error"`` 供管理台稍后查询/取消。
+    """
+    auth = _require_owner_admin_v1()
+    if auth:
+        return auth
+    idempotency_key, body, reason, error = _admin_v1_credit_write_args()
+    if error:
+        return error
+    try:
+        amount_fen = _admin_v1_amount_in(
+            body.get("amount_fen"), "amount_fen")
+    except ValueError as exc:
+        return _admin_v1_error(400, "invalid_request", str(exc))
+    if amount_fen is not None and amount_fen <= 0:
+        return _admin_v1_error(
+            400, "invalid_request", "amount_fen 需为正整数分")
+    import credit_admin
+    try:
+        result = credit_admin.refund_order(
+            order_id, amount_fen=amount_fen, reason=reason,
+            actor_user_id=_admin_credit_actor_user_id(),
+            idempotency_key=idempotency_key)
+    except billing_store.BillingError as exc:
+        return _admin_v1_credit_error_response(exc)
+    except Exception:
+        app.logger.exception("admin v1 credits refund create 失败")
+        return _admin_v1_error(500, "internal", "退款申请失败")
+    return jsonify(_admin_v1_credit_amounts_out(
+        _admin_v1_nano_out(result)))
+
+
+@app.route("/api/admin/v1/credits/refunds/<refund_id>/query",
+           methods=["POST"])
+def admin_v1_credits_refund_query(refund_id):
+    """查询 sending/unknown 退款（REFUND_SUCCESS → 幂等补记一次）。"""
+    auth = _require_owner_admin_v1()
+    if auth:
+        return auth
+    idempotency_key, body, reason, error = _admin_v1_credit_write_args()
+    if error:
+        return error
+    import credit_admin
+    try:
+        result = credit_admin.refund_query(
+            refund_id, reason=reason,
+            actor_user_id=_admin_credit_actor_user_id(),
+            idempotency_key=idempotency_key)
+    except billing_store.BillingError as exc:
+        return _admin_v1_credit_error_response(exc)
+    except Exception:
+        app.logger.exception("admin v1 credits refund query 失败")
+        return _admin_v1_error(500, "internal", "退款查询失败")
+    return jsonify(_admin_v1_credit_amounts_out(
+        _admin_v1_nano_out(result)))
+
+
+@app.route("/api/admin/v1/credits/refunds/<refund_id>/cancel",
+           methods=["POST"])
+def admin_v1_credits_refund_cancel(refund_id):
+    """取消未发送（requested）或已确定失败（failed）退款；未知结果拒绝。"""
+    auth = _require_owner_admin_v1()
+    if auth:
+        return auth
+    idempotency_key, body, reason, error = _admin_v1_credit_write_args()
+    if error:
+        return error
+    import credit_admin
+    try:
+        result = credit_admin.refund_cancel(
+            refund_id, reason=reason,
+            actor_user_id=_admin_credit_actor_user_id(),
+            idempotency_key=idempotency_key)
+    except billing_store.BillingError as exc:
+        return _admin_v1_credit_error_response(exc)
+    except Exception:
+        app.logger.exception("admin v1 credits refund cancel 失败")
+        return _admin_v1_error(500, "internal", "退款取消失败")
+    return jsonify(_admin_v1_credit_amounts_out(
+        _admin_v1_nano_out(result)))
+
+
+@app.route("/api/admin/v1/credits/refunds/<refund_id>/retry",
+           methods=["POST"])
+def admin_v1_credits_refund_retry(refund_id):
+    """重试 failed 退款（重新冻结 → requested → 执行，复用原请求号）。"""
+    auth = _require_owner_admin_v1()
+    if auth:
+        return auth
+    idempotency_key, body, reason, error = _admin_v1_credit_write_args()
+    if error:
+        return error
+    import credit_admin
+    try:
+        result = credit_admin.refund_retry(
+            refund_id, reason=reason,
+            actor_user_id=_admin_credit_actor_user_id(),
+            idempotency_key=idempotency_key)
+    except billing_store.BillingError as exc:
+        return _admin_v1_credit_error_response(exc)
+    except Exception:
+        app.logger.exception("admin v1 credits refund retry 失败")
+        return _admin_v1_error(500, "internal", "退款重试失败")
+    return jsonify(_admin_v1_credit_amounts_out(
+        _admin_v1_nano_out(result)))
+
+
+@app.route("/api/admin/v1/credits/holds/<hold_id>/resolve", methods=["POST"])
+def admin_v1_credits_hold_resolve(hold_id):
+    """待核对 hold 处置：``{action: retry|release|waive, reason}``。
+
+    retry 需要已定价事件；release 需要无定价事件；waive 需要已定价事件且
+    reason ≥4 字（spec §4.5）；同 Idempotency-Key 重放返回原结果。
+    """
+    auth = _require_owner_admin_v1()
+    if auth:
+        return auth
+    idempotency_key, body, reason, error = _admin_v1_credit_write_args()
+    if error:
+        return error
+    action = body.get("action")
+    if action not in ("retry", "release", "waive"):
+        return _admin_v1_error(
+            400, "invalid_request", "action 需为 retry / release / waive")
+    if action == "waive" and len(reason) < 4:
+        return _admin_v1_error(
+            400, "invalid_request", "waive 的 reason 至少 4 个字符")
+    import credit_admin
+    try:
+        result = credit_admin.resolve_hold(
+            hold_id, action=action, reason=reason,
+            actor_user_id=_admin_credit_actor_user_id(),
+            idempotency_key=idempotency_key)
+    except billing_store.BillingError as exc:
+        return _admin_v1_credit_error_response(exc)
+    except Exception:
+        app.logger.exception("admin v1 credits hold resolve 失败")
+        return _admin_v1_error(500, "internal", "待核对处置失败")
+    return jsonify(_admin_v1_credit_amounts_out(
+        _admin_v1_nano_out(result)))
+
+
+@app.route("/api/admin/v1/credits/users/<user_id>/unfreeze",
+           methods=["POST"])
+def admin_v1_credits_unfreeze(user_id):
+    """清除钱包冻结标记；未冻结 → 幂等 no-op（``already_unfrozen=true``）。"""
+    auth = _require_owner_admin_v1()
+    if auth:
+        return auth
+    idempotency_key, body, reason, error = _admin_v1_credit_write_args()
+    if error:
+        return error
+    import credit_admin
+    try:
+        result = credit_admin.unfreeze(
+            user_id, reason=reason,
+            actor_user_id=_admin_credit_actor_user_id(),
+            idempotency_key=idempotency_key)
+    except billing_store.BillingError as exc:
+        return _admin_v1_credit_error_response(exc)
+    except Exception:
+        app.logger.exception("admin v1 credits unfreeze 失败")
+        return _admin_v1_error(500, "internal", "钱包解冻失败")
+    return jsonify(_admin_v1_credit_amounts_out(result))
 
 
 @app.route("/api/admin/v1/billing/usage-summary", methods=["GET"])

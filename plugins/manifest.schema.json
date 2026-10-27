@@ -97,7 +97,7 @@
       }
     },
     "adminPermissions": {
-      "description": "可选（Manifest v1.1，docs/admin-billing-plugin-implementation-plan.md §8.2/§8.4）：admin 插件申请的管理能力枚举（13 项），与 §8.4 AdminBridge method→permission 映射表一一对应。2026-09-03 wave 2（review-2026-09-02-upload-user-limits-admin-ui-cleanup.md）：删除 admin:turn-budgets:read、admin:turn-budgets:write、admin:billing:write 与 admin:acquisition:read（turn 冻结历史/caps 与人工调账写入口/用户归因全部退役）；并补齐此前漂移缺失的 admin:settings:read/write。2026-09-05（review P0 owner 读隔离）：新增 admin:slides:read/write（切片可见性管理：inventory 清点 + 显式授权/收回）。申请不建立信任——admin 插件信任由代码级 PRIVILEGED_ADMIN_PLUGIN_IDS 白名单 + source-policy 显式 manifest sha256 pin + hash 精确匹配 + installation enabled 共同判定，永远 fail-closed。未声明该字段的旧 manifest 完全不受影响；未知值校验失败。",
+      "description": "可选（Manifest v1.1，docs/admin-billing-plugin-implementation-plan.md §8.2/§8.4）：admin 插件申请的管理能力枚举（14 项），与 §8.4 AdminBridge method→permission 映射表一一对应。2026-09-03 wave 2（review-2026-09-02-upload-user-limits-admin-ui-cleanup.md）：删除 admin:turn-budgets:read、admin:turn-budgets:write、admin:billing:write 与 admin:acquisition:read（turn 冻结历史/caps 与人工调账写入口/用户归因全部退役）；并补齐此前漂移缺失的 admin:settings:read/write。2026-09-05（review P0 owner 读隔离）：新增 admin:slides:read/write（切片可见性管理：inventory 清点 + 显式授权/收回）。2026-10-27（Credit 钱包 spec §9）：新增 admin:credits:write（赠送/退款/待核对处置/解冻；读复用 admin:billing:read，旧 admin:billing:write 继续退役）。申请不建立信任——admin 插件信任由代码级 PRIVILEGED_ADMIN_PLUGIN_IDS 白名单 + source-policy 显式 manifest sha256 pin + hash 精确匹配 + installation enabled 共同判定，永远 fail-closed。未声明该字段的旧 manifest 完全不受影响；未知值校验失败。",
       "type": "array",
       "items": {
         "enum": [
@@ -113,7 +113,8 @@
           "admin:plugins:read",
           "admin:plugins:write",
           "admin:settings:read",
-          "admin:settings:write"
+          "admin:settings:write",
+          "admin:credits:write"
         ]
       }
     },

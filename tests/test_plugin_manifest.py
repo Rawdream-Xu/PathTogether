@@ -422,7 +422,7 @@ def test_capability_tool_name_mangling():
 # admin:slides:read/write（切片可见性管理：inventory 清点 + 显式授权/收回）。
 # --------------------------------------------------------------------------- #
 def test_manifest_admin_permissions_enum_locked():
-    """SDK 词表精确等于 13 项；turn/acquisition/billing:write 全退。"""
+    """SDK 词表精确等于 14 项；turn/acquisition/billing:write 全退。"""
     assert M.MANIFEST_ADMIN_PERMISSIONS == (
         "admin:overview:read",
         "admin:users:read",
@@ -437,6 +437,8 @@ def test_manifest_admin_permissions_enum_locked():
         "admin:plugins:write",
         "admin:settings:read",
         "admin:settings:write",
+        # 2026-10-27 Credit 钱包管理（spec §9）：写动作独立权限域
+        "admin:credits:write",
     )
 
 
