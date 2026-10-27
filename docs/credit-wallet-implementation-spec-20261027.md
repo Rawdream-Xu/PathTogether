@@ -263,4 +263,16 @@ owner-only（`_require_owner_admin_v1`，预览态 403），admin v1 信封，�
 - 遵守工作区 SSD2 约定：`/mnt/ssd2/tests/run-credit-<阶段>-XXXXXX`，启动前设 TMPDIR/TMP/TEMP，pytest `--basetemp` 与 `-o cache_dir` 指向运行目录。PT venv：`/home/solarise/ZCodeProject/histopilot-suite/PathTogether/.venv/bin/python`。
 - 新表须加入 `tests/conftest.py` 的 `_BUSINESS_TABLES`。
 - 必须覆盖方案 §11 中与本阶段相关的行；并发用例用两个真实连接 + 线程/屏障，验证无超分配、无死锁、余额非负。
+
+## 13. 实施状态与验收（2026-10-27）
+
+- 提交（均未推送、未部署）：PT `credit-wallet` 4a0f08fd → ffef01f6 → 8ab392ee → 7fdab91a → 5556ddfb → f292a02b → 1e6d9a7a → edb5aa07（管理面，合并为 e29b428d）→ cee0519b（验收修复）；HP `hp-credit-wallet` fbaa377 → 4e329c2 → 2d74d4c。
+- 门禁：
+  - PT 全量 pytest（e29b428d）：3877 passed / 113 skipped / 1 failed（迁移清单测试未含 0088，cee0519b 修复，相关定向复跑 171 passed）。
+  - PT vitest 全量（cee0519b）：92 files / 1565 passed；Playwright 全量（cee0519b）：156 passed / 43 skipped。
+  - HP：契约对真实 PT 56 passed；单测 1691 passed；`tsconfig.build.json` 类型检查 0 错误。含 `test/` 的全量 `tsconfig.json` 有 116 个错误，均为基线 7888baa 既有（基线 117 个，逐文件分布相同，本分支修掉 1 个）。
+- 浏览器验收（本地内嵌 PG、沙箱模式、本地密钥签名的模拟支付宝通知）：账户 popover（credits / legacy）；充值页桌面 / 手机 / 中英文，默认 ¥20、选 ¥50 摘要联动；建单得到沙箱网关 RSA2 签名 URL（return_url 指向订单页）；模拟 TRADE_SUCCESS 通知到账，重放幂等、改金额验签失败；订单页显示已到账，充值记录与 Credit 明细更新；legacy 用户充值禁用并说明原因；管理台用户列表 Credit 列、详情抽屉钱包 / 批次 / 订单、运营赠送（二次确认后入账）、Credit 待办与对账 ok。
+- 验收发现并已修复（cee0519b）：订单页回到前台时每次可见性事件多起一条轮询链；手机顶栏残留分隔线；英文标题未翻译。
+- 注意：沙箱模式下订单页轮询会让服务端按同单 3 秒节流向支付宝沙箱网关发 `alipay.trade.query`。本地验收若要求零外网，验收服务须桩掉 `support_payments.query_trade`。
+- 待用户批准、尚未执行：生产库迁移（运维手册 §3）、开启充值（`CREDIT_TOPUP_ENABLED` + 公网 notify_url）、定时 sweep / 每日 reconcile、真实小额充值 → 消费 → 退款全链路（需手机付款）。admin 插件 0.4.20 与其他未发布分支撞号，发布时需重新编号。
 - 不改现有测试断言来迁就新行为；行为确有变化时在提交说明里列出并说明理由。
