@@ -1534,6 +1534,92 @@ def _collect_site_visit(resp):
     return resp
 
 
+# --------------------------------------------------------------------------- #
+# 用户「最近活跃」采集（0089，2026-10-27）：after_request best-effort。
+#
+# 口径（只认**真实登录用户自己的 session**，即 session["user_id"]）：
+#   - 顶层页面导航：Sec-Fetch-Mode: navigate 或 Sec-Fetch-Dest: document；
+#     无 Sec-Fetch 头（旧浏览器/测试客户端）回退为 GET + 路径不以 /api/、
+#     /static/（及插件静态前缀）开头 + Accept 含 text/html；
+#   - 改变状态的请求：POST/PUT/PATCH/DELETE。
+# 不计入：静态资源、瓦片与轮询类 XHR GET（非 navigate）、无用户 session 的
+# 插件/内部 token 请求、/internal/*。身份预览（S4）下 session["user_id"] 仍是
+# **真实管理员**；这里绝不读 current_identity()/effective subject，因此预览
+# 请求不会把被预览用户标为活跃（管理员本人照常算活跃）。
+#
+# 节流：进程内 per-user monotonic 5 分钟（跨进程由 user_store.record_activity
+# 的 SQL 条件兜底）。写失败只记节流 warning，绝不影响响应；不记录 user_id/
+# 路径等原始值到日志。
+# --------------------------------------------------------------------------- #
+_USER_ACTIVITY_THROTTLE_SECONDS = 300.0
+#: user_id -> time.monotonic()；进程重启后清空，DB 条件保证不会重复写。
+_user_activity_last_mono = {}
+_USER_ACTIVITY_WARN_INTERVAL_SECONDS = 300
+_user_activity_warn_last = {"ts": None}  # None = 从未记过（首条必发）
+
+
+def _reset_user_activity_throttle_state():
+    """测试辅助：清空进程内活跃节流与告警节流状态。"""
+    _user_activity_last_mono.clear()
+    _user_activity_warn_last["ts"] = None
+
+
+def _warn_user_activity_throttled() -> None:
+    """活跃写入故障节流 warning（同类一条/5 分钟；不含用户/路径等原始值）。"""
+    now = time.monotonic()
+    last = _user_activity_warn_last["ts"]
+    if last is not None and now - last < _USER_ACTIVITY_WARN_INTERVAL_SECONDS:
+        return
+    _user_activity_warn_last["ts"] = now
+    app.logger.warning(
+        "[activity] 最近活跃写入失败（best-effort，不影响响应；"
+        "300s 节流窗口内同类仅记本条）", exc_info=True)
+
+
+def _is_user_activity_request() -> bool:
+    """本次请求是否计入「最近活跃」（见上方口径注释）。仅请求侧判定。"""
+    method = request.method
+    if method in ("POST", "PUT", "PATCH", "DELETE"):
+        return True
+    if method != "GET":
+        return False
+    path = request.path or ""
+    if path.startswith("/internal/"):
+        return False
+    # 静态/资源通道（含插件 UI 与 admin iframe 的 CSS/JS）不是用户活跃。
+    if path.startswith(_CSRF_STATIC_PREFIXES):
+        return False
+    mode = (request.headers.get("Sec-Fetch-Mode") or "").strip().lower()
+    dest = (request.headers.get("Sec-Fetch-Dest") or "").strip().lower()
+    if mode or dest:
+        return mode == "navigate" or dest == "document"
+    # 无 Sec-Fetch 头的回退口径：GET + 非 API + 浏览器接受 HTML。
+    if path.startswith("/api/"):
+        return False
+    accept = (request.headers.get("Accept") or "").lower()
+    return "text/html" in accept
+
+
+@app.after_request
+def _record_user_activity(resp):
+    """真实登录用户活跃时间 best-effort 写入（0089；见节注释口径）。"""
+    try:
+        uid = session.get("user_id")
+        if not uid or not _is_user_activity_request():
+            return resp
+        now = time.monotonic()
+        last = _user_activity_last_mono.get(uid)
+        if last is not None and now - last < _USER_ACTIVITY_THROTTLE_SECONDS:
+            return resp
+        # 先记节流时间再写库：DB 瞬时故障时 5 分钟内不再重试，避免每次请求
+        # 都打库；跨进程/重启后的兜底在 SQL 条件里。
+        _user_activity_last_mono[uid] = now
+        user_store.record_activity(uid)
+    except Exception:
+        _warn_user_activity_throttled()
+    return resp
+
+
 def _safe_next_path(candidate) -> str:
     """登录 next 白名单校验：只允许站内绝对路径（plain path）。
 
@@ -11479,17 +11565,20 @@ def admin_v1_users():
 
     每行：display name、login ID 掩码、role、enabled、ai_access、创建时间、
     注册方式、``account_kind``（real|dogfood）、``last_login_at``（格式与
-    created_at 相同的 epoch 秒；未登录过 null）、金额余额/caps（未开户
-    null；json 后端 null）、最近 AI 调用时间（json 后端 null）、
+    created_at 相同的 epoch 秒；未登录过 null）、``last_active_at``（0089：
+    最近一次页面导航/写请求时间，同格式；暂无记录 null），金额余额/caps
+    （未开户 null；json 后端 null）、最近 AI 调用时间（json 后端 null）、
     ``research``（2026-10-09 §2：``{state: "granted"|"withdrawn"|null,
     granted: bool}``，user_research_consents 单条批量查询装配）。
 
     - ``kind=real|dogfood|all``（默认 real）：按 users.account_kind 筛选
       （all = 不筛选）；
-    - ``sort=joined_desc|joined_asc|last_login_desc``（默认 joined_desc）：
-      **分页前**对全量完成排序，user_id 作稳定次键；``last_login_desc`` 下
-      ``last_login_at IS NULL`` 恒排末尾（同样按 user_id 稳定）。前端切换
-      筛选/排序时清空 cursor（offset 分页在全量排序后切片，语义稳定）。
+    - ``sort=joined_desc|joined_asc|last_login_desc|last_active_desc``（默认
+      joined_desc）：**分页前**对全量完成排序，user_id 作稳定次键；
+      ``last_login_desc`` / ``last_active_desc`` 下对应时间 IS NULL 恒排末尾
+      （同样按 user_id 稳定）。``last_login_desc`` 保留兼容（旧前端仍可用），
+      管理台列表默认改用 ``last_active_desc``。前端切换筛选/排序时清空
+      cursor（offset 分页在全量排序后切片，语义稳定）。
     - ``research=abnormal``（2026-10-20 §三）：只保留**有异常删除任务**
       （重试耗尽的终态 failed，待人工处置）的用户——概览「待处理研究数据
       任务 N」点入即带此参数；其余取值 400（不做隐式兜底）。
@@ -11517,10 +11606,12 @@ def admin_v1_users():
         return _admin_v1_error(
             400, "invalid_request", "kind 需为 real / dogfood / all")
     sort = (request.args.get("sort") or "joined_desc").strip() or "joined_desc"
-    if sort not in ("joined_desc", "joined_asc", "last_login_desc"):
+    if sort not in ("joined_desc", "joined_asc", "last_login_desc",
+                    "last_active_desc"):
         return _admin_v1_error(
             400, "invalid_request",
-            "sort 需为 joined_desc / joined_asc / last_login_desc")
+            "sort 需为 joined_desc / joined_asc / last_login_desc / "
+            "last_active_desc")
     # 2026-10-20 §三：research=abnormal 只看有异常（终态 failed）删除任务的
     # 用户；空串/缺键 = 不筛选（未知取值显式 400，不静默忽略）
     research_f = (request.args.get("research") or "").strip() or None
@@ -11533,14 +11624,15 @@ def admin_v1_users():
         users = [u for u in users
                  if (u.get("account_kind") or "real") == kind]
     # 排序在分页前对全量完成（§2：用户量小，内存排序 + offset 分页）；
-    # user_id 稳定次键；last_login_at IS NULL 恒排末尾。
+    # user_id 稳定次键；对应时间 IS NULL 恒排末尾。
     if sort == "joined_asc":
         users.sort(key=lambda u: (float(u.get("created_at") or 0.0),
                                   str(u.get("user_id") or "")))
-    elif sort == "last_login_desc":
+    elif sort in ("last_login_desc", "last_active_desc"):
+        field = "last_active_at" if sort == "last_active_desc" else "last_login_at"
         users.sort(key=lambda u: (
-            u.get("last_login_at") is None,
-            -(float(u.get("last_login_at") or 0.0)),
+            u.get(field) is None,
+            -(float(u.get(field) or 0.0)),
             str(u.get("user_id") or "")))
     else:
         users.sort(key=lambda u: (-float(u.get("created_at") or 0.0),
@@ -11663,6 +11755,8 @@ def admin_v1_users():
             # 未登录过 null——「暂无记录」）
             "account_kind": u.get("account_kind") or "real",
             "last_login_at": u.get("last_login_at"),
+            # 0089：最近活跃（页面导航/写请求；抽屉仍展示 last_login_at）
+            "last_active_at": u.get("last_active_at"),
             "registration_method": reg_methods.get(uid, "manual"),
             # 批次 D1（§4.4）：campaign/source 用户级归因字段整键删除
             #（历史数据仍冻结在 user_acquisition 表，仅审计工具可达）

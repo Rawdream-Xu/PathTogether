@@ -147,19 +147,20 @@ test.describe("管理工作台 Chromium E2E（§10.2）", () => {
 		await frame.locator('.adm-nav-btn[data-page="users"]').click();
 		await expect(frame.locator("#adm-users-tbody")).toContainText(
 			"e2e-user@pt.test", { timeout: 10_000 });
-		// 2026-10-08 §2 + 2026-10-09 round4 §2.2：主表六列（用户/加入时间/
-		// 最近登录/余额/研究数据/分类）——分类默认正式用户；掩码登录账号/
+		// 2026-10-08 §2 + 2026-10-09 round4 §2.2 + 0089：主表六列（用户/加入时间/
+		// 最近活跃/余额/研究数据/分类）——分类默认正式用户；掩码登录账号/
 		// 启停收进抽屉（§4.3 + 2026-10-08）
 		await expect(frame.locator("#adm-users-table")).toContainText("加入时间");
-		await expect(frame.locator("#adm-users-table")).toContainText("最近登录");
+		await expect(frame.locator("#adm-users-table")).toContainText("最近活跃");
 		await expect(frame.locator("#adm-users-table")).toContainText("余额");
 		await expect(frame.locator("#adm-users-table")).toContainText("研究数据");
 		await expect(frame.locator("#adm-users-table")).toContainText("分类");
 		await expect(frame.locator("#adm-users-tbody")).toContainText("正式用户");
-		// 抽屉主视图仍是总额度字段（r3-wave2 单轨）
+		// 抽屉主视图仍是总额度字段（r3-wave2 单轨）；0089：抽屉保留「最近登录」
 		const userRow = frame.locator("#adm-users-tbody tr", { hasText: "e2e-user@pt.test" });
 		await userRow.locator("button", { hasText: "详情" }).click();
 		await expect(frame.locator("#adm-user-drawer")).toBeVisible();
+		await expect(frame.locator("#adm-drawer-body")).toContainText("最近登录");
 		await expect(frame.locator("#adm-drawer-body")).toContainText("总额度");
 		await expect(frame.locator("#adm-drawer-body")).toContainText("累计已用");
 		await expect(frame.locator("#adm-drawer-body")).toContainText("额度来源");
@@ -675,7 +676,7 @@ test.describe("UI 升级 2026-09-01 — 桌面 1440×900（批次 E）", () => {
 		await shot(page, "after-1440-overview.png");
 	});
 
-	test("13. users: 六列表头（用户/加入时间/最近登录/余额/研究数据/分类）+ 分类筛选；限额户详情抽屉见已用尽", async ({ page }) => {
+	test("13. users: 六列表头（用户/加入时间/最近活跃/余额/研究数据/分类）+ 分类筛选；限额户详情抽屉见已用尽", async ({ page }) => {
 		await gotoAdminReady(page);
 		const frame = page.frameLocator("#admin-plugin-frame");
 		await frame.locator('.adm-nav-btn[data-page="users"]').click();
@@ -684,10 +685,10 @@ test.describe("UI 升级 2026-09-01 — 桌面 1440×900（批次 E）", () => {
 			.poll(async () => frame.locator("#adm-state-users").getAttribute("data-page-state"))
 			.toBe("ready", { timeout: 10_000 });
 		const table = frame.locator("#adm-users-table");
-		// 2026-10-08 §2 + 2026-10-09 round4 §2.2：主表六列
+		// 2026-10-08 §2 + 2026-10-09 round4 §2.2 + 0089：主表六列
 		await expect(table).toContainText("用户");
 		await expect(table).toContainText("加入时间");
-		await expect(table).toContainText("最近登录");
+		await expect(table).toContainText("最近活跃");
 		await expect(table).toContainText("余额");
 		await expect(table).toContainText("研究数据");
 		await expect(table).toContainText("分类");
@@ -1147,7 +1148,7 @@ test.describe("UI 升级 2026-09-01 — 移动 390×844（批次 E）", () => {
     await expect(frame.locator("#adm-page-users")).toBeVisible();
   });
 
-  test("21. 390 users: 6 列卡片布局（用户/加入时间/最近登录/余额/研究数据/分类）、无水平溢出", async ({ page }) => {
+  test("21. 390 users: 6 列卡片布局（用户/加入时间/最近活跃/余额/研究数据/分类）、无水平溢出", async ({ page }) => {
     await gotoAdminReady(page);
     const frame = page.frameLocator("#admin-plugin-frame");
     await frame.locator('#adm-nav-toggle').click();
@@ -1163,7 +1164,7 @@ test.describe("UI 升级 2026-09-01 — 移动 390×844（批次 E）", () => {
     // 分类筛选在窄屏可见
     await expect(frame.locator('.adm-kind-btn[data-kind="real"]')).toBeVisible();
     // P0-2：几何断言（iframe 文档视口）——toBeVisible 不足以防截断。
-    // DOM 列序固定：td[0]=用户 td[1]=加入时间 td[2]=最近登录 td[3]=余额
+    // DOM 列序固定：td[0]=用户 td[1]=加入时间 td[2]=最近活跃 td[3]=余额
     // td[4]=研究数据 td[5]=分类；窄屏为每行 2 列卡片网格（首末单元格跨双列），
     // 全部单元格 right 边必须落在视口内。
     const geo = await row.evaluate((tr) => {
@@ -1198,7 +1199,7 @@ test.describe("UI 升级 2026-09-01 — 移动 390×844（批次 E）", () => {
       expect(b && b.right !== undefined && b.right <= geo.vw + 1,
         `${key} cell right edge within iframe viewport`).toBe(true);
     }
-    // 6 列布局：可见单元格恰为 6（用户/加入时间/最近登录/余额/研究数据/分类）
+    // 6 列布局：可见单元格恰为 6（用户/加入时间/最近活跃/余额/研究数据/分类）
     expect(geo.visibleCells, "390px users table shows exactly 6 columns").toBe(6);
     // 放大字号后，时间仍须横向可读，不能靠逐字折行伪装成无溢出。
     expect(geo.joined!.width).toBeGreaterThanOrEqual(120);

@@ -213,6 +213,11 @@ def test_users_pagination_search_and_filters():
     r0 = c.get("/api/admin/v1/users?limit=100&sort=last_login_desc").get_json()
     assert len(r0["items"]) == 6
     assert all(item["last_login_at"] is None for item in r0["items"])
+    # 0089：last_active_at 字段随行返回 + last_active_desc（同样全空）
+    assert all(item["last_active_at"] is None for item in r0["items"])
+    r0 = c.get("/api/admin/v1/users?limit=100&sort=last_active_desc").get_json()
+    assert len(r0["items"]) == 6
+    assert all(item["last_active_at"] is None for item in r0["items"])
     assert all(item["account_kind"] == "real" for item in r0["items"])
 
     # 搜索（login id / 显示名）

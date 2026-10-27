@@ -38,6 +38,7 @@ _PUBLIC_NAMES = (
     "list_users",
     "set_user_disabled",
     "record_login_success",
+    "record_activity",
     "ACCOUNT_KINDS",
     "set_user_account_kind",
     "set_user_password",

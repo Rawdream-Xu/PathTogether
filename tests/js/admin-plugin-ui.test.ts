@@ -857,7 +857,7 @@ describe("pathtogether-admin plugin UI — workbench KPI + drawer (§9, 包 E)",
 		});
 	}
 
-	it("users table: 六列（用户/加入时间/最近登录/余额/研究数据/分类）+ 行内分类切换与详情抽屉（2026-10-08 §2；2026-10-09 round4 §2.2）", async () => {
+	it("users table: 六列（用户/加入时间/最近活跃/余额/研究数据/分类）+ 行内分类切换与详情抽屉（2026-10-08 §2；2026-10-09 round4 §2.2；0089 最近活跃）", async () => {
 		const bus = loadPluginUiWithBus();
 		bootWithOverview(bus);
 		bus.client!.showPage("users");
@@ -879,6 +879,7 @@ describe("pathtogether-admin plugin UI — workbench KPI + drawer (§9, 包 E)",
 						user_id: "u1", display_name: "张三", identity: "zhang@x.com",
 						role: "user", enabled: true, ai_access: true, account_kind: "real",
 						created_at: 1700000000, last_login_at: 1700000100,
+						last_active_at: 1700000200,
 						// round4 §2.2：研究授权三态之一——已授权
 						research: { state: "granted", granted: true },
 						spend: {
@@ -895,6 +896,7 @@ describe("pathtogether-admin plugin UI — workbench KPI + drawer (§9, 包 E)",
 						role: "user", enabled: true, ai_access: false,
 						account_kind: "dogfood",
 						created_at: 1700000000, last_login_at: null,
+						last_active_at: null,
 						// 已撤回：state=withdrawn（granted=false）
 						research: { state: "withdrawn", granted: false },
 					},
@@ -903,6 +905,7 @@ describe("pathtogether-admin plugin UI — workbench KPI + drawer (§9, 包 E)",
 						role: "user", enabled: true, ai_access: false,
 						account_kind: "real",
 						created_at: 1700000000, last_login_at: null,
+						last_active_at: null,
 						// 未授权：state=null / granted=false
 						research: { state: null, granted: false },
 					},
@@ -913,12 +916,14 @@ describe("pathtogether-admin plugin UI — workbench KPI + drawer (§9, 包 E)",
 		await ticks(4);
 		const tbodyEl = bus.els["adm-users-tbody"];
 		const tbody = tbodyEl.textContent;
-		// 用户列 = 显示名 + 邮箱（sub 行）；加入时间/最近登录（上海时间，GMT+8）；
+		// 用户列 = 显示名 + 邮箱（sub 行）；加入时间/最近活跃（上海时间，GMT+8）；
 		// 分类列 = 标签（正式用户/Dogfood）+ 标为 Dogfood/改为正式 + 详情
 		expect(tbody).toContain("张三");
 		expect(tbody).toContain("zhang@x.com");
 		expect(tbody).toContain("2023-11-15 06:13:20 GMT+8");
-		expect(tbody).toContain("暂无记录"); // u2/u3 从未登录（last_login_at null）
+		// 0089：列表列显示 last_active_at（1700000200 → 06:16:40 GMT+8）
+		expect(tbody).toContain("2023-11-15 06:16:40 GMT+8");
+		expect(tbody).toContain("暂无记录"); // u2/u3 last_active_at null
 		expect(tbody).toContain("正式用户");
 		expect(tbody).toContain("Dogfood");
 		expect(tbody).toContain("标为 Dogfood");
@@ -947,12 +952,15 @@ describe("pathtogether-admin plugin UI — workbench KPI + drawer (§9, 包 E)",
 		const detailBtns = bus.created.filter((el) => el.textContent === "详情" &&
 			el._listeners && el._listeners.click);
 		expect(detailBtns.length).toBe(3);
-		// 详情抽屉保留额度主视图 + 分类/最近登录
+		// 详情抽屉保留额度主视图 + 分类/最近登录（0089：列表改最近活跃，
+		// 抽屉仍显示 last_login_at）
 		detailBtns[0]!._fire("click", {});
 		expect(bus.els["adm-user-drawer"].hidden).toBe(false);
 		const body = bus.els["adm-drawer-body"].textContent;
 		expect(body).toContain("分类");
 		expect(body).toContain("最近登录");
+		expect(body).toContain("2023-11-15 06:15:00 GMT+8");
+		expect(body).not.toContain("最近活跃");
 		expect(body).toContain("总额度");
 		expect(body).toContain("剩余 16.08 CNY");
 	});
@@ -1084,14 +1092,14 @@ describe("pathtogether-admin plugin UI — workbench KPI + drawer (§9, 包 E)",
 			.at(-1);
 		expect((switched!.env.payload as Record<string, unknown>).kind).toBe("dogfood");
 		expect((switched!.env.payload as Record<string, unknown>).cursor).toBeNull();
-		// 切排序：cursor 重置、sort=last_login_desc、kind 保持
-		bus.doc.getElementById("adm-users-sort")!.value = "last_login_desc";
+		// 切排序：cursor 重置、sort=last_active_desc、kind 保持（0089）
+		bus.doc.getElementById("adm-users-sort")!.value = "last_active_desc";
 		bus.els["adm-users-sort"]._fire("change", {});
 		await ticks(2);
 		const sorted = bus.parentPosted
 			.filter((p) => p.env.kind === "request" && p.env.method === "admin.users.list")
 			.at(-1);
-		expect((sorted!.env.payload as Record<string, unknown>).sort).toBe("last_login_desc");
+		expect((sorted!.env.payload as Record<string, unknown>).sort).toBe("last_active_desc");
 		expect((sorted!.env.payload as Record<string, unknown>).cursor).toBeNull();
 		expect((sorted!.env.payload as Record<string, unknown>).kind).toBe("dogfood");
 	});
@@ -1692,16 +1700,20 @@ describe("UI 批次A 锁定（wave 2 重写版）", () => {
 	});
 
 	// §2/§4.8 390px 列适配（CSS 断言；2026-10-08 四列 → 2026-10-09 round4 §2.2 六列）
-	it("批次A-8: 用户表六列表头（用户/加入时间/最近登录/余额/研究数据/分类）、分类组件、日期不 break-all", () => {
+	it("批次A-8: 用户表六列表头（用户/加入时间/最近活跃/余额/研究数据/分类）、分类组件、日期不 break-all", () => {
 		const usersPage = htmlSrc.slice(htmlSrc.indexOf('id="adm-page-users"'),
 			htmlSrc.indexOf('id="adm-page-slides"'));
 		// 六列主表：无次要列/无旧角色·状态列
 		expect(usersPage).toContain("<th>用户</th>");
 		expect(usersPage).toContain("<th>加入时间</th>");
-		expect(usersPage).toContain("<th>最近登录</th>");
+		expect(usersPage).toContain("<th>最近活跃</th>");
+		expect(usersPage).not.toContain("<th>最近登录</th>");
 		expect(usersPage).toContain("<th>余额</th>");
 		expect(usersPage).toContain("<th>研究数据</th>");
 		expect(usersPage).toContain("<th>分类</th>");
+		// 0089：说明文字区分列表「最近活跃」与抽屉「最近登录」
+		expect(usersPage).toContain("最近一次打开页面或进行操作的时间");
+		expect(usersPage).toContain("「最近登录」仍可在「详情」抽屉查看");
 		expect(usersPage).not.toMatch(/<th[^>]*adm-col-secondary[^>]*>角色</);
 		expect(usersPage).not.toMatch(/<th[^>]*>登录账号</);
 		expect(usersPage).not.toMatch(/<th[^>]*>额度剩余</);
@@ -1715,7 +1727,8 @@ describe("UI 批次A 锁定（wave 2 重写版）", () => {
 		expect(usersPage).toContain('id="adm-users-sort"');
 		expect(usersPage).toContain('value="joined_desc"');
 		expect(usersPage).toContain('value="joined_asc"');
-		expect(usersPage).toContain('value="last_login_desc"');
+		expect(usersPage).toContain('value="last_active_desc"');
+		expect(usersPage).not.toContain('value="last_login_desc"');
 		// 分类标签/按钮样式存在
 		expect(cssSrc).toMatch(/\.adm-kind-tag\s*{/);
 		expect(cssSrc).toMatch(/\.adm-kind-btn\[aria-pressed="true"\]/);

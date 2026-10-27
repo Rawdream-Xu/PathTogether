@@ -612,7 +612,7 @@ describe("AdminBridge host — PR3b read backend proxy (§9 Admin API v1)", () =
 	it("admin.users.list maps cursor/limit/filters/kind/sort into the query string", async () => {
 		const { handle, posted, contentWindow } = makeReadHost(async (url) => {
 			expect(url).toBe(
-				"/api/admin/v1/users?cursor=abc&limit=25&q=alice&enabled=true&ai_access=false&kind=dogfood&sort=last_login_desc",
+				"/api/admin/v1/users?cursor=abc&limit=25&q=alice&enabled=true&ai_access=false&kind=dogfood&sort=last_active_desc",
 			);
 			return { status: 200, ok: true, body: { items: [], next_cursor: null } };
 		});
@@ -621,7 +621,7 @@ describe("AdminBridge host — PR3b read backend proxy (§9 Admin API v1)", () =
 			source: contentWindow,
 			data: requestEnv(nonce0(posted), "r1", "admin.users.list", {
 				cursor: "abc", limit: 25, q: "alice", enabled: true, ai_access: false,
-				kind: "dogfood", sort: "last_login_desc",
+				kind: "dogfood", sort: "last_active_desc",
 			}),
 		});
 		await ticks();
