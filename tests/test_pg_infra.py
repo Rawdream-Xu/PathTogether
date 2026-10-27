@@ -355,6 +355,10 @@ def test_schema_migrations_recorded(conn):
         # password-reset 分支占用）：订单/通知事件/退款 + 下单与退款幂等键
         # 的后绑定别名表。
         "0087_support_payments.sql",
+        # Credit 钱包：credit_lots / 流水与预占分配 / 充值订单 / 支付事件 /
+        # 退款六表 + billing_accounts / billing_ledger_entries / billing_holds
+        # 的 credits 列（ledger_scope、pending_reconciliation 等）。
+        "0088_credit_wallet.sql",
     ]
 
 

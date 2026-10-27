@@ -604,6 +604,7 @@ input:focus-visible {
   .credit-topbar-inner { height: 62px; padding: 0 20px; }
   .credit-brand { gap: 9px; font-size: 17px; }
   .credit-brand .site-logo { width: 32px; height: 32px; }
+  .credit-brand-sep,
   .credit-brand-page { display: none; }
   .credit-nav-link span { display: none; }
   .credit-main { padding: 26px 18px 14px; }

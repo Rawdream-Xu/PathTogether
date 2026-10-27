@@ -455,3 +455,99 @@ describe("账户 popover：credits/legacy/owner", () => {
 		expect(h.els["acct-topup-link"].hidden).toBe(true);
 	});
 });
+
+/* ------------------------------------------------------------------------- *
+ * 订单结果页轮询：任何时刻至多一个查单请求在途、至多一个待触发定时器
+ * （回前台的提前查询不能在查询在途时另起一条轮询链）
+ * ------------------------------------------------------------------------- */
+describe("订单结果页轮询", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.unstubAllGlobals();
+	});
+
+	function bootOrderPage() {
+		const docListeners: Record<string, Array<() => void>> = {};
+		const pending: Array<() => void> = [];
+		const orderCalls: string[] = [];
+		let autoResolve = false;
+		const order = {
+			order_id: "ct0123456789abcdef01234567",
+			payment_state: "paying",
+			credit_state: "none",
+			amount_fen: 2000,
+			credit_units: "20000000000",
+		};
+		const reply = () => ({ status: 200, json: () => Promise.resolve({ order }) });
+		vi.stubGlobal("fetch", vi.fn((url: string) => {
+			if (!String(url).startsWith("/api/account/credit-topups/")) {
+				return new Promise(() => {}); // 余额等其它请求保持挂起，不参与本用例
+			}
+			orderCalls.push(String(url));
+			if (autoResolve) return Promise.resolve(reply());
+			return new Promise((resolve) => { pending.push(() => resolve(reply())); });
+		}));
+		const bootstrap = {
+			textContent: JSON.stringify({
+				page: "order",
+				order_id: order.order_id,
+				subject: { username: "credit@x.com" },
+			}),
+		};
+		const doc = {
+			readyState: "complete",
+			hidden: false,
+			title: "",
+			getElementById: (id: string) => (id === "credits-bootstrap" ? bootstrap : null),
+			addEventListener(type: string, cb: () => void) {
+				(docListeners[type] ||= []).push(cb);
+			},
+			querySelectorAll: () => [],
+			createElement: () => ({ className: "", textContent: "", appendChild() {} }),
+		};
+		const w: Record<string, unknown> = {
+			HP_I18N: { t: i18nT },
+			location: { assign() {}, reload() {} },
+		};
+		new Function("window", "document", creditsSrc)(w, doc);
+		return {
+			orderCalls,
+			async settle() {
+				while (pending.length) (pending.shift() as () => void)();
+				for (let i = 0; i < 20; i++) await Promise.resolve();
+			},
+			becomeVisible() {
+				(docListeners["visibilitychange"] || []).forEach((cb) => cb());
+			},
+			setAutoResolve(v: boolean) { autoResolve = v; },
+		};
+	}
+
+	it("查单在途时回到前台：不发第二个请求，结束后只留一个定时器", async () => {
+		vi.useFakeTimers();
+		const h = bootOrderPage();
+		expect(h.orderCalls).toHaveLength(1);
+		h.becomeVisible();
+		h.becomeVisible();
+		expect(h.orderCalls).toHaveLength(1);
+		await h.settle();
+		expect(vi.getTimerCount()).toBe(1);
+
+		// 之后的轮询照常推进，仍是单链
+		h.setAutoResolve(true);
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(vi.getTimerCount()).toBe(1);
+	});
+
+	it("等待定时器期间回到前台：立即查一次并替换原定时器", async () => {
+		vi.useFakeTimers();
+		const h = bootOrderPage();
+		await h.settle();
+		expect(vi.getTimerCount()).toBe(1);
+		h.becomeVisible();
+		expect(h.orderCalls).toHaveLength(2);
+		expect(vi.getTimerCount()).toBe(0);
+		await h.settle();
+		expect(vi.getTimerCount()).toBe(1);
+	});
+});

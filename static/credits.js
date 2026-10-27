@@ -702,6 +702,7 @@
     var startedAt = Date.now();
     var delay = POLL_START_MS;
     var timer = null;
+    var inFlight = false;
     var stopped = false;
 
     function stop() {
@@ -720,12 +721,15 @@
         return;
       }
       delay = Math.min(POLL_MAX_MS, Math.round(delay * 1.5));
+      if (timer) clearTimeout(timer);
       timer = setTimeout(poll, delay);
     }
 
     function poll() {
-      if (stopped) return;
+      // 同一时刻至多一个查询在途：可见性切换触发的提前查询不能另起一条轮询链
+      if (stopped || inFlight) return;
       timer = null;
+      inFlight = true;
       fetch("/api/account/credit-topups/" + encodeURIComponent(orderId), {
         credentials: "same-origin",
         headers: { Accept: "application/json" },
@@ -734,6 +738,7 @@
           return { status: res.status, body: body || {} };
         });
       }).then(function (res) {
+        inFlight = false;
         if (stopped) return;
         if (res.status === 200 && res.body && res.body.order) {
           state.order = res.body.order;
@@ -757,6 +762,7 @@
         setOrderUnavailable(state);
         schedule();
       }).catch(function () {
+        inFlight = false;
         if (stopped) return;
         setOrderUnavailable(state);
         schedule();
