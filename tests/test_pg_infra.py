@@ -359,6 +359,10 @@ def test_schema_migrations_recorded(conn):
         # 退款六表 + billing_accounts / billing_ledger_entries / billing_holds
         # 的 credits 列（ledger_scope、pending_reconciliation 等）。
         "0088_credit_wallet.sql",
+        # 用户「最近活跃」（2026-10-27）：users.last_active_at + 从
+        # audit_events / upload_tasks / ingestion_jobs / ai_usage_events
+        # 集合式回填（GREATEST，全空保持 NULL，可重跑）。
+        "0089_user_last_active.sql",
     ]
 
 

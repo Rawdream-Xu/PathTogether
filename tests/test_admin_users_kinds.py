@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
-"""用户页分类/排序/最近登录验收（docs/admin-viewer-simplified-20261008.md §2 / §8-6）。
+"""用户页分类/排序/最近活跃验收（docs/admin-viewer-simplified-20261008.md §2 / §8-6）。
 
 覆盖：
   - kind 筛选（real 默认 / dogfood / all）+ 切换词表校验；
-  - joined_desc（默认）/ joined_asc / last_login_desc（NULL 恒排末尾）排序；
+  - joined_desc（默认）/ joined_asc / last_login_desc / last_active_desc
+    （NULL 恒排末尾）排序；
   - 分页无重复无遗漏（排序全量完成后 offset 切片）；
-  - account_kind / last_login_at 字段（格式与 created_at 相同）；
+  - account_kind / last_login_at / last_active_at 字段（格式与 created_at 相同）；
   - POST /api/admin/v1/users/<id>/account-kind：owner 权限（普通用户 403）、
     值校验、审计（含前后值）、未变不写审计、不改 session/额度/角色/启用；
-  - last_login_at 只在登录成功更新（行为层细节见 test_registration_retirement）。
+  - last_login_at 只在登录成功更新（行为层细节见 test_registration_retirement）；
+    0089 起登录同时推进 last_active_at，列表排序改用 last_active_desc。
 """
 import os
 import sys
@@ -149,6 +151,46 @@ def test_sort_orders_and_null_last():
     # last_login_at 与 created_at 同格式（epoch float）
     assert isinstance(non_null[0][1], float)
 
+    # 0089：last_active_desc 同口径（登录成功同时推进 last_active_at；
+    # owner 的 session 由测试直写、列表只读 XHR 不计活跃 → NULL 排末尾）
+    items = _users(oc, "&sort=last_active_desc")
+    actives = [(i["user_id"], i["last_active_at"]) for i in items]
+    active_non_null = [x for x in actives if x[1] is not None]
+    active_nulls = [x for x in actives if x[1] is None]
+    assert [x[0] for x in active_non_null] == [u2["user_id"], u1["user_id"]]
+    assert {x[0] for x in active_nulls} == {owner["user_id"], u3["user_id"]}
+    assert isinstance(active_non_null[0][1], float)
+    # last_active_at 不早于 last_login_at（登录同时推进）
+    by_id = {i["user_id"]: i for i in items}
+    assert by_id[u1["user_id"]]["last_active_at"] >= \
+        by_id[u1["user_id"]]["last_login_at"]
+
+
+def test_sort_last_active_desc_null_last_and_field():
+    """0089 列表 API：每行返回 last_active_at；last_active_desc NULL 恒末尾；
+    last_login_desc 继续兼容。"""
+    owner = user_store.create_user("owner@x.com", "ownerpass12345678",
+                                   role="owner")
+    u1 = user_store.create_user("u1@x.com", "userpass12345678")
+    u2 = user_store.create_user("u2@x.com", "userpass12345678")
+    # 直接写活跃时间：u1 较早、u2 较晚；owner/u3 无记录
+    _sql("UPDATE users SET last_active_at = now() - interval '2 hours' "
+         "WHERE user_id=%s", (u1["user_id"],))
+    _sql("UPDATE users SET last_active_at = now() - interval '1 hour' "
+         "WHERE user_id=%s", (u2["user_id"],))
+    c = _login(_client(), owner)
+
+    items = _users(c, "&sort=last_active_desc")
+    assert [i["user_id"] for i in items[:2]] == [u2["user_id"], u1["user_id"]]
+    assert items[-1]["last_active_at"] is None
+    assert all("last_active_at" in i for i in items)
+    assert isinstance(items[0]["last_active_at"], float)
+
+    # 兼容旧排序键
+    legacy = _users(c, "&sort=last_login_desc")
+    assert len(legacy) == 3
+    assert all("last_active_at" in i for i in legacy)
+
 
 def test_pagination_no_dup_no_gap_across_sorts():
     owner = user_store.create_user("owner@x.com", "ownerpass12345678",
@@ -156,7 +198,8 @@ def test_pagination_no_dup_no_gap_across_sorts():
     for i in range(7):
         user_store.create_user("p%d@x.com" % i, "userpass12345678")
     c = _login(_client(), owner)
-    for sort in ("joined_desc", "joined_asc", "last_login_desc"):
+    for sort in ("joined_desc", "joined_asc", "last_login_desc",
+                 "last_active_desc"):
         for kind in ("real", "all"):
             seen = []
             cursor = None

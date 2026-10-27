@@ -193,16 +193,23 @@ def test_closed_mode_rejects_registration():
 
 
 def test_last_login_at_only_on_success():
-    """§2/§8-6：last_login_at 只在正常成功路径更新；失败不动；二次成功单调。"""
+    """§2/§8-6：last_login_at 只在正常成功路径更新；失败不动；二次成功单调。
+
+    0089：登录成功同时以 GREATEST 推进 last_active_at（列表「最近活跃」不会
+    出现「刚登录仍暂无记录」）；失败登录两者都不动。
+    """
     user = user_store.create_user("login-ts@x.com", PW, role="user")
     assert user["last_login_at"] is None
+    assert user["last_active_at"] is None
 
     client = _client()
     # 失败：不更新
     r = client.post("/login", data={"username": "login-ts@x.com",
                                     "password": "wrong-password-x"})
     assert r.status_code == 401
-    assert user_store.get_user(user["user_id"])["last_login_at"] is None
+    after_fail = user_store.get_user(user["user_id"])
+    assert after_fail["last_login_at"] is None
+    assert after_fail["last_active_at"] is None
 
     # 成功：记录
     r = client.post("/login", data={"username": "login-ts@x.com",
@@ -210,6 +217,8 @@ def test_last_login_at_only_on_success():
     assert r.status_code == 302
     first = user_store.get_user(user["user_id"])["last_login_at"]
     assert first is not None
+    first_active = user_store.get_user(user["user_id"])["last_active_at"]
+    assert first_active is not None and first_active >= first
     first_dt = datetime.fromtimestamp(first, tz=timezone.utc)
     assert abs((first_dt - datetime.now(timezone.utc)).total_seconds()) < 60
 
@@ -220,8 +229,10 @@ def test_last_login_at_only_on_success():
                                         "password": PW}).status_code == 302
     second = user_store.get_user(user["user_id"])["last_login_at"]
     assert second >= first
+    second_active = user_store.get_user(user["user_id"])["last_active_at"]
+    assert second_active >= first_active
 
-    # 刷新 session（带 cookie 访问业务 API）不更新
+    # 刷新 session（带 cookie 访问业务 API）不更新 last_login_at
     client2.get("/api/auth/info")
     assert user_store.get_user(user["user_id"])["last_login_at"] == second
 

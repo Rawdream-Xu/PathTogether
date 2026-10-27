@@ -229,7 +229,8 @@ _SEL_HASH = (
     "email, email_normalized, "
     "extract(epoch from email_verified_at)::float8 AS email_verified_at, "
     "account_kind, "
-    "extract(epoch from last_login_at)::float8 AS last_login_at"
+    "extract(epoch from last_login_at)::float8 AS last_login_at, "
+    "extract(epoch from last_active_at)::float8 AS last_active_at"
 )
 _SEL_PUBLIC = (
     "user_id, login_id, display_name, role, "
@@ -238,7 +239,8 @@ _SEL_PUBLIC = (
     "email, email_normalized, "
     "extract(epoch from email_verified_at)::float8 AS email_verified_at, "
     "account_kind, "
-    "extract(epoch from last_login_at)::float8 AS last_login_at"
+    "extract(epoch from last_login_at)::float8 AS last_login_at, "
+    "extract(epoch from last_active_at)::float8 AS last_active_at"
 )
 
 
@@ -568,15 +570,44 @@ def record_login_success(user_id):
     只在 login() 正常成功路径调用——登录失败/刷新/AI 请求/注册完成（不自动
     登录）都不更新。GREATEST+COALESCE 保证单调不回退（时钟回拨防御）；返回
     是否确有该用户行。旧用户保持 NULL 直到首次成功登录。
+
+    0089：同时以同一 GREATEST 语义推进 ``last_active_at``（登录本身就是活跃；
+    列表「最近活跃」不会出现「刚登录仍暂无记录」）。
     """
     conn = _connect()
     try:
         with pg_store.transaction(conn) as c:
             with c.cursor() as cur:
                 cur.execute(
-                    "UPDATE users SET last_login_at = GREATEST("
-                    "COALESCE(last_login_at, '-infinity'), now()) "
+                    "UPDATE users SET "
+                    "last_login_at = GREATEST("
+                    "COALESCE(last_login_at, '-infinity'), now()), "
+                    "last_active_at = GREATEST("
+                    "COALESCE(last_active_at, '-infinity'), now()) "
                     "WHERE user_id=%s",
+                    (user_id,),
+                )
+                return cur.rowcount == 1
+    finally:
+        conn.close()
+
+
+def record_activity(user_id):
+    """记录用户活跃（0089）。返回是否确有写入（节流命中/用户不存在 → False）。
+
+    SQL 条件即跨进程节流：仅当 ``last_active_at`` 为空或早于 5 分钟前才写
+    ``now()``。短事务单行 UPDATE，多 worker 并发时后到者按条件自然跳过，
+    不会把时间写成旧值。应用层另有进程内 monotonic 节流（app.py），本条件
+    是数据库侧兜底。调用方对异常只记 warning，绝不影响响应。
+    """
+    conn = _connect()
+    try:
+        with pg_store.transaction(conn) as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "UPDATE users SET last_active_at = now() "
+                    "WHERE user_id=%s AND (last_active_at IS NULL "
+                    "OR last_active_at < now() - interval '5 minutes')",
                     (user_id,),
                 )
                 return cur.rowcount == 1

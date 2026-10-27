@@ -75,7 +75,7 @@
    admin-viewer-simplified-20261008.md）：
      - 「邀请」页整体退役（admin.invites.* 桥方法已删、服务端 410；
        注册模式收敛为 closed/public，只在设置页）；
-     - 用户页 = 四列主表（用户/加入时间/最近登录/分类）+ 分类筛选
+     - 用户页 = 六列主表（用户/加入时间/最近活跃/余额/研究数据/分类）
        （默认正式用户）与排序下拉；切筛选/排序即重置游标重取；行内
        「标为 Dogfood/改为正式」走 admin.users.setAccountKind；启停/AI 权限/
        重置密码/预览/总额度等既有操作全部保留在「详情」抽屉；
@@ -1502,11 +1502,11 @@
   }
 
   // ------------------------------------------------------------------
-  // 用户主表（2026-10-08 §2；2026-10-09 round4 §2.2 六列）：用户（显示名+
-  // 邮箱）/ 加入时间 / 最近登录 / 余额（remainingInfo 短文案）/ 研究数据
-  //（research.state/granted） / 分类。行内动作 = 分类切换（标为
-  // Dogfood/改为正式）+ 详情；启用状态、掩码登录账号等低频字段仍在「详情」
-  // 抽屉。
+  // 用户主表（2026-10-08 §2；2026-10-09 round4 §2.2 六列；0089 第二列改
+  // 「最近活跃」）：用户（显示名+邮箱）/ 加入时间 / 最近活跃 / 余额
+  //（remainingInfo 短文案）/ 研究数据（research.state/granted） / 分类。
+  // 行内动作 = 分类切换（标为 Dogfood/改为正式）+ 详情；启用状态、掩码
+  // 登录账号、「最近登录」等低频字段仍在「详情」抽屉。
   // ------------------------------------------------------------------
   // 窄屏卡片沿用原表格数据与操作，标签来自同一组列标题。
   function labelResponsiveCells(row, labels) {
@@ -1535,9 +1535,10 @@
       }
       tr.appendChild(nameCell);
       tr.appendChild(td(fmtTs(u.created_at), "adm-cell-time"));
-      // §2：从未登录（last_login_at null）→「暂无记录」；时间 Asia/Shanghai。
-      tr.appendChild(td(u.last_login_at === null || u.last_login_at === undefined
-        ? "暂无记录" : fmtTs(u.last_login_at), "adm-cell-time"));
+      // 0089：最近活跃（last_active_at null）→「暂无记录」；时间 Asia/Shanghai。
+      // 「最近登录」仍在详情抽屉展示（last_login_at）。
+      tr.appendChild(td(u.last_active_at === null || u.last_active_at === undefined
+        ? "暂无记录" : fmtTs(u.last_active_at), "adm-cell-time"));
       // round4 §2.2：余额（剩余额度，与抽屉同一 remainingInfo 口径）
       tr.appendChild(renderRemainCell(u));
       // round4 §2.2：研究数据授权（已授权/已撤回/未授权）
@@ -1560,7 +1561,7 @@
       kindCell.appendChild(kindActions);
       tr.appendChild(kindCell);
       labelResponsiveCells(tr,
-        ["用户", "加入时间", "最近登录", "余额", "研究数据", "分类"]);
+        ["用户", "加入时间", "最近活跃", "余额", "研究数据", "分类"]);
       tbody.appendChild(tr);
     });
   }
@@ -5780,7 +5781,8 @@
     if (usersSort && usersSort.addEventListener) {
       usersSort.addEventListener("change", function () {
         var v = usersSort.value;
-        if (["joined_desc", "joined_asc", "last_login_desc"].indexOf(v) === -1) return;
+        if (["joined_desc", "joined_asc", "last_active_desc",
+             "last_login_desc"].indexOf(v) === -1) return;
         state.filters.users.sort = v;
         resetUsersCursorAndReload();
       });

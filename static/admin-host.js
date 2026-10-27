@@ -259,10 +259,13 @@
         ai_access: { type: "boolean" },
         // 2026-10-08（§2）：分类筛选与排序。缺键 = 服务端默认
         //（kind=real、sort=joined_desc）；排序在分页前对全量完成，
-        // last_login_at IS NULL 恒排末尾（服务端权威）。
+        // last_active_at / last_login_at IS NULL 恒排末尾（服务端权威）。
+        // 0089：列表排序选项改为 last_active_desc（默认仍 joined_desc）；
+        // last_login_desc 保留兼容。
         kind: { type: "string", enum: ["real", "dogfood", "all"] },
         sort: { type: "string",
-                enum: ["joined_desc", "joined_asc", "last_login_desc"] },
+                enum: ["joined_desc", "joined_asc", "last_login_desc",
+                       "last_active_desc"] },
         // 2026-10-20（评审 §三）：概览「待处理研究数据任务 N」点入即带
         // research=abnormal——只看有异常（终态 failed）删除任务的用户；
         // 缺键 = 不筛选（服务端对未知取值 400，不做隐式兜底）。

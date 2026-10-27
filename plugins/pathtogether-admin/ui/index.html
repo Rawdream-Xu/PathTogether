@@ -73,12 +73,12 @@
         已删，服务端 /api/admin/v1/invites* 410）；注册模式只在设置页
         closed/public 两种可选；
       - 用户页主表六列（2026-10-09 round4 §2.2）：用户（显示名+邮箱）/
-        加入时间 / 最近登录 / 余额（剩余额度，同抽屉口径）/ 研究数据
+        加入时间 / 最近活跃 / 余额（剩余额度，同抽屉口径）/ 研究数据
         （已授权/已撤回/未授权）/ 分类；上方分类筛选（正式用户/Dogfood/
         全部，默认正式）与排序下拉；行内「标为 Dogfood/改为正式」
         （admin.users.setAccountKind）+「详情」抽屉（启停、AI 权限、
         密码重置、总额度、预览等现有操作全部收在抽屉）；
-        未登录过显示「暂无记录」；
+        无活跃记录显示「暂无记录」（「最近登录」仍在详情抽屉）；
       - 切片页改为「用户上传的切片」：列 = 切片/上传者、加入时间、管理员
         临时查看、操作；临时查看五态（未开启/已结束/可查看·剩余 N 分钟/
         本人切片/不可查看）；开启 1 小时（admin.slides.startTemporaryView）、
@@ -204,7 +204,7 @@
         </section>
 
         <!-- 用户（2026-10-08 §2；2026-10-09 round4 §2.2）：主表六列
-             （显示名+邮箱 / 加入时间 / 最近登录 / 余额 / 研究数据 / 分类）+
+             （显示名+邮箱 / 加入时间 / 最近活跃 / 余额 / 研究数据 / 分类）+
              分类筛选（默认正式用户）与排序下拉；行内「标为 Dogfood / 改为
              正式」；启停、AI 权限、密码重置、身份预览、总额度等现有操作
              全部保留在「详情」抽屉 -->
@@ -212,7 +212,7 @@
           <div class="adm-state" id="adm-state-users" data-page-state="idle" role="status" aria-live="polite"></div>
           <section class="adm-card">
             <h2>用户</h2>
-            <p class="adm-note">分类用于区分正式用户与内部测试（Dogfood）账号：标记不影响账号数据、额度与权限，随时可改回。启停、AI 权限、重置密码、身份预览与额度调整在「详情」抽屉。时间均为北京时间（GMT+8）；从未登录过的账号「最近登录」显示暂无记录。「研究数据」列是该用户研究授权的当前状态：已授权 / 已撤回 / 未授权；授权版本、删除任务进度与平台采集总开关在「详情」抽屉的「研究数据」折叠区（管理员不能代用户授权）。</p>
+            <p class="adm-note">分类用于区分正式用户与内部测试（Dogfood）账号：标记不影响账号数据、额度与权限，随时可改回。启停、AI 权限、重置密码、身份预览与额度调整在「详情」抽屉。时间均为北京时间（GMT+8）；「最近活跃」是最近一次打开页面或进行操作的时间，从未活跃过的账号显示暂无记录；「最近登录」仍可在「详情」抽屉查看。「研究数据」列是该用户研究授权的当前状态：已授权 / 已撤回 / 未授权；授权版本、删除任务进度与平台采集总开关在「详情」抽屉的「研究数据」折叠区（管理员不能代用户授权）。</p>
             <div class="adm-filters" id="adm-users-filters">
               <div class="adm-kind-seg" id="adm-users-kind-seg" role="group" aria-label="分类筛选">
                 <button type="button" class="adm-kind-btn" data-kind="real" aria-pressed="true">正式用户</button>
@@ -224,7 +224,7 @@
                 <select id="adm-users-sort">
                   <option value="joined_desc">加入时间 · 最新优先</option>
                   <option value="joined_asc">加入时间 · 最早优先</option>
-                  <option value="last_login_desc">最近登录</option>
+                  <option value="last_active_desc">最近活跃</option>
                 </select>
               </div>
               <!-- 研究异常筛选（2026-10-20 评审 §三）：概览「待处理研究数据
@@ -241,7 +241,7 @@
                   <tr>
                     <th>用户</th>
                     <th>加入时间</th>
-                    <th>最近登录</th>
+                    <th>最近活跃</th>
                     <th>余额</th>
                     <th>研究数据</th>
                     <th>分类</th>

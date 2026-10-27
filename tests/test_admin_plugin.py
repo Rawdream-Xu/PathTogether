@@ -986,6 +986,9 @@ def test_admin_manifest_plugin_version_bumped_with_hashes():
     # 用户抽屉 Credit 钱包（赠送/退款/待核对处置/解冻）+ 费用页「Credit 待办」
     # 标签；新增桥方法 admin.credits.*（读 billing:read / 写 credits:write），
     # hashes/pin 同步。
+    # 2026-10-27 0.4.20（0089 最近活跃）：用户列表「最近登录」列改「最近活跃」
+    #（last_active_at，排序 last_active_desc；台账 value 旧值仅服务端兼容），
+    # 详情抽屉仍显示「最近登录」；版本不 bump，hashes/pin 同步。
     assert data["pluginVersion"] == "0.4.20"  # hashes/pin 同步
     assert "admin:settings:read" in data["adminPermissions"]
     assert "admin:settings:write" in data["adminPermissions"]
