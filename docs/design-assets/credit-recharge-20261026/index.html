@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<title>充值 Credit · HistoPilot · 设计预览</title>
+<style>
+:root{color-scheme:dark;--bg:#161616;--panel:#1e1e1e;--line:#303030;--text:#eee;--muted:#a0a0a0;--blue:#1685ff;--green:#78d6a4}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC",sans-serif}button,select,input{font:inherit}button,a,input,select{-webkit-tap-highlight-color:transparent}button,a,select{touch-action:manipulation}button{cursor:pointer}a{color:inherit;text-decoration:none}button:disabled{cursor:default}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #8ac1ff;outline-offset:5px}svg{display:block;flex:none}button{color:inherit}h1,h2,p{margin:0}.preview{background:#22201b;color:#c4b797;font-size:12px;padding:8px 28px;display:flex;align-items:center;justify-content:space-between;gap:12px}.preview label{display:flex;align-items:center;gap:8px}.preview select{background:#302c24;border:1px solid #524a38;color:#e8dcc2;border-radius:6px;padding:3px 8px}.topbar{border-bottom:1px solid #2c2c2c}.topbar-inner{max-width:1184px;margin:auto;height:78px;display:flex;align-items:center;justify-content:space-between;padding:0 32px}.brand{display:flex;align-items:center;gap:12px;font-size:21px;font-weight:700;letter-spacing:-.5px}.brand img{width:43px;height:43px;object-fit:contain}.nav{display:flex;align-items:center;gap:28px;color:#aaa;font-size:14px}.nav a:hover{color:#fff}.nav .active{color:#eaeaea}.avatar{width:32px;height:32px;background:#363331;border:1px solid #514c48;border-radius:50%;display:grid;place-items:center;color:#e0d4ca;font-size:12px;font-weight:600}main{max-width:1184px;margin:auto;padding:52px 32px 30px}.breadcrumb{color:#999;display:inline-flex;align-items:center;gap:8px;font-size:13px}.heading{display:flex;align-items:flex-end;justify-content:space-between;margin:20px 0 30px;gap:20px}h1{font-size:36px;line-height:1.3;letter-spacing:-1px;font-weight:650}h1 span{font-weight:500}.heading p{margin-top:12px;color:var(--muted);font-size:14px}.account{display:flex;align-items:center;gap:8px;color:#999;font-size:12px;padding-bottom:6px}.dot{width:6px;height:6px;border-radius:50%;background:var(--green)}.layout{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:24px}.main-column{min-width:0}.balance{border:1px solid #353535;background:linear-gradient(115deg,#242424,#1d1f21);border-radius:16px;padding:27px 30px;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:space-between;min-height:156px}.balance-label{color:#b5b5b5;font-size:13px}.balance-value{display:flex;gap:12px;align-items:baseline;margin-top:8px;font-variant-numeric:tabular-nums}.balance-value strong{font-size:40px;line-height:1.25;font-weight:550;letter-spacing:-1.1px}.balance-value span{font-size:14px;color:#adadad}.wallet-art{width:76px;height:76px;border-radius:22px;background:#282c32;color:#87b9ff;display:grid;place-items:center;transform:rotate(-8deg);border:1px solid #353c46;margin:0 5px 0 20px}.balance-foot{color:#8e8e8e;font-size:12px;margin-top:12px}.packages{margin-top:28px}.section-label{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}.section-label h2{font-size:15px;font-weight:550}.section-label span{font-size:12px;color:#888}.tier-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.tier{position:relative;display:block;cursor:pointer}.tier input{position:absolute;opacity:0;width:1px;height:1px}.tier-body{border:1px solid #3b3b3b;background:#1e1e1e;border-radius:12px;padding:25px 20px 22px;display:block;transition:border-color .18s,background .18s,transform .18s,box-shadow .18s}.tier:hover .tier-body{border-color:#6e8cae;transform:translateY(-3px);background:#23262a}.tier input:checked+.tier-body{border:2px solid #438fea;padding:24px 19px 21px;background:#1c2939;box-shadow:0 0 0 1px #438fea12}.tier input:focus-visible+.tier-body{outline:2px solid #a4ceff;outline-offset:4px}.tier input:disabled+.tier-body{opacity:.45;transform:none}.tier:has(input:disabled){cursor:default}.tier-price{display:block;font-size:28px;font-weight:600;letter-spacing:-.5px}.tier-price small{font-size:17px;margin-right:3px;font-weight:400;color:#bcbcbc}.tier-credit{display:block;margin-top:15px;color:#aaa;font-size:13px}.tier input:checked+.tier-body .tier-credit{color:#b7d5fa}.check{position:absolute;top:13px;right:13px;background:#438fea;color:#fff;width:18px;height:18px;border-radius:50%;display:none;align-items:center;justify-content:center}.tier input:checked+.tier-body .check{display:flex}.rate{margin-top:16px;display:flex;gap:7px;align-items:center;color:#858585;font-size:12px}.checkout{border:1px solid #343434;background:#1e1e1e;border-radius:16px;padding:26px;align-self:start;min-height:386px}.checkout h2{font-size:14px;color:#bbb;font-weight:500}.receive{margin-top:20px;font-size:36px;font-weight:550;letter-spacing:-1px;line-height:1.25;font-variant-numeric:tabular-nums}.receive span{font-size:14px;color:#999;letter-spacing:0;font-weight:400;margin-left:7px}.checkout hr{height:1px;border:0;background:#333;margin:26px 0 20px}.detail{display:flex;align-items:center;justify-content:space-between;color:#999;font-size:13px;margin:16px 0}.detail strong{color:#ddd;font-weight:500}.alipay{display:flex;align-items:center;gap:7px;color:#ddd}.alipay-icon{width:20px;height:20px;border-radius:5px;background:#1677ff;display:grid;place-items:center;color:#fff;font-size:13px;font-weight:650}.total{margin-top:26px;color:#ccc}.total strong{font-size:24px;letter-spacing:-.5px}.pay{width:100%;height:48px;border:1px solid #3291ff;border-radius:9px;background:#087bf2;color:#fff;font-weight:600;font-size:14px;margin-top:5px;display:flex;align-items:center;justify-content:center;gap:10px;transition:background .15s,transform .15s,box-shadow .15s}.pay:hover:not(:disabled){background:#238bfb;transform:translateY(-2px);box-shadow:0 7px 20px #007aff24}.pay:active:not(:disabled){transform:translateY(0)}.pay:disabled{background:#303030;border-color:#3a3a3a;color:#999}.checkout-note{text-align:center;font-size:11px;color:#858585;margin-top:12px}.state-message{margin-top:16px;font-size:13px;color:#c4c4c4;line-height:1.7;padding:13px;border:1px solid #424242;border-radius:8px;background:#252525}.state-message.success{color:#a6e3c1;border-color:#345d46;background:#203128}[hidden]{display:none!important}.history{margin-top:48px}.history-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}.history-head h2{font-size:17px;font-weight:550}.history-head span{color:#858585;font-size:12px}.history-box{border:1px solid #303030;border-radius:12px;overflow:hidden}.history table{border-collapse:collapse;width:100%;text-align:left;font-size:13px;font-variant-numeric:tabular-nums}.history th{font-size:12px;font-weight:400;color:#929292;background:#1d1d1d;padding:13px 24px}.history td{padding:18px 24px;border-top:1px solid #2b2b2b;color:#b9b9b9}.history td:nth-child(2){color:#e1e1e1}.history th:last-child,.history td:last-child{text-align:right}.status{font-size:12px;display:inline-flex;align-items:center;gap:6px;color:#94caaa}.status::before{content:'';width:5px;height:5px;border-radius:50%;background:#75b68d}.history td small{font-size:11px;color:#7f7f7f;margin-left:9px}.footer{display:flex;justify-content:space-between;margin-top:32px;font-size:12px;color:#747474;padding-bottom:16px}.footer a{color:#999}.footer a:hover{color:#ccc}.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:#343434;border:1px solid #555;color:#eee;padding:12px 20px;border-radius:9px;box-shadow:0 10px 40px #0008;max-width:calc(100% - 32px);z-index:10;font-size:13px}.state-message:focus{outline:none}
+@media(max-width:850px){.layout{grid-template-columns:minmax(0,1fr) 290px;gap:18px}.checkout{padding:22px}.tier-body{padding:24px 14px 20px}.tier input:checked+.tier-body{padding:23px 13px 19px}.nav{gap:18px}.heading .account{display:none}}
+@media(max-width:680px){.preview{padding:8px 16px;font-size:10px}.preview label{gap:5px}.preview select{max-width:115px;font-size:11px}.topbar-inner{height:66px;padding:0 20px}.brand{font-size:19px}.brand img{width:35px;height:35px}.nav a:not(.active){display:none}.nav{gap:16px;font-size:12px}main{padding:30px 20px 16px}.heading{margin:18px 0 24px}h1{font-size:29px}.heading p{font-size:13px}.layout{grid-template-columns:1fr;gap:24px}.balance{padding:23px;min-height:145px}.balance-value strong{font-size:35px}.wallet-art{width:58px;height:58px;border-radius:18px;margin-right:0}.wallet-art svg{width:29px}.packages{margin-top:24px}.tier-grid{gap:9px}.tier-body{padding:22px 13px 19px}.tier input:checked+.tier-body{padding:21px 12px 18px}.tier-price{font-size:25px}.tier-credit{font-size:11px;margin-top:13px}.check{width:15px;height:15px;top:9px;right:9px}.section-label span{font-size:11px}.checkout{padding:23px;min-height:0}.receive{font-size:31px;margin-top:10px}.checkout hr{margin:20px 0}.detail{margin:13px 0}.total{margin-top:20px}.pay{height:50px}.history{margin-top:34px}.history th,.history td{padding:15px 12px;font-size:12px}.history th:first-child,.history td:first-child{padding-left:16px}.history .amount-col{display:none}.history td small{display:block;margin-left:0;margin-top:3px}.history-head span{font-size:11px}.footer{margin-top:26px;font-size:11px}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;scroll-behavior:auto!important}}
+</style>
+</head>
+<body>
+<aside class="preview" aria-label="设计预览工具">
+  <span>设计预览 · 示例数据 · 不会实际付款</span>
+  <label>状态 <select id="preview-state"><option value="ready">正常充值</option><option value="pending">等待付款</option><option value="posting">到账处理中</option><option value="success">充值成功</option><option value="unavailable">暂不可用</option></select></label>
+</aside>
+<header class="topbar"><div class="topbar-inner">
+  <a class="brand" href="#" data-preview-link><img src="../../../static/brand/logo-96.webp" alt=""><span>HistoPilot</span></a>
+  <nav class="nav" aria-label="主导航"><a href="#" data-preview-link>工作台</a><a href="#" data-preview-link>切片转换工具</a><a class="active" href="#main" aria-current="page">我的账户</a><span class="avatar" aria-label="示例账户">L</span></nav>
+</div></header>
+<main id="main">
+  <a class="breadcrumb" href="#" data-preview-link><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m14 6-6 6 6 6"/></svg>返回工作台</a>
+  <div class="heading"><div><h1>充值 <span>Credit</span></h1><p>准备好了，继续你的探索。</p></div><div class="account"><span class="dot"></span>当前账户 · researcher@example.com</div></div>
+  <div class="layout">
+    <div class="main-column">
+      <section class="balance" aria-labelledby="balance-title">
+        <div><div id="balance-title" class="balance-label">可用余额</div><div class="balance-value"><strong id="balance">1,280.50</strong><span>Credits</span></div><div class="balance-foot">researcher@example.com</div></div>
+        <div class="wallet-art" aria-hidden="true"><svg width="38" height="38" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M25 10V7.5A2.5 2.5 0 0 0 22.5 5H8a4 4 0 0 0-4 4v15a3 3 0 0 0 3 3h19a2 2 0 0 0 2-2V12a2 2 0 0 0-2-2H8a2 2 0 0 1 0-4"/><path d="M28 16h-6a3 3 0 0 0 0 6h6"/><circle cx="22" cy="19" r=".8" fill="currentColor"/></svg></div>
+      </section>
+      <section class="packages" aria-labelledby="package-title">
+        <div class="section-label"><h2 id="package-title">选择充值金额</h2><span>到账至当前账户</span></div>
+        <div class="tier-grid" role="radiogroup" aria-labelledby="package-title">
+          <label class="tier"><input type="radio" name="package" value="10" aria-label="10 元，1000 Credits"><span class="tier-body"><span class="check" aria-hidden="true">✓</span><span class="tier-price"><small>¥</small>10</span><span class="tier-credit">1,000 Credits</span></span></label>
+          <label class="tier"><input type="radio" name="package" value="20" checked aria-label="20 元，2000 Credits"><span class="tier-body"><span class="check" aria-hidden="true">✓</span><span class="tier-price"><small>¥</small>20</span><span class="tier-credit">2,000 Credits</span></span></label>
+          <label class="tier"><input type="radio" name="package" value="50" aria-label="50 元，5000 Credits"><span class="tier-body"><span class="check" aria-hidden="true">✓</span><span class="tier-price"><small>¥</small>50</span><span class="tier-credit">5,000 Credits</span></span></label>
+        </div>
+        <p class="rate">¥1 = 100 Credits</p>
+      </section>
+    </div>
+    <section class="checkout" aria-labelledby="checkout-title">
+      <h2 id="checkout-title">本次充值</h2><div class="receive"><strong id="receive">2,000</strong><span>Credits</span></div>
+      <hr><div class="detail"><span>支付方式</span><span class="alipay"><span class="alipay-icon" aria-hidden="true">支</span>支付宝</span></div>
+      <div class="detail"><span>充值后余额</span><strong><span id="after">3,280.50</span> Credits</strong></div>
+      <div class="detail total"><span>实付金额</span><strong id="total">¥20.00</strong></div>
+      <button class="pay" id="pay" type="button"><span id="pay-label">支付宝付款</span><svg id="pay-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 12h15m-6-6 6 6-6 6"/></svg></button>
+      <p class="checkout-note" id="checkout-note">付款完成后，Credit 自动到账</p>
+      <div class="state-message" id="message" role="status" aria-live="polite" hidden></div>
+    </section>
+  </div>
+  <section class="history" aria-labelledby="history-title">
+    <div class="history-head"><h2 id="history-title">充值记录</h2><span>最近 3 笔</span></div>
+    <div class="history-box"><table><thead><tr><th scope="col">时间</th><th scope="col">到账 Credit</th><th scope="col" class="amount-col">实付金额</th><th scope="col">状态</th></tr></thead><tbody>
+      <tr><td>2026.10.25 <small>20:16</small></td><td>+2,000</td><td class="amount-col">¥20.00</td><td><span class="status">已到账</span></td></tr>
+      <tr><td>2026.10.23 <small>14:32</small></td><td>+5,000</td><td class="amount-col">¥50.00</td><td><span class="status">已到账</span></td></tr>
+      <tr><td>2026.10.21 <small>09:45</small></td><td>+1,000</td><td class="amount-col">¥10.00</td><td><span class="status">已到账</span></td></tr>
+    </tbody></table></div>
+  </section>
+  <footer class="footer"><span>HistoPilot</span><a href="#" data-preview-link>遇到问题？联系开发者 ↗</a></footer>
+</main>
+<div class="toast" role="status" id="toast" hidden></div>
+<script>
+const $=id=>document.getElementById(id);
+const packages=[...document.querySelectorAll('input[name="package"]')];
+const initialBalance=1280.50;
+const format=n=>n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+let completed=false,toastTimer;
+function render(){
+  const amount=Number(packages.find(x=>x.checked).value), credits=amount*100, state=$('preview-state').value;
+  $('receive').textContent=credits.toLocaleString('en-US');$('total').textContent='¥'+amount.toFixed(2);
+  $('balance').textContent=format(initialBalance+(state==='success'?credits:0));
+  $('after').textContent=format(initialBalance+credits);
+  packages.forEach(x=>x.disabled=state!=='ready');
+  $('pay').disabled=['pending','posting','unavailable'].includes(state);
+  $('pay-label').textContent={ready:'支付宝付款',pending:'等待付款',posting:'到账处理中',success:'完成',unavailable:'充值暂时不可用'}[state];
+  $('pay-arrow').hidden=state!=='ready';
+  $('checkout-note').hidden=state!=='ready';
+  $('message').hidden=state==='ready';$('message').classList.toggle('success',state==='success');
+  $('message').textContent={ready:'',pending:'请在支付宝完成付款。付款结果确认后，这里会自动更新。',posting:'已确认付款，Credit 正在到账，请稍候。',success:credits.toLocaleString('en-US')+' Credits 已到账。',unavailable:'充值暂时不可用，请稍后再试。'}[state];
+  if(state==='success'&&!completed){
+    const row=document.createElement('tr');row.id='new-record';
+    const values=['2026.10.26','+'+credits.toLocaleString('en-US'),'¥'+amount.toFixed(2),'已到账'];
+    values.forEach((text,index)=>{const cell=document.createElement('td');cell.textContent=text;if(index===2)cell.className='amount-col';if(index===3){cell.textContent='';const status=document.createElement('span');status.className='status';status.textContent=text;cell.append(status)}row.append(cell)});
+    document.querySelector('tbody').prepend(row);document.querySelector('tbody tr:last-child').hidden=true;completed=true;
+  } else if(state!=='success'&&completed){$('new-record').remove();document.querySelector('tbody tr:last-child').hidden=false;completed=false}
+}
+packages.forEach(x=>x.addEventListener('change',render));$('preview-state').addEventListener('change',render);
+$('pay').addEventListener('click',()=>{$('preview-state').value=$('preview-state').value==='success'?'ready':'pending';render()});
+document.querySelectorAll('[data-preview-link]').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();$('toast').textContent='这是页面设计预览，尚未连接实际账户。';$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,2800)}));
+render();
+</script>
+</body>
+</html>
