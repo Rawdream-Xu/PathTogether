@@ -634,18 +634,20 @@ def test_settle_first_then_usage_single_debit():
 # --------------------------------------------------------------------------- #
 def test_settle_charge_exceeds_reserved_supplements_available():
     _seed_prices()
-    user, acct = _user(grant_units=10 * CNY)
+    # T0 取 wall-clock：这些 tokens 峰值段 14 CNY、非峰 7 CNY，授权须覆盖峰值
+    user, acct = _user(grant_units=20 * CNY)
     # 小估算：est_in 很小、max_out 0 → 预占很小
     body, hold = _authorize(user, est_in=1, max_out=0)
     reserved = hold["reserved_nano_cny"]
     event = _event_for(body, tokens=(0, 5_000_000, 500_000))
     charge = ch.expected_charge(T0, (0, 5_000_000, 500_000))
     assert charge > reserved
+    assert charge <= 20 * CNY
     out = _settle(hold["hold_id"], {"usage_event": event})
     assert out["status"] == "settled"
     assert out["actual_nano_cny"] == charge
     account = _account(acct["account_id"])
-    assert account["credit_balance_units"] == 10 * CNY - charge
+    assert account["credit_balance_units"] == 20 * CNY - charge
     assert account["credit_reserved_units"] == 0
 
 
