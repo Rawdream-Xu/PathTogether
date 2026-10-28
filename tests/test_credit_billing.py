@@ -634,7 +634,7 @@ def test_settle_first_then_usage_single_debit():
 # --------------------------------------------------------------------------- #
 def test_settle_charge_exceeds_reserved_supplements_available():
     _seed_prices()
-    # T0 取 wall-clock：这些 tokens 峰值段 14 CNY、非峰 7 CNY，授权须覆盖峰值
+    # T0 取墙钟时间：这些 tokens 高峰时段 14 CNY、空闲时段 7 CNY，赠送额须覆盖高峰价
     user, acct = _user(grant_units=20 * CNY)
     # 小估算：est_in 很小、max_out 0 → 预占很小
     body, hold = _authorize(user, est_in=1, max_out=0)
