@@ -312,3 +312,19 @@ owner-only（`_require_owner_admin_v1`，预览态 403），admin v1 信封，�
     - HP unit + integration：91 files / 1729 passed；契约对真实 PT（7c2fa0b4）56 passed；`tsconfig.build.json` 0 错误；全量 `tsconfig.json` 116 个错误，去掉行列号后与上一轮门禁逐条一致。
     - 两次门禁分别在高峰与空闲时段起跑，PT 生产代码在 7de7e634 与 7c2fa0b4 之间没有变化。
 - 仍按原运维计划、待批准：生产快照迁移演练（0088 + 0089）、admin 插件 0.4.20 撞号重编、定时 sweep / 每日 reconcile、真实小额充值 → 消费 → 退款全链路。
+
+### 13.3 第三轮复核：上下文压缩纳入 Credit（2026-10-28）
+
+第三轮复核（`docs/credit-wallet-review3-20261028.md`，原文收录于 13440418）确认复审两项修复通过、原始 7 个断言独立复跑全部通过，另报上下文压缩的基础故障与计费缺口。按复核建议，压缩纳入统一 Credit，在开放充值前补齐真实模型接线、授权与用量结算；均在 HistoPilot 修复：
+
+- 摘要调用无法执行：`buildModel()` 给 pi-ai 注册的是空 `api` 表，`models.completeSimple` 直接返回「no API implementation」，四种配置都不发网络请求。因此此前压缩从未成功：阈值压缩每次静默失败；上下文真正溢出时强制压缩同样失败，run 以错误结束；也因此尚未产生过未计费的摘要费用。现注册 pi-ai 的 `openai-completions` 与 `google-generative-ai` 实现（7a138e5），与主调用是同一 provider 模块（主路径直接调用同模块的 `streamSimple`）。`anthropic-messages` 不注册：主调用对 anthropic 同样直接报错（「anthropic protocol not yet wired in sidecar streamFn」），这类 run 在第一次主调用就失败，走不到压缩；将来接入 anthropic 主调用时须同时注册其实现。
+- 修通后漏计费：每次摘要请求（每次 `completeSimple`，即一次 provider HTTP 请求；普通压缩 1 次，切分轮次时 2 次）按主调用同一契约处理（553526e）：独立 call/event 身份 → hold 授权（输入估算为上下文估算加 system prompt 字符数 / 4，最大输出取摘要的 maxTokens）→ 授权判定与主调用共用 `decideCallAuthorization` → 发送时 provider 重试设为 0（SDK 内部重试会产生无法计量的额外请求）→ 恰好一条用量事件（等待持久化入队）→ 同一结算路径（unpriced 事件对 Credit 进入 `pending_reconciliation`）。授权被拒时不发送请求，run 以「调用模型失败：<原因>」终止，与主调用拒绝文案一致，阈值与溢出两条路径相同；授权后、发送前已中止则释放预占；发送后出错照常带事件结算（Credit 进待核对）；官方模式与主调用一样注入 `user_id`；空摘要不应用。非 Credit 用户（owner/demo/legacy）的摘要请求同样写用量事件。
+- 阈值压缩门闩（af5d4cd、8fc40c4）：某次阈值压缩已发出摘要请求但没有应用（失败或空摘要）后，本 run 不再尝试阈值压缩，避免每个 turn 结束都发起一次计费的失败摘要；上下文溢出时的强制压缩仍可用。未发出任何请求的空转（会话暂不可读、没有可摘要内容）不触发门闩；计数在每次压缩开始时清零（8fc40c4 补上 af5d4cd 提交说明里写了但代码中缺失的清零）。
+- 测试夹具：`test/helpers.ts` 共享 `BASE_CONFIG.context_window_tokens` 由 8192 改为 272000。压缩修通后，8192 配默认 reserve/keep 会让每个 turn 结束都触发计费摘要，改变无关用例的调用计数；该字段只参与压缩阈值、配置校验与模型窗口声明（视觉预算按 window_tier 推导，不受影响），需要压缩的用例自行设置小窗口。未改任何既有断言。
+- 复现原样入仓：`test/billing-holds-credit-compaction.test.ts` 与审查方 `compaction-billing.test.ts` 仅第 28–34 行 import 路径不同。另有 `test/billing-holds-credit-compaction-metering.test.ts`（阈值 N+1 次授权、拒绝终态、发送后出错与抛错、429 只调用一次、中止释放、空摘要、强制压缩、溢出拒绝、无客户端、官方 `user_id` 与重试 0、切分轮次 2 次请求、结算 outbox 重启、门闩三例）、`test/call-authorization-decision.test.ts`、`test/pi-model-compaction-api.test.ts`（本地回环 SSE 服务验证请求真实发出）。
+- 审查方原始文件对最终代码（HP 8fc40c4）独立复跑（`/mnt/ssd2/tests/run-review3-originals-lNV58a`）：`compaction-billing.test.ts` 1/1（2 次普通调用 + 1 次摘要 → 3 次授权、3 条用量事件）；`check-real-compaction.mts` 中 openai、gemini、deepseek_official 各发出 1 次网络请求（被脚本拦截），anthropic 仍为未实现（预期）；前两轮 HP 原始用例 3/3。三个审查目录前后指纹一致（33 / 4342 / 36 个文件）。
+- 上线后的计费影响：压缩首次真正执行。接近上下文窗口的长 run 每次压缩多出 1–2 次摘要请求，按本 run 模型同价计费；Credit 余额不足时 run 在压缩处以余额不足提示终止，不再带着超长上下文继续。
+- 无最终用量暂停账户的规则保留不变。
+- 提交：HP 7a138e5 → 553526e → af5d4cd → 8fc40c4；PT 13440418（复核报告原文）。均未推送、未部署。PT 生产代码自 gate3（7c2fa0b4）以来没有变化（之后只有文档提交），PT 全量 pytest / vitest / Playwright 结果沿用 gate3。
+- 门禁（`/mnt/ssd2/tests/run-review3-gate-EzgMY3`，HP 8fc40c4 / PT 13440418，2026-10-28T13:48Z–13:49Z）：HP unit + integration 95 files / 1761 passed；契约对真实 PT 56 passed；`tsconfig.build.json` 0 错误；全量 `tsconfig.json` 116 个错误，去掉行列号后与 gate3 逐条一致。
+- 仍按原运维计划、待批准：生产快照迁移演练（0088 + 0089）、admin 插件 0.4.20 撞号重编、定时 sweep / 每日 reconcile、真实小额充值 → 消费 → 退款全链路。
