@@ -293,3 +293,22 @@ owner-only（`_require_owner_admin_v1`，预览态 403），admin v1 信封，�
   - HP unit + integration：90 files / 1719 passed；契约对真实 PT（2cf73436）56 passed；`tsconfig.build.json` 0 错误；全量 `tsconfig.json` 116 个错误，与基线逐条一致。
 - 行为提示（上线前需确认）：Credit 调用只要发出后缺最终用量（用户中途停止、发出后断流、终态错误无 usage）就会进入待核对，而现有规则是任何待核对都会暂停该账户新的付费调用，直到管理员处置。
 - 新增待批事项：0089 迁移随 0088 一起进入生产迁移演练；回填对 `audit_events`、`ai_usage_events` 各做一次全表扫描，宜在低峰执行。
+
+### 13.2 复审修复与发布检查（2026-10-28）
+
+复审（`docs/credit-wallet-rereview-20261028.md`，原文收录于 7de7e634）确认原五个边界断言已修复，另判一项 P1、一项 P2，均已修复：
+
+- P1 legacy 成功响应可降级可信 Credit 上下文：HistoPilot `decideOnOk` 在有效 Credit（运行上下文 `billing_subject.billing_backend="credits"`、进程内主体记忆或本次响应为 credits）下，要求 2xx 明确返回 `billing_backend="credits"`；legacy 或缺失一律按 `credit_backend_conflict` 拒绝（带 hold_id 也拒绝），且不再清除 Credit 记忆（删去 `forgetCreditSubject`）。runner 对 Credit 调用同时校验 `authorized`、有效 hold 与 credits 后端，任一不满足即不调用模型并给出终态提示。没有可信 Credit 上下文与记忆的 owner/demo/legacy 用户规则不变。
+- P2 最近活跃回填把迟到用量的送达时间当作使用时间：0089 的 AI 来源改为可信运行开始时间，即 user/owner 主体的 `ai_run_bindings.created_at` 与 `ai_budget_reservations.reserved_at`（含没有用量事件的运行）；用量事件取同 request_id、同主体的运行开始时间，没有时取 `occurred_at` 并以 `received_at` 封顶；`received_at` 不再单独作为来源。原测试「received_at 胜出」的断言相应改为无运行绑定时取 occurred_at。回填新增对 `ai_run_bindings`、`ai_budget_reservations` 各一次全表扫描（一次性成本合计六次，见迁移头注释），宜在低峰执行。
+- 复现原样入仓：PT `tests/test_user_last_active_delayed_usage.py` 与审查方 `test_backfill_activity.py` 字节一致（sha256 247cbafc…）；HP `test/billing-holds-credit-backend-conflict.test.ts` 仅 7 行 import 路径不同，已登记为 integration 用例。`test/billing-holds.test.ts` 原「creditRequired 也接受 legacy 并清除记忆」的断言按复审要求改为冲突拒绝且保留记忆。审查方原始文件对修复后代码独立复跑 7/7 通过，两个审查目录前后指纹不变。
+- 无最终用量时暂停账户：按复审建议保留既定规则（进入待核对、预占不释放、暂停新的付费调用直至管理员处置），策略未改。
+- 门禁发现的时段依赖用例：`test_settle_charge_exceeds_reserved_supplements_available` 以模块导入时的墙钟时间计价，10 CNY 赠送在高峰时段（工作日北京时间 09:00–12:00、14:00–18:00）不够支付 14 CNY 实际费用（空闲时段 7 CNY），服务端按规则转入待核对，因此只要 pytest 在高峰起跑该用例必然失败。产品行为正确；测试改为赠送 20 CNY 并显式断言费用不超过赠送额（b6be67a9、7c2fa0b4）。用外部插件把 T0 钉在高峰/空闲时刻复跑整个 `tests/test_credit_billing.py`：原代码高峰 1 失败、空闲全过，修复后两个时段均 43 通过（`/mnt/ssd2/tests/run-credit-band-YD4OsX`）。
+- 范围外的既有同类缺口（未修，待裁决）：上下文压缩摘要（HistoPilot `src/agent-runner.ts` `runCompactionPass` → `runCompaction` → `piCompact` → `models.completeSimple`）直接调用模型，不经 hold 授权、不产生用量事件。压缩始终开启，接近上下文窗口时会把可压缩的历史整段发给模型；这部分调用对所有用户都未计量，Credit 用户也没有预授权。是否纳入 Credit 计费、上线前是否修复待定。
+- 提交：PT 4d6b7f28 → 7de7e634（复审报告原文）→ b6be67a9 → 7c2fa0b4；HP ec9b65e。均未推送、未部署。
+- 门禁：
+  - gate2（`/mnt/ssd2/tests/run-credit-final-gate2-GFhMVn`，PT 7de7e634 / HP ec9b65e，2026-10-28T09:08Z–09:48Z，高峰时段）：pytest 3916 passed / 113 skipped / 1 failed（即上述时段依赖用例），其余与下行一致。
+  - 最终门禁（`/mnt/ssd2/tests/run-credit-final-gate3-NItXUb`，PT 7c2fa0b4 / HP ec9b65e，2026-10-28T10:03Z–10:43Z，空闲时段）：
+    - PT 全量 pytest：3917 passed / 113 skipped / 0 failed；vitest 92 files / 1565 passed / 2 skipped；Playwright 156 passed / 43 skipped，无 flaky。
+    - HP unit + integration：91 files / 1729 passed；契约对真实 PT（7c2fa0b4）56 passed；`tsconfig.build.json` 0 错误；全量 `tsconfig.json` 116 个错误，去掉行列号后与上一轮门禁逐条一致。
+    - 两次门禁分别在高峰与空闲时段起跑，PT 生产代码在 7de7e634 与 7c2fa0b4 之间没有变化。
+- 仍按原运维计划、待批准：生产快照迁移演练（0088 + 0089）、admin 插件 0.4.20 撞号重编、定时 sweep / 每日 reconcile、真实小额充值 → 消费 → 退款全链路。
