@@ -3,8 +3,10 @@
 
 覆盖：
   - migrations/0089 回填：各来源（audit_events / upload_tasks /
-    ingestion_jobs / ai_usage_events）取各自最大时间，与已有
-    last_active_at/last_login_at 取 GREATEST；全空保持 NULL；可重跑；
+    ingestion_jobs / AI 运行开始 / ai_usage_events）取各自最大时间，与已有
+    last_active_at/last_login_at 取 GREATEST；AI 用量优先运行发起时间，
+    否则 occurred_at 并以 received_at 封顶（outbox 送达时间不算用户动作）；
+    全空保持 NULL；可重跑；
   - user_store.record_activity：5 分钟内重复调用只写一次；超过 5 分钟再写；
     未知用户返回 False；
   - app.py after_request 采集口径：顶层页面导航写入、XHR GET 不写、
@@ -16,6 +18,7 @@
 """
 import os
 import sys
+import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -78,6 +81,43 @@ def _run_migration():
     _sql(sql)
 
 
+def _insert_run_binding(request_id, subject_type, subject_id, created_at_sql):
+    _sql("INSERT INTO ai_run_bindings (request_id, subject_type, subject_id, "
+         "created_at) VALUES (%s, %s, %s, " + created_at_sql + ")",
+         (request_id, subject_type, subject_id))
+
+
+def _insert_reservation(request_id, subject_type, subject_id, reserved_at_sql):
+    _sql("INSERT INTO ai_budget_reservations (request_id, period_id, "
+         "subject_type, subject_id, credential_source, state, reserved_at, "
+         "reservation_expires_at) VALUES (%s, 1, %s, %s, 'platform', "
+         "'consumed', " + reserved_at_sql + ", now())",
+         (request_id, subject_type, subject_id))
+
+
+def _insert_usage_event(user_id, subject_type, subject_id, request_id,
+                        occurred_at_sql, received_at_sql):
+    tag = uuid.uuid4().hex
+    _sql("INSERT INTO ai_usage_events (event_id, call_id, payload_hash, "
+         "schema_version, request_id, session_id, subject_type, subject_id, "
+         "user_id, provider, model, occurred_at, enqueued_at, received_at, "
+         "status) VALUES (%s, %s, %s, 1, %s, 'sess', %s, %s, %s, "
+         "'deepseek', 'm', " + occurred_at_sql + ", " + occurred_at_sql +
+         ", " + received_at_sql + ", 'unpriced')",
+         ("evt_" + tag, "call_" + tag, "0" * 64, request_id, subject_type,
+          subject_id, user_id))
+
+
+def _assert_last_active_near(user_id, offset_hours):
+    now_rows = _sql("SELECT extract(epoch from now())::float8 AS t",
+                    fetch=True)
+    now_ts = now_rows[0]["t"]
+    got = _last_active(user_id)
+    assert got is not None
+    assert abs(got - (now_ts - offset_hours * 3600)) < 120, \
+        (user_id, got, offset_hours)
+
+
 # --------------------------------------------------------------------------- #
 # 1. 迁移回填
 # --------------------------------------------------------------------------- #
@@ -123,7 +163,9 @@ def test_migration_backfill_takes_max_per_source_and_is_rerunnable():
          " now() - interval '6 hours', now() - interval '1 hour')",
          (ingest_u["user_id"],))
 
-    # ai_usage_events：received_at（now-2 hours；unpriced 避开 priced 约束）
+    # ai_usage_events：没有 request_id 运行记录时取事件发生时间
+    # occurred_at（now-3 hours），不以更晚的 outbox 送达时间 received_at
+    #（now-2 hours）作为用户活动时间（unpriced 避开 priced 约束）
     _sql("INSERT INTO ai_usage_events (event_id, call_id, payload_hash, "
          "schema_version, session_id, subject_type, subject_id, user_id, "
          "provider, model, occurred_at, enqueued_at, received_at, status) "
@@ -148,7 +190,9 @@ def test_migration_backfill_takes_max_per_source_and_is_rerunnable():
     _assert_near(audit_u["user_id"], 48)
     _assert_near(upload_u["user_id"], 96)
     _assert_near(ingest_u["user_id"], 6)
-    _assert_near(ai_u["user_id"], 2)
+    # 0089 复审修复：AI 用量无运行记录时取 occurred_at（3 小时前），
+    # received_at（2 小时前）只是 outbox 送达时间，不得当成用户活跃时间
+    _assert_near(ai_u["user_id"], 3)
     # 只有 last_login_at 的用户：last_active_at 填成 last_login_at
     assert _last_active(login_u["user_id"]) == login_only
     # 全空：保持 NULL，绝不写 -infinity
@@ -165,6 +209,100 @@ def test_migration_backfill_takes_max_per_source_and_is_rerunnable():
         ai_u["user_id"], login_u["user_id"], empty_u["user_id"])}
     _run_migration()
     assert snapshot == {uid: _last_active(uid) for uid in snapshot}
+
+
+def test_ai_usage_event_prefers_binding_created_at_over_later_event_times():
+    """有运行绑定的事件取运行发起时间，而不是更晚的 occurred_at/received_at。
+
+    长时间后台运行的后续模型调用不属于新的用户动作；绑定 created_at 是
+    用户在 PathTogether 派发 run 时写下的可信服务端时间。
+    """
+    user = user_store.create_user("ai-bind@x.com", "userpass12345678")
+    uid = user["user_id"]
+    rid = "rid_bind_" + uuid.uuid4().hex
+    _insert_run_binding(rid, "user", uid, "now() - interval '4 hours'")
+    _insert_usage_event(uid, "user", uid, rid,
+                        "now() - interval '1 hour'",
+                        "now() - interval '30 minutes'")
+    _run_migration()
+    _assert_last_active_near(uid, 4)
+
+
+def test_ai_usage_event_uses_reservation_reserved_at_without_binding():
+    """只有 ai_budget_reservations 的历史运行（无 run 绑定）取 reserved_at。"""
+    user = user_store.create_user("ai-resv@x.com", "userpass12345678")
+    uid = user["user_id"]
+    rid = "rid_resv_" + uuid.uuid4().hex
+    _insert_reservation(rid, "user", uid, "now() - interval '5 hours'")
+    _insert_usage_event(uid, "user", uid, rid,
+                        "now() - interval '1 hour'",
+                        "now() - interval '10 minutes'")
+    _run_migration()
+    _assert_last_active_near(uid, 5)
+
+
+def test_run_binding_without_usage_event_counts_as_activity():
+    """运行在第一次模型调用前失败（无任何用量事件）也计入用户活跃。"""
+    user = user_store.create_user("ai-nocall@x.com", "userpass12345678")
+    owner = user_store.create_user("ai-nocall-owner@x.com",
+                                   "ownerpass12345678", role="owner")
+    _insert_run_binding("rid_nocall_" + uuid.uuid4().hex, "user",
+                        user["user_id"], "now() - interval '7 hours'")
+    _insert_run_binding("rid_nocall_owner_" + uuid.uuid4().hex, "owner",
+                        owner["user_id"], "now() - interval '8 hours'")
+    _run_migration()
+    _assert_last_active_near(user["user_id"], 7)
+    _assert_last_active_near(owner["user_id"], 8)
+
+
+def test_future_occurred_at_is_capped_by_received_at():
+    """客户端时钟超前：occurred_at 在未来时以服务端 received_at 封顶。"""
+    user = user_store.create_user("ai-skew@x.com", "userpass12345678")
+    uid = user["user_id"]
+    _insert_usage_event(uid, "user", uid, None,
+                        "now() + interval '2 hours'",
+                        "now() - interval '10 minutes'")
+    _run_migration()
+    _assert_last_active_near(uid, 10.0 / 60)
+
+
+def test_binding_with_same_request_id_but_other_subject_is_not_attributed():
+    """同 request_id 但主体不同的绑定不得算给该事件用户。"""
+    user = user_store.create_user("ai-mismatch@x.com", "userpass12345678")
+    other = user_store.create_user("ai-mismatch-other@x.com",
+                                   "userpass12345678")
+    rid = "rid_mismatch_" + uuid.uuid4().hex
+    _insert_run_binding(rid, "user", other["user_id"],
+                        "now() - interval '1 hour'")
+    _insert_usage_event(user["user_id"], "user", user["user_id"], rid,
+                        "now() - interval '6 hours'",
+                        "now() - interval '5 hours'")
+    _run_migration()
+    # 事件按自己的 occurred_at（6 小时前）归属，不取他人的 1 小时绑定
+    _assert_last_active_near(user["user_id"], 6)
+    # 绑定本身仍按 subject 归属到 other（1 小时前），只是不能借给 user
+    _assert_last_active_near(other["user_id"], 1)
+
+
+def test_ai_activity_backfill_is_rerunnable_and_monotonic():
+    """新 AI 来源回填可重跑：重复执行不改变结果，新可信运行只向前推进。"""
+    user = user_store.create_user("ai-rerun@x.com", "userpass12345678")
+    uid = user["user_id"]
+    _insert_usage_event(uid, "user", uid, None,
+                        "now() - interval '10 days'", "now()")
+    _run_migration()
+    _assert_last_active_near(uid, 24 * 10)
+    first = _last_active(uid)
+    _run_migration()
+    assert _last_active(uid) == first
+
+    _insert_run_binding("rid_rerun_" + uuid.uuid4().hex, "user", uid,
+                        "now() - interval '2 hours'")
+    _run_migration()
+    _assert_last_active_near(uid, 2)
+    advanced = _last_active(uid)
+    _run_migration()
+    assert _last_active(uid) == advanced
 
 
 # --------------------------------------------------------------------------- #

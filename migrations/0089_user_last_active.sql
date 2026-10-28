@@ -16,15 +16,37 @@
 --                                  不代表用户活跃，**不采用**）
 --        - ingestion_jobs.created_at 按 owner_user_id（同上，不采用
 --                                  updated_at）
---        - ai_usage_events.received_at 按 user_id
+--        - AI 运行开始时间（用户在 PathTogether 派发 AI run 时写下的服务端
+--          时间），按 (subject_type, subject_id) 归属 user/owner：
+--            ai_run_bindings.created_at
+--            ai_budget_reservations.reserved_at（reserved_at IS NOT NULL）
+--          即使该运行没有产生任何用量事件（在第一次模型调用前失败）也计入；
+--        - ai_usage_events 逐事件取时间，仍按 user_id 归属：
+--            COALESCE(同 request_id 且同主体 (subject_type, subject_id) 的
+--                     ai_run_bindings.created_at,
+--                     同条件的 ai_budget_reservations.reserved_at,
+--                     LEAST(occurred_at, received_at))
+--          有运行记录时用运行发起时间（长时间后台运行的后续模型调用不会把
+--          用户标成活跃到那个时刻）；没有运行记录时才用事件发生时间，并以
+--          服务端接收时间封顶。
+--
+--      **不使用 received_at 作为用户活动时间**：它是 HistoPilot outbox 事件
+--      送达平台的收件时间，不是用户执行动作的时间。断网补报、队列积压或
+--      重放时，十天前用过 AI、今天才补报的用户会被标成今天活跃；因此事件
+--      时间优先取可信运行开始时间，退化到 occurred_at 时也用 received_at
+--      封顶，防止异常（超前）客户端时钟把活跃时间写到未来。
 --      全为空 → 保持 NULL（绝不写 '-infinity' / 伪造时间）。
 --
 -- 回填为纯集合式聚合（GROUP BY 子查询 + LEFT JOIN），无逐行相关子查询；
 -- 只更新确有更晚时间的行，可重跑（再跑不缩短、不回退已有值）。一次性成本
--- 为四张业务表各一次全表扫描：audit_events 无 actor_user_id 索引、
--- ai_usage_events 无 user_id 索引；upload_tasks / ingestion_jobs 的
--- (owner_user_id, state) 索引可辅助分组但仍需回表取时间戳。users 表本身
--- 只按主键更新。
+-- 为六次全表扫描：audit_events 无 actor_user_id 索引、ai_usage_events 无
+-- user_id 索引（事件到运行记录的 LEFT JOIN 走两表 request_id 主键）；
+-- ai_run_bindings 只有 request_id 主键与 histopilot_session_id 索引，
+-- ai_budget_reservations 只有 request_id 主键与
+-- (state, reservation_expires_at) 索引——两表都没有 (subject_type,
+-- subject_id) 或时间索引，新增两次全表扫描；upload_tasks / ingestion_jobs
+-- 的 (owner_user_id, state) 索引可辅助分组但仍需回表取时间戳。users 表
+-- 本身只按主键更新。
 -- =========================================================================== --
 
 ALTER TABLE users
@@ -48,9 +70,35 @@ WITH activity AS (
         FROM ingestion_jobs
         WHERE owner_user_id IS NOT NULL AND owner_user_id <> ''
         UNION ALL
-        SELECT user_id, received_at
-        FROM ai_usage_events
-        WHERE user_id IS NOT NULL AND user_id <> ''
+        -- 运行开始时间本身：即使没有后续用量事件（模型调用前失败）也计入
+        SELECT subject_id, created_at
+        FROM ai_run_bindings
+        WHERE subject_type IN ('user', 'owner')
+          AND subject_id IS NOT NULL AND subject_id <> ''
+        UNION ALL
+        SELECT subject_id, reserved_at
+        FROM ai_budget_reservations
+        WHERE subject_type IN ('user', 'owner')
+          AND reserved_at IS NOT NULL
+          AND subject_id IS NOT NULL AND subject_id <> ''
+        UNION ALL
+        -- 用量事件：优先可信运行开始时间（同 request_id + 同主体），否则用
+        -- 事件发生时间并以服务端接收时间封顶（绝不直接使用 received_at）
+        SELECT e.user_id,
+               COALESCE(b.created_at,
+                        r.reserved_at,
+                        LEAST(e.occurred_at, e.received_at)) AS ts
+        FROM ai_usage_events e
+        LEFT JOIN ai_run_bindings b
+               ON b.request_id = e.request_id
+              AND b.subject_type = e.subject_type
+              AND b.subject_id = e.subject_id
+        LEFT JOIN ai_budget_reservations r
+               ON r.request_id = e.request_id
+              AND r.subject_type = e.subject_type
+              AND r.subject_id = e.subject_id
+              AND r.reserved_at IS NOT NULL
+        WHERE e.user_id IS NOT NULL AND e.user_id <> ''
     ) src
     GROUP BY user_id
 ),
