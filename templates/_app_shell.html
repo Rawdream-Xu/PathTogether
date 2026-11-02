@@ -547,14 +547,33 @@
       {% endif %}
 
       {% if mode == 'demo' %}
-      <div id="ai-panel" class="ai-panel demo-ai-panel">
-        <div class="ai-panel-header">
-          <span id="ai-panel-title" data-i18n="demo.ai.title">AI 导航（只读体验）</span>
-          <span id="ai-state" class="ai-state"></span>
+      <!-- Demo AI 面板：复用正式版标题栏布局与对话流组件（气泡/Markdown/
+           工具折叠/快照与观察卡/状态行），外框拖动与缩放走共享模块
+           ai-panel-shell.js；全部交互只读（仅 /api/demo/*）。 -->
+      <div id="ai-panel" class="ai-panel ai-dockable ai-title-layout demo-ai-panel">
+        <div class="ai-panel-header" id="ai-panel-header">
+          <span class="ai-drag-grip" aria-hidden="true">✦</span>
+          <div class="ai-panel-title-static">
+            <span id="ai-panel-title" data-i18n="demo.ai.title">AI 读片助手</span>
+            <span class="demo-ai-readonly-tag" data-i18n="demo.ai.readonly.tag">只读体验</span>
+          </div>
           <div class="ai-panel-header-actions">
+            <button id="ai-new-conversation" class="icon-btn" type="button" title="新对话" aria-label="新对话"
+                    data-i18n-title="demo.ai.new" data-i18n-aria="demo.ai.new">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-7M15 3l6 6M10 14l1-5 7-7 5 5-7 7z"/></svg>
+            </button>
+            <button id="ai-options-toggle" class="icon-btn" type="button" title="面板选项" aria-label="面板选项"
+                    aria-expanded="false" aria-controls="ai-options"
+                    data-i18n-title="demo.ai.options" data-i18n-aria="demo.ai.options">⋯</button>
             <button id="ai-panel-close" class="icon-btn close" aria-label="关闭" data-i18n-aria="picker.close">×</button>
           </div>
         </div>
+        <section id="ai-options" class="ai-chrome-popover" aria-label="面板选项"
+                 data-i18n-aria="demo.ai.options" hidden>
+          <div class="ai-popover-heading" data-i18n="demo.ai.options">面板选项</div>
+          <button id="ai-reset-position" class="ai-menu-row" type="button"
+                  data-i18n="demo.ai.reset.position">重置面板位置</button>
+        </section>
         <div id="ai-steps-hint" class="demo-quota-hint"></div>
         <div id="ai-status" class="ai-status"></div>
         <div id="ai-trace" class="ai-trace">
@@ -571,8 +590,7 @@
         <div class="ai-composer">
           <div class="ai-composer-bar">
             <textarea id="ai-task" class="ai-task" rows="1" maxlength="300"
-              data-i18n-ph="demo.ai.task.ph"
-              placeholder="想让 AI 在这张切片里看什么？（可选，最多 300 字）"></textarea>
+              aria-label="向 AI 提问" data-i18n-aria="demo.ai.task.aria"></textarea>
             <button id="ai-run-btn" class="ai-send-btn" type="button" disabled
                     data-i18n-title="demo.ai.run.available" title="体验 AI 导航" aria-label="开始">
               <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
@@ -582,6 +600,8 @@
             </button>
           </div>
         </div>
+        <!-- 调整大小手柄（右下角；拖动/钳制逻辑在 ai-panel-shell.js；≤768px CSS 隐藏） -->
+        <span id="ai-panel-resize" class="ai-panel-resize" aria-hidden="true"></span>
       </div>
       {% elif histopilot_ui_enabled %}
       <!-- 改版第四轮 §1.4：AI 面板可拖动（标题栏）/可调整大小（右下角手柄）。

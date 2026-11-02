@@ -305,6 +305,10 @@ describe("demo.js 侧栏双语展示（工单 B）", () => {
 		expect(h.docState().title).toBe("肺腺癌 TCGA-49-AAR4 · app.doc.title.demo");
 		expect(h.els["current-slide"].textContent).toBe("肺腺癌 TCGA-49-AAR4");
 		expect(h.els["current-slide"].title).toBe("中文说明");
+		// 画布左上角标签（正式版 app.js 同口径）
+		expect(h.els["canvas-slide-label"].textContent).toBe("肺腺癌 TCGA-49-AAR4");
+		expect(h.els["canvas-slide-label"].hidden).toBe(false);
+		expect(h.els["canvas-slide-label"].title).toBe("中文说明");
 	});
 
 	it("en 打开切片：title 用英文名与英文说明", async () => {
@@ -314,6 +318,8 @@ describe("demo.js 侧栏双语展示（工单 B）", () => {
 		expect(h.docState().title).toBe("Lung adenocarcinoma TCGA-49-AAR4 · app.doc.title.demo");
 		expect(h.els["current-slide"].textContent).toBe("Lung adenocarcinoma TCGA-49-AAR4");
 		expect(h.els["current-slide"].title).toBe("English description");
+		expect(h.els["canvas-slide-label"].textContent).toBe("Lung adenocarcinoma TCGA-49-AAR4");
+		expect(h.els["canvas-slide-label"].title).toBe("English description");
 	});
 
 	it("hp-lang-change：切语言后列表/标题/步数提示重绘且不发新请求（无需重载）", async () => {
@@ -330,6 +336,9 @@ describe("demo.js 侧栏双语展示（工单 B）", () => {
 		expect(h.els["current-slide"].textContent).toBe("Lung adenocarcinoma TCGA-49-AAR4");
 		// 步数提示按新语言重写，{steps} 来自 config（不硬编码）
 		expect(h.els["ai-steps-hint"].textContent).toBe("demo.ai.steps.hint");
+		// 画布标签随语言重绘（无需重载/重新打开切片）
+		expect(h.els["canvas-slide-label"].textContent).toBe("Lung adenocarcinoma TCGA-49-AAR4");
+		expect(h.els["canvas-slide-label"].title).toBe("English description");
 		// 无重载：不发任何新 API 请求
 		expect(h.fetchCalls).toEqual([]);
 		// 切回 zh：条目与标题回到中文

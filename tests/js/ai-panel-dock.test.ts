@@ -26,6 +26,9 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSrc = readFileSync(resolve(here, "../../static/app.js"), "utf8");
+const shellSrc = readFileSync(resolve(here, "../../static/ai-panel-shell.js"), "utf8");
+const indexHtml = readFileSync(resolve(here, "../../templates/index.html"), "utf8");
+const demoHtml = readFileSync(resolve(here, "../../templates/demo.html"), "utf8");
 
 interface Box { left: number; top: number; width: number; height: number }
 
@@ -173,7 +176,7 @@ function bootModule(): PanelModule {
 	(globalThis as { HP_ViewerCore?: unknown }).HP_ViewerCore = w.HP_ViewerCore;
 	(globalThis as { HP_I18N?: unknown }).HP_I18N = w.HP_I18N;
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any, no-new-func
-	new Function("window", "document", "fetch", "location", appSrc)(w, doc, w.fetch, w.location);
+	new Function("window", "document", "fetch", "location", shellSrc)(w, doc, w.fetch, w.location);
 	// init() 由 DOMContentLoaded 触发（未派发）：只取模块导出，不启动整页装配
 	const HP = (w as { HP_AI_PANEL?: PanelModule }).HP_AI_PANEL;
 	if (!HP) throw new Error("HP_AI_PANEL not exported");
@@ -237,6 +240,35 @@ afterEach(() => {
 	delete (globalThis as { fetch?: unknown }).fetch;
 	delete (globalThis as { HP_ViewerCore?: unknown }).HP_ViewerCore;
 	delete (globalThis as { HP_I18N?: unknown }).HP_I18N;
+});
+
+describe("共享模块接线（正式版与 Demo 同源）", () => {
+	it("app.js 不再定义面板控制器/几何（单一来源在 ai-panel-shell.js）", () => {
+		expect(appSrc).not.toContain("function createAIPanelController");
+		expect(appSrc).not.toContain("function clampAIPanelBox");
+		expect(appSrc).not.toContain("function parseAIPanelPref");
+		expect(appSrc).toContain("window.HP_AI_PANEL");
+		expect(shellSrc).toContain("window.HP_AI_PANEL");
+	});
+
+	it("index.html 在 app.js 之前加载 ai-panel-shell.js", () => {
+		const shell = indexHtml.indexOf('src="/static/ai-panel-shell.js');
+		const app = indexHtml.indexOf('src="/static/app.js');
+		expect(shell).toBeGreaterThan(-1);
+		expect(app).toBeGreaterThan(-1);
+		expect(shell).toBeLessThan(app);
+	});
+
+	it("demo.html 在 demo.js 之前加载 ai-panel-shell.js，且不引用正式脚本/插件", () => {
+		const shell = demoHtml.indexOf('src="/static/ai-panel-shell.js');
+		const demo = demoHtml.indexOf('src="/static/demo.js');
+		expect(shell).toBeGreaterThan(-1);
+		expect(demo).toBeGreaterThan(-1);
+		expect(shell).toBeLessThan(demo);
+		expect(demoHtml).not.toContain("/plugins/histopilot/");
+		expect(demoHtml).not.toContain('src="/static/app.js');
+		expect(demoHtml).not.toContain("ai-panel-chrome.js");
+	});
 });
 
 describe("clampAIPanelBox（纯几何）", () => {

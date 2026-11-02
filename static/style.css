@@ -3903,12 +3903,6 @@ button {
   flex-shrink: 0;
   min-height: auto;
 }
-.ai-panel-header .ai-state {
-  margin-left: auto;
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--text-2);
-}
 .demo-disclaimer {
   font-size: 11px;
   color: var(--text-2);
@@ -3918,66 +3912,36 @@ button {
 .demo-ai-panel { display: flex; }
 .ai-send-btn:disabled { opacity: 0.45; cursor: default; }
 
-/* Demo 轨迹复用正式面板气泡语义（测试仍断言 ai-msg / ai-row） */
-.ai-trace .ai-msg {
-  font-size: 13px;
-  line-height: 1.4;
-  padding: 7px 11px;
-  border-radius: 13px;
-  max-width: 82%;
-  word-break: break-word;
-  white-space: pre-wrap;
+/* Demo AI 面板标题块：与正式 .ai-conversation-toggle 同几何，但不带按钮外观
+   （Demo 无会话下拉）；只读胶囊与标题同一行，窄面板（340px）下标题省略。 */
+.ai-title-layout .ai-panel-title-static {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  padding: 10px 4px;
+  font-size: 14px;
+  color: var(--text-1);
 }
-.ai-trace .ai-msg.user {
-  align-self: flex-end;
-  background: var(--accent);
-  color: #fff;
+.ai-title-layout .ai-panel-title-static #ai-panel-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.ai-trace .ai-msg.agent {
-  align-self: flex-start;
-  background: #e9e9eb;
-  color: var(--text);
-}
-.ai-trace .ai-row {
-  font-size: 12px;
-  color: var(--text-2);
-  padding: 2px 4px;
-}
-.ai-trace .ai-row.error { color: var(--danger); }
-.ai-trace .ai-obs {
-  align-self: flex-start;
-  background: #f0f7f0;
-  border: 1px solid rgba(52, 199, 89, 0.35);
-  border-radius: 9px;
-  padding: 6px 10px;
-  font-size: 12.5px;
-  color: var(--text);
-}
-.ai-trace .ai-obs b { font-size: 12px; }
-/* 观察卡：viewport 小结与 region 观察区；可点选的 region 卡选中后加边框 */
-.ai-trace .ai-obs .ai-obs-note {
-  margin-top: 2px;
-  color: var(--text-2);
-  font-size: 12px;
-  line-height: 1.4;
-  word-break: break-word;
-}
-.ai-trace .ai-obs .ai-obs-scope {
-  display: inline-block;
-  margin-top: 4px;
-  padding: 1px 7px;
-  border-radius: 999px;
+.demo-ai-readonly-tag {
+  flex: 0 0 auto;
+  padding: 0 7px;
   font-size: 11px;
-  background: rgba(52, 199, 89, 0.12);
-  color: #1f7a37;
+  line-height: 18px;
+  border-radius: 999px;
+  color: var(--accent);
+  background: var(--accent-fill);
+  white-space: nowrap;
 }
-.ai-trace .ai-obs.obs-viewport .ai-obs-scope {
-  background: #ececec;
-  color: var(--text-2);
-}
-.ai-trace .ai-obs.obs-region[style*="pointer"] { user-select: none; }
-.ai-trace .ai-obs.selected {
-  border-color: rgba(52, 199, 89, 0.9);
+/* 观察卡选中态（Demo 只读高亮）：绿色描边 + 外环，与原观察卡选中态一致 */
+.ai-trace .ai-attach.observation.selected {
+  border: 1px solid rgba(52, 199, 89, 0.9);
   box-shadow: 0 0 0 2px rgba(52, 199, 89, 0.2);
 }
 
@@ -5335,7 +5299,6 @@ html, body { font-size: 14px; }
 .ai-task { font-size: 15px; min-height: 44px; padding: 10px 12px; }
 .ai-session-select { font-size: 14px; min-height: var(--control-h); }
 .ai-suggest-chip, .link-btn { font-size: 14px; min-height: var(--control-h); }
-.ai-trace .ai-msg { font-size: 15px; line-height: 1.6; }
 .ai-empty-sub, .ai-source-card-title { font-size: 14px; line-height: 1.6; }
 .ai-session-bar-label, .hp-drawing-toggle .hp-switch-label { font-size: 13px; }
 .hp-drawing-toggle { min-height: var(--control-h); }

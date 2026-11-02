@@ -6,8 +6,8 @@
   <title>HistoPilot Beta · Demo</title>
   {% if canonical %}<link rel="canonical" href="{{ canonical }}" />{% endif %}
   {% include "_site_icons.html" %}
-  <link rel="stylesheet" href="/static/style.css?v=20260923" />
-  <script src="/static/i18n.js?v=20261021i"></script>
+  <link rel="stylesheet" href="/static/style.css?v=20261102a" />
+  <script src="/static/i18n.js?v=20261102a"></script>
   <script src="/static/openseadragon.min.js"></script>
 </head>
 <body class="app-mode-demo" data-app-mode="demo">
@@ -48,7 +48,9 @@
   <!-- 多通道通道着色（Batch 4）：三页面共用组件，须先于 demo.js 加载 -->
   <script src="/static/viewer-encoding.js?v=20260907c"></script>
   <script src="/static/channel-controls.js?v=20260907c"></script>
-  <script src="/static/demo.js?v=20260920"></script>
+  <!-- AI 面板外框共享模块（与正式版同源；Demo 仍只接 /api/demo/*） -->
+  <script src="/static/ai-panel-shell.js?v=20261102a"></script>
+  <script src="/static/demo.js?v=20261102a"></script>
   {% endif %}
 </body>
 </html>

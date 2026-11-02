@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const demoSrc = readFileSync(resolve(here, "../../static/demo.js"), "utf8");
+const shellSrc = readFileSync(resolve(here, "../../static/ai-panel-shell.js"), "utf8");
 const i18nSrc = readFileSync(resolve(here, "../../static/i18n.js"), "utf8");
 
 export interface FakeBbox {
@@ -51,62 +52,143 @@ interface DrawLog {
 	dash: number[];
 }
 
-function fakeEl() {
+/** 手写选择器匹配：只覆盖测试用到的 class 链 + :not(.x) 形态 */
+function matchesSelector(el: any, sel: string): boolean {
+	if (!el || !sel) return false;
+	if (sel.includes(",")) return sel.split(",").some((s) => matchesSelector(el, s.trim()));
+	let notClass: string | null = null;
+	const notM = sel.match(/:not\(\.([\w-]+)\)/);
+	if (notM) {
+		notClass = notM[1]!;
+		sel = sel.replace(notM[0], "");
+	}
+	const parts = sel.split(".").filter(Boolean);
+	if (!parts.length || parts.some((p) => p.startsWith("#") || p.startsWith("["))) return false;
+	const ok = parts.every((c) => el.classList && el.classList.contains(c));
+	return ok && (!notClass || !el.classList.contains(notClass));
+}
+
+function allDescendants(el: any): any[] {
+	const out: any[] = [];
+	for (const c of el.children || []) {
+		out.push(c);
+		out.push(...allDescendants(c));
+	}
+	return out;
+}
+
+function fakeEl(): any {
 	const drawLog: DrawLog = { strokes: [], fills: [], texts: [], ops: [], dash: [] };
-	const el: {
-		disabled: boolean;
-		textContent: string;
-		innerHTML: string;
-		className: string;
-		value: string;
-		closed: boolean;
-		_rawText: string;
-		parentNode: unknown;
-		children: unknown[];
-		scrollTop: number;
-		style: Record<string, string>;
-		dataset: Record<string, string>;
-		_drawn: DrawLog;
-		classList: { add(): void; remove(): void };
-		appendChild(child: unknown): unknown;
-		addEventListener(): void;
-		remove(): void;
-		getContext(): {
-			clearRect(): void;
-			save(): void;
-			restore(): void;
-			setTransform(): void;
-			setLineDash(d: number[]): void;
-			strokeRect(left: number, top: number, w: number, h: number): void;
-			fillRect(x: number, y: number, w: number, h: number): void;
-			fillText(t: string): void;
-			measureText(t: string): { width: number };
-		};
-		getBoundingClientRect(): { width: number; height: number };
-	} = {
+	const classes = new Set<string>();
+	const listeners: Record<string, Array<(e?: unknown) => void>> = {};
+	let ownText = "";
+	let rawHtml = "";
+	const el: any = {
 		disabled: false,
-		textContent: "",
-		innerHTML: "",
-		className: "",
 		value: "",
 		closed: false,
 		_rawText: "",
 		parentNode: null,
-		children: [],
+		children: [] as any[],
 		scrollTop: 0,
+		scrollHeight: 20,
 		style: {},
 		dataset: {},
+		attrs: {},
 		_drawn: drawLog,
-		classList: { add() {}, remove() {} },
-		appendChild(child: unknown) {
-			const c = child as typeof el;
-			c.parentNode = el;
-			el.children.push(c);
-			el.innerHTML += c.innerHTML || c.textContent || "";
+		get className() {
+			return [...classes].join(" ");
+		},
+		set className(v: string) {
+			classes.clear();
+			String(v).split(/\s+/).filter(Boolean).forEach((c) => classes.add(c));
+		},
+		get innerHTML() {
+			return rawHtml;
+		},
+		set innerHTML(v: string) {
+			rawHtml = String(v);
+			el.children.length = 0;
+		},
+		get textContent() {
+			// 真实 DOM：textContent 聚合全部子孙文本（工具行 details>summary>span）
+			if (el.children.length) return el.children.map((c: any) => c.textContent).join("");
+			return ownText;
+		},
+		set textContent(v: string) {
+			ownText = String(v);
+			el.children.length = 0;
+		},
+		get lastElementChild() {
+			return el.children.length ? el.children[el.children.length - 1] : null;
+		},
+		get nextSibling() {
+			const p = el.parentNode;
+			if (!p) return null;
+			const i = p.children.indexOf(el);
+			return i >= 0 ? p.children[i + 1] || null : null;
+		},
+		classList: {
+			add: (...n: string[]) => n.forEach((c) => classes.add(c)),
+			remove: (...n: string[]) => n.forEach((c) => classes.delete(c)),
+			contains: (c: string) => classes.has(c),
+			toggle: (c: string, force?: boolean) => {
+				const on = force === undefined ? !classes.has(c) : !!force;
+				if (on) classes.add(c);
+				else classes.delete(c);
+				return on;
+			},
+		},
+		setAttribute(k: string, v: string) {
+			el.attrs[k] = String(v);
+		},
+		getAttribute(k: string) {
+			return k in el.attrs ? el.attrs[k] : null;
+		},
+		addEventListener(type: string, cb: (e?: unknown) => void) {
+			(listeners[type] ||= []).push(cb);
+		},
+		dispatch(type: string, evt?: unknown) {
+			(listeners[type] || []).slice().forEach((cb) => cb(evt));
+		},
+		dispatchEvent(evt: any) {
+			if (evt && typeof evt === "object" && !("type" in evt)) evt.type = "input";
+			el.dispatch(evt && evt.type ? evt.type : "input", evt);
+			return true;
+		},
+		appendChild(child: any) {
+			if (child && typeof child === "object") child.parentNode = el;
+			el.children.push(child);
 			return child;
 		},
-		addEventListener() {},
-		remove() {},
+		insertBefore(child: any, ref: any) {
+			if (child && typeof child === "object") child.parentNode = el;
+			const i = ref ? el.children.indexOf(ref) : -1;
+			if (i >= 0) el.children.splice(i, 0, child);
+			else el.children.push(child);
+			return child;
+		},
+		removeChild(child: any) {
+			const i = el.children.indexOf(child);
+			if (i >= 0) el.children.splice(i, 1);
+			if (child) child.parentNode = null;
+			return child;
+		},
+		remove() {
+			if (el.parentNode) el.parentNode.removeChild(el);
+		},
+		focus() {
+			el.focused = true;
+		},
+		closest(sel: string) {
+			return matchesSelector(el, sel) ? el : null;
+		},
+		querySelector(sel: string) {
+			return allDescendants(el).find((c) => matchesSelector(c, sel)) || null;
+		},
+		querySelectorAll(sel: string) {
+			return allDescendants(el).filter((c) => matchesSelector(c, sel));
+		},
 		getContext() {
 			return {
 				clearRect() {
@@ -120,12 +202,12 @@ function fakeEl() {
 				restore() { drawLog.ops.push("restore"); },
 				setTransform() {},
 				setLineDash(d: number[]) { drawLog.dash = [...d]; },
-				strokeRect(left, top, w, h) {
+				strokeRect(left: number, top: number, w: number, h: number) {
 					drawLog.strokes.push({ left, top, w, h, dash: [...drawLog.dash] });
 				},
-				fillRect(x, y, w, h) { drawLog.fills.push({ x, y, w, h }); },
-				fillText(t) { drawLog.texts.push(String(t)); },
-				measureText(t) { return { width: String(t).length * 6 }; },
+				fillRect(x: number, y: number, w: number, h: number) { drawLog.fills.push({ x, y, w, h }); },
+				fillText(t: string) { drawLog.texts.push(String(t)); },
+				measureText(t: string) { return { width: String(t).length * 6 }; },
 			};
 		},
 		getBoundingClientRect: () => ({ width: 0, height: 0 }),
@@ -163,30 +245,42 @@ function demoAdapter(fetchImpl: typeof fetch) {
 
 function loadDemo(fetchImpl: typeof fetch) {
 	const els: Record<string, ReturnType<typeof fakeEl>> = {};
-	const listeners: Record<string, Array<() => void>> = {};
+	const docListeners: Record<string, Array<(e?: unknown) => void>> = {};
+	const winListeners: Record<string, Array<(e?: unknown) => void>> = {};
+	const i18n = { t: (k: string, _vars?: unknown) => k, getLang: () => "zh" };
 	const w: Record<string, unknown> = {
-		HP_I18N: { t: (k: string) => k },
+		HP_I18N: i18n,
 		HP_API: demoAdapter(fetchImpl),
 		AbortController,
 		fetch: fetchImpl,
 		OpenSeadragon: undefined,
+		addEventListener(type: string, fn: (e?: unknown) => void) {
+			(winListeners[type] ||= []).push(fn);
+		},
+		setTimeout: (fn: () => void) => setTimeout(fn, 0),
 	};
-	(globalThis as { HP_I18N: { t: (k: string) => string } }).HP_I18N = { t: (k: string) => k };
+	(globalThis as { HP_I18N?: unknown }).HP_I18N = i18n;
 	const doc = {
+		title: "",
 		getElementById(id: string) {
 			if (!els[id]) els[id] = fakeEl();
 			return els[id];
 		},
 		createElement() { return fakeEl(); },
-		addEventListener(type: string, fn: () => void) {
-			(listeners[type] ||= []).push(fn);
+		addEventListener(type: string, fn: (e?: unknown) => void) {
+			(docListeners[type] ||= []).push(fn);
 		},
 	};
 	(w as { document: typeof doc }).document = doc;
 	(globalThis as { document: typeof doc }).document = doc;
 	(globalThis as { window: typeof w }).window = w;
 	(globalThis as { fetch: typeof fetch }).fetch = fetchImpl;
+	// HTML 顺序：ai-panel-shell.js 先于 demo.js（建议提示条委托绑定）
+	new Function("window", "document", "fetch", shellSrc)(w, doc, fetchImpl);
 	new Function("window", "document", "fetch", demoSrc)(w, doc, fetchImpl);
+	// 装配外壳交互（composer / 面板 / 侧栏）；无 Viewer 依赖时 demo.js 在此返回
+	(docListeners.DOMContentLoaded || []).forEach((cb) => cb({}));
+	Object.assign(w, { __els: els, __docListeners: docListeners });
 	return w as unknown as {
 		HP_DEMO: {
 			loadConfig: (opts?: { restore?: boolean }) => Promise<unknown>;
@@ -199,6 +293,9 @@ function loadDemo(fetchImpl: typeof fetch) {
 			toggleObservationSelect: (id: string) => void;
 			visibleRegionObservations: () => ObsEntry[];
 			drawObservations: () => void;
+			newConversation: () => void;
+			autoGrowTask: () => void;
+			renderEmptyTrace: () => void;
 			state: {
 				terminal: boolean;
 				sessionAttached: boolean;
@@ -211,9 +308,15 @@ function loadDemo(fetchImpl: typeof fetch) {
 				observations: ObsEntry[];
 				selectedObservationId: string | null;
 				snapshotViews: Record<string, SnapshotView>;
+				liveBubble: unknown;
+				thinkingEl: unknown;
 			};
 		};
+		HP_AI_PANEL: unknown;
+		HP_I18N: typeof i18n;
 		OpenSeadragon: unknown;
+		__els: typeof els;
+		__docListeners: typeof docListeners;
 	};
 }
 
@@ -473,6 +576,7 @@ describe("demo.js IP 限流 429", () => {
 		}) as unknown as typeof fetch;
 		const w = loadDemo(fetchImpl);
 		w.HP_DEMO.state.current = { slide_id: "sld_x" };
+		(w as any).__els["ai-task"].value = "请读片";
 		w.HP_DEMO.startRun();
 		await Promise.resolve();
 		await Promise.resolve();
@@ -498,6 +602,7 @@ describe("demo.js IP 限流 429", () => {
 		}) as unknown as typeof fetch;
 		const w = loadDemo(fetchImpl);
 		w.HP_DEMO.state.current = { slide_id: "sld_x" };
+		(w as any).__els["ai-task"].value = "请读片";
 		w.HP_DEMO.startRun();
 		await Promise.resolve();
 		await Promise.resolve();
@@ -535,13 +640,15 @@ describe("demo.js 展示 text_delta 并在 agent_paused 结束本轮", () => {
 		const trace = (globalThis as { document: { getElementById: (id: string) => { children: Array<{ textContent: string; className: string }> } } })
 			.document.getElementById("ai-trace");
 		expect(trace.children.length).toBe(1);
-		expect(trace.children[0].className).toBe("ai-msg agent");
-		expect(trace.children[0].textContent).toBe("已检查范围");
+		expect(trace.children[0].className).toContain("ai-chat-bubble");
+		expect(trace.children[0].className).toContain("assistant");
+		expect((trace.children[0] as any)._rawText).toBe("已检查范围");
 		w.HP_DEMO.handleEvent("tool_started", { tool: "snapshot" });
 		w.HP_DEMO.handleEvent("text_delta", { text: "结论" });
 		expect(trace.children.length).toBe(3);
-		expect(trace.children[1].className).toBe("ai-row");
-		expect(trace.children[2].textContent).toBe("结论");
+		expect(trace.children[1].className).toBe("ai-tool-call");
+		expect(trace.children[2].className).toContain("ai-chat-bubble");
+		expect((trace.children[2] as any)._rawText).toBe("结论");
 	});
 
 		it("agent_paused 视为终态：finishRun 且不再请求 stream", async () => {
@@ -611,8 +718,8 @@ describe("demo.js agent_finished 总结去重", () => {
 
 	function agentMsgs() {
 		return traceChildren()
-			.filter((c) => c.className === "ai-msg agent")
-			.map((c) => c.textContent);
+			.filter((c) => c.className.includes("ai-chat-bubble") && c.className.includes("assistant"))
+			.map((c) => (c as any)._rawText);
 	}
 
 	it("引导语气泡不抑制总结：先流式引导句，再收到完整 summary → 总结仍追加", async () => {
@@ -625,7 +732,7 @@ describe("demo.js agent_finished 总结去重", () => {
 		await Promise.resolve();
 		await Promise.resolve();
 		expect(agentMsgs()).toEqual(["下面给出总结", "未见明确恶性证据。"]);
-		expect(traceChildren().some((c) => c.className === "ai-row")).toBe(true);
+		expect(traceChildren().some((c) => c.className === "ai-status finished")).toBe(true);
 	});
 
 	it("流式文本已含完整总结 → 不重复追加", async () => {
@@ -661,7 +768,7 @@ describe("demo.js agent_finished 总结去重", () => {
 		await Promise.resolve();
 		await Promise.resolve();
 		expect(agentMsgs()).toEqual([]);
-		expect(traceChildren().some((c) => c.className === "ai-row")).toBe(true);
+		expect(traceChildren().some((c) => c.className === "ai-status finished")).toBe(true);
 	});
 });
 
@@ -724,8 +831,8 @@ describe("demo.js AI 视角与临时观察（批次B）", () => {
 		expect(canvas._drawn.strokes.length).toBe(0);
 		const trace = traceEl();
 		const row = trace.children[trace.children.length - 1] as { className: string; textContent: string };
-		expect(row.className).toBe("ai-row");
-		expect(row.textContent).toContain("demo.ai.goto");
+		expect(row.className).toBe("ai-tool-call");
+		expect(row.textContent).toContain("tool.goto");
 		expect(row.textContent).toContain("5x（低倍）");
 	});
 
@@ -1146,6 +1253,7 @@ describe("demo.js AI 视角与临时观察（批次B）", () => {
 			bbox_level0: { x: 50, y: 50, w: 200, h: 200 },
 		});
 		w.HP_DEMO.state.current = { slide_id: "b" };
+		(w as any).__els["ai-task"].value = "再读一次";
 		w.HP_DEMO.startRun();
 		expect(w.HP_DEMO.state.currentSnapshotView).toBeNull();
 		expect(w.HP_DEMO.state.observations).toEqual([]);
@@ -1160,7 +1268,7 @@ describe("demo.js AI 视角与临时观察（批次B）", () => {
 		expect(canvas._drawn.strokes.length).toBe(0);
 		const trace = traceEl();
 		const row = trace.children[trace.children.length - 1] as { className: string; textContent: string };
-		expect(row.className).toBe("ai-row");
+		expect(row.className).toBe("ai-status info");
 		expect(row.textContent).toContain("demo.ai.annotation.created");
 	});
 
@@ -1172,5 +1280,330 @@ describe("demo.js AI 视角与临时观察（批次B）", () => {
 		for (const [, key, value] of entries) {
 			expect(value, `i18n key ${key}`).not.toMatch(/已标注|第\s*\d*\s*处标注|标注区/);
 		}
+	});
+});
+
+// =========================================================================
+// Demo 复用正式面板契约：Markdown 气泡 / 思考点 / 快捷提问 / Enter 发送 /
+// 新对话 / 快照卡点击（只读导航）。
+// =========================================================================
+describe("demo.js 正式面板渲染与输入契约", () => {
+	function idleFetch(extra?: (u: string) => ReturnType<typeof jsonResponse> | null) {
+		const calls: string[] = [];
+		const impl = vi.fn((url: string) => {
+			const u = String(url);
+			calls.push(u);
+			const special = extra ? extra(u) : null;
+			if (special) return special;
+			if (u.includes("/api/demo/ai/run")) return sseResponse("");
+			if (u.includes("/api/demo/config") || u.includes("/api/demo/ai/session/")) {
+				return jsonResponse({ session: { last_event_seq: 1 }, transcript: [] });
+			}
+			return jsonResponse({});
+		}) as unknown as typeof fetch;
+		return { impl, calls };
+	}
+
+	function traceEl(w: ReturnType<typeof loadDemo>) {
+		return (w as any).__els["ai-trace"];
+	}
+
+	it("Markdown：粗体/列表/行内代码渲染为 DOM；XSS 文本保持转义", () => {
+		const { impl } = idleFetch();
+		const w = loadDemo(impl);
+		w.HP_DEMO.handleEvent("text_delta", { text: "**重点**\n- 甲\n- 乙\n\n`code`" });
+		const bubble = traceEl(w).children[0];
+		expect(bubble.className).toContain("ai-chat-bubble");
+		expect(bubble.className).toContain("assistant");
+		expect(bubble.className).toContain("ai-md");
+		expect(bubble.innerHTML).toContain("<strong>重点</strong>");
+		expect(bubble.innerHTML).toContain("<li>甲</li>");
+		expect(bubble.innerHTML).toContain("<code>code</code>");
+		// 模型输出不可信：先转义再格式化，绝不注入原始标签
+		w.HP_DEMO.handleEvent("agent_finished", {});
+		w.HP_DEMO.handleEvent("text_delta", { text: '<img src=x onerror=alert(1)>' });
+		const last = traceEl(w).children.filter((c: any) => c.className.indexOf("assistant") >= 0).pop() as any;
+		expect(last.innerHTML).toContain("&lt;img");
+		expect(last.innerHTML).not.toContain("<img");
+	});
+
+	it("气泡分组：连续同侧气泡只保留最后一条 tail（前一条改 grp 视觉）", async () => {
+		const session = {
+			session: { last_event_seq: 1 },
+			transcript: [
+				{ role: "user", display_text: "第一问" },
+				{ role: "user", display_text: "第二问" },
+			],
+		};
+		const { impl } = idleFetch((u) =>
+			/\/api\/demo\/ai\/session\/[^/?]+$/.test(u) ? jsonResponse(session) : null);
+		const w = loadDemo(impl);
+		w.HP_DEMO.state.sessionId = "sess_group";
+		w.HP_DEMO.handleEvent("event_reset", {});
+		await flushMicrotasks();
+		const users = traceEl(w).children.filter((c: any) => c.classList.contains("user"));
+		expect(users.length).toBe(2);
+		expect(users[0].classList.contains("tail")).toBe(false);
+		expect(users[1].classList.contains("grp")).toBe(true);
+		expect(users[1].classList.contains("tail")).toBe(true);
+	});
+
+	it("thinking row：agent_thinking 出三点行，内容事件移除；空流式气泡不留 DOM", () => {
+		const { impl } = idleFetch();
+		const w = loadDemo(impl);
+		w.HP_DEMO.handleEvent("agent_thinking");
+		let trace = traceEl(w);
+		let thinking = trace.children[trace.children.length - 1];
+		expect(thinking.className).toBe("ai-chat-thinking");
+		expect(thinking.children.length).toBe(3);
+		expect(thinking.children[0].className).toBe("dot");
+		w.HP_DEMO.handleEvent("text_delta", { text: "回答" });
+		trace = traceEl(w);
+		expect(trace.children.some((c: any) => c.className === "ai-chat-thinking")).toBe(false);
+		// 新思考行 + 终态：空白活气泡被移除，不留下空气泡
+		w.HP_DEMO.handleEvent("agent_thinking");
+		w.HP_DEMO.handleEvent("agent_finished", {});
+		trace = traceEl(w);
+		expect(trace.children.some((c: any) => c.className === "ai-chat-thinking")).toBe(false);
+		expect(trace.children.filter((c: any) => c.className.indexOf("ai-chat-bubble") >= 0).length).toBe(1);
+	});
+
+	it("快捷提问：填入 #ai-task、聚焦并派发 input（不自动发送）", () => {
+		const { impl, calls } = idleFetch();
+		const w = loadDemo(impl);
+		w.HP_I18N.t = (k: string) => (k === "ai.suggest.overview.task" ? "浏览全片并总结" : k);
+		const task = (w as any).__els["ai-task"];
+		const chip = fakeEl();
+		chip.className = "ai-suggest-chip";
+		chip.setAttribute("data-task-key", "ai.suggest.overview.task");
+		((w as any).__docListeners["click"] || []).forEach((cb: any) => cb({ target: chip }));
+		expect(task.value).toBe("浏览全片并总结");
+		expect(task.focused).toBe(true);
+		expect(task.style.height).toBe("20px"); // input → autoGrow
+		expect(calls.some((u) => u.includes("/api/demo/ai/run"))).toBe(false);
+	});
+
+	function keydown(w: ReturnType<typeof loadDemo>, extra: Record<string, unknown>) {
+		const task = (w as any).__els["ai-task"];
+		let prevented = false;
+		task.dispatch("keydown", Object.assign({
+			key: "Enter", shiftKey: false, isComposing: false, keyCode: 13,
+			preventDefault() { prevented = true; },
+		}, extra));
+		return prevented;
+	}
+
+	it("Enter 发送一次请求；Shift+Enter / isComposing / 229 不发送", async () => {
+		const { impl, calls } = idleFetch();
+		const w = loadDemo(impl);
+		w.HP_DEMO.state.current = { slide_id: "sld_x" };
+		const task = (w as any).__els["ai-task"];
+		task.value = "请读片";
+		expect(keydown(w, { shiftKey: true })).toBe(false);
+		expect(keydown(w, { isComposing: true })).toBe(false);
+		expect(keydown(w, { keyCode: 229 })).toBe(false);
+		expect(calls.filter((u) => u.includes("/api/demo/ai/run")).length).toBe(0);
+		expect(keydown(w, {})).toBe(true);
+		await flushMicrotasks();
+		expect(calls.filter((u) => u.includes("/api/demo/ai/run")).length).toBe(1);
+		// 发送后输入框清空并自动增高
+		expect(task.value).toBe("");
+		expect(task.style.height).toBe("20px");
+	});
+
+	it("空白输入不发请求，toast 提示并聚焦输入框", () => {
+		const { impl, calls } = idleFetch();
+		const w = loadDemo(impl);
+		w.HP_DEMO.state.current = { slide_id: "sld_x" };
+		const task = (w as any).__els["ai-task"];
+		task.value = "   ";
+		task.focused = false;
+		w.HP_DEMO.startRun();
+		expect(calls.filter((u) => u.includes("/api/demo/ai/run")).length).toBe(0);
+		expect(task.focused).toBe(true);
+		expect((w as any).__els["toast-container"].children.length).toBeGreaterThan(0);
+	});
+
+	it("新对话：恢复空状态三个快捷提问，不发任何请求", () => {
+		const { impl, calls } = idleFetch();
+		const w = loadDemo(impl);
+		const task = (w as any).__els["ai-task"];
+		task.value = "旧输入";
+		calls.length = 0;
+		w.HP_DEMO.newConversation();
+		const trace = traceEl(w);
+		expect(trace.children.length).toBe(1);
+		expect(trace.children[0].className).toBe("ai-trace-empty");
+		const chips = trace.children[0].querySelectorAll(".ai-suggest-chip");
+		expect(chips.length).toBe(3);
+		expect(chips[0].getAttribute("data-task-key")).toBe("ai.suggest.overview.task");
+		expect(chips[0].getAttribute("data-i18n")).toBe("ai.suggest.overview");
+		expect(task.value).toBe("");
+		expect(calls).toEqual([]);
+	});
+
+	it("快照卡：点击导航（用户主动只读回看）；实时 snapshot_captured 不导航", () => {
+		class Pt { constructor(public x: number, public y: number) {} }
+		class Rc { constructor(public x: number, public y: number, public w: number, public h: number) {} }
+		const { impl } = idleFetch();
+		const w = loadDemo(impl);
+		w.OpenSeadragon = { Point: Pt, Rect: Rc };
+		(globalThis as any).OpenSeadragon = w.OpenSeadragon;
+		const fits: Array<{ x: number; y: number; w: number; h: number }> = [];
+		w.HP_DEMO.state.viewer = {
+			viewport: {
+				fitBounds(r: Rc) { fits.push({ x: r.x, y: r.y, w: r.w, h: r.h }); },
+				imageToViewportRectangle(r: Rc) { return r; },
+				imageToViewerElementCoordinates(p: Pt) { return { x: p.x, y: p.y }; },
+			},
+		};
+		w.HP_DEMO.handleEvent("snapshot_captured", {
+			snapshot_id: "snap-1", bbox_level0: { x: 100, y: 200, w: 1000, h: 800 }, magnification: "5x",
+		});
+		expect(fits.length).toBe(0);
+		const card = traceEl(w).children.find((c: any) => c.classList.contains("snapshot"));
+		expect(card).toBeTruthy();
+		card.dispatch("click", {});
+		expect(fits.length).toBe(1);
+		expect(w.HP_DEMO.state.currentSnapshotView!.snapshot_id).toBe("snap-1");
+	});
+});
+
+// =========================================================================
+// 失败/重连收尾：思考点不得残留；禁用态按钮不得被 Enter 绕过。
+// =========================================================================
+describe("demo.js 失败收尾与发送闸", () => {
+	function trace(w: ReturnType<typeof loadDemo>) {
+		return (w as any).__els["ai-trace"];
+	}
+
+	function hasThinking(w: ReturnType<typeof loadDemo>) {
+		return trace(w).children.some((c: any) => c.className === "ai-chat-thinking");
+	}
+
+	it("429 JSON：移除思考点、出错误行，且「新对话」恢复可用", async () => {
+		const calls: string[] = [];
+		const fetchImpl = vi.fn((url: string) => {
+			const u = String(url);
+			calls.push(u);
+			if (u.includes("/api/demo/ai/run")) {
+				return jsonResponse(
+					{ code: "demo_run_in_progress", error: "in progress" }, {}, 409);
+			}
+			return jsonResponse({});
+		}) as unknown as typeof fetch;
+		const w = loadDemo(fetchImpl);
+		w.HP_DEMO.state.current = { slide_id: "sld_x" };
+		(w as any).__els["ai-task"].value = "请读片";
+		w.HP_DEMO.startRun();
+		expect(hasThinking(w)).toBe(true);
+		await flushMicrotasks();
+		expect(hasThinking(w)).toBe(false);
+		expect(trace(w).children.some(
+			(c: any) => c.className === "ai-status error")).toBe(true);
+		expect(w.HP_DEMO.state.running).toBe(false);
+		// state.running 先落，再 setAiButton：新对话不再卡在 disabled
+		expect((w as any).__els["ai-new-conversation"].disabled).toBe(false);
+		expect(calls.filter((u) => u.includes("/api/demo/ai/run")).length).toBe(1);
+	});
+
+	it("aiRun 网络失败：移除思考点并出错误行", async () => {
+		const fetchImpl = vi.fn((url: string) => {
+			const u = String(url);
+			if (u.includes("/api/demo/ai/run")) {
+				return Promise.reject(new Error("network down"));
+			}
+			return jsonResponse({});
+		}) as unknown as typeof fetch;
+		const w = loadDemo(fetchImpl);
+		w.HP_DEMO.state.current = { slide_id: "sld_x" };
+		(w as any).__els["ai-task"].value = "请读片";
+		w.HP_DEMO.startRun();
+		await flushMicrotasks();
+		expect(hasThinking(w)).toBe(false);
+		expect(trace(w).children.some(
+			(c: any) => c.className === "ai-status error")).toBe(true);
+		expect(w.HP_DEMO.state.running).toBe(false);
+	});
+
+	it("重连流 410：finishRun 收尾移除思考点", async () => {
+		vi.useFakeTimers();
+		try {
+			const fetchImpl = vi.fn((url: string) => {
+				const u = String(url);
+				if (u.includes("/api/demo/ai/run")) {
+					return Promise.resolve({
+						ok: true,
+						status: 200,
+						headers: { get: (k: string) => (k === "X-AI-Session-ID" ? "sess_410" : null) },
+						json: () => Promise.resolve({}),
+						text: () => Promise.resolve(""),
+						body: new ReadableStream({ start(c: ReadableStreamDefaultController) { c.close(); } }),
+					});
+				}
+				if (u.includes("/api/demo/ai/session/sess_410/stream")) {
+					return jsonResponse({}, {}, 410);
+				}
+				if (u.includes("/api/demo/config")) {
+					return jsonResponse({ demo_enabled: true, ai_available: true, run_state: null });
+				}
+				return jsonResponse({});
+			}) as unknown as typeof fetch;
+			const w = loadDemo(fetchImpl);
+			w.HP_DEMO.state.current = { slide_id: "sld_x" };
+			(w as any).__els["ai-task"].value = "请读片";
+			w.HP_DEMO.startRun();
+			await flushMicrotasks();
+			expect(hasThinking(w)).toBe(true);
+			await vi.advanceTimersByTimeAsync(1600);
+			await flushMicrotasks();
+			expect(hasThinking(w)).toBe(false);
+			expect(w.HP_DEMO.state.terminal).toBe(true);
+			expect(w.HP_DEMO.state.running).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("发送钮禁用时 Enter 不发送、不清输入、只提示当前状态", async () => {
+		const calls: string[] = [];
+		const fetchImpl = vi.fn((url: string) => {
+			const u = String(url);
+			calls.push(u);
+			if (u.includes("/api/demo/config")) {
+				return jsonResponse({
+					demo_enabled: true,
+					ai_available: true,
+					run_state: null,
+					spend: {
+						week_limit_nano_cny: "1000000000",
+						week_spent_nano_cny: "1000000000",
+						week_reserved_nano_cny: "0",
+						demo_exhausted: true,
+					},
+				});
+			}
+			return jsonResponse({});
+		}) as unknown as typeof fetch;
+		const w = loadDemo(fetchImpl);
+		await w.HP_DEMO.loadConfig();
+		const runBtn = (w as any).__els["ai-run-btn"];
+		expect(runBtn.disabled).toBe(true);
+		w.HP_DEMO.state.current = { slide_id: "sld_x" };
+		const task = (w as any).__els["ai-task"];
+		task.value = "请读片";
+		let prevented = false;
+		task.dispatch("keydown", {
+			key: "Enter", shiftKey: false, isComposing: false, keyCode: 13,
+			preventDefault() { prevented = true; },
+		});
+		await flushMicrotasks();
+		expect(prevented).toBe(true);
+		expect(calls.filter((u) => u.includes("/api/demo/ai/run")).length).toBe(0);
+		expect(task.value).toBe("请读片");
+		expect(w.HP_DEMO.state.running).toBe(false);
+		// toast 使用配额条当前文案（这里 t 返回 key）
+		const toasts = (w as any).__els["toast-container"].children;
+		expect(toasts[toasts.length - 1].textContent).toBe("demo.ai.run.spend.exhausted");
 	});
 });

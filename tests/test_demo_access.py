@@ -1348,6 +1348,37 @@ def test_demo_available_template_hides_write_ops():
     assert 'src="/static/app.js' not in html
     assert "/plugins/histopilot/" not in html
 
+
+def test_demo_ai_panel_reuses_official_shell_but_stays_read_only():
+    """Demo AI 面板复用正式标题栏/轨迹组件 + 共享外框模块，仍不加载插件。"""
+    from flask import render_template
+    with app_mod.app.app_context():
+        html = render_template(
+            "demo.html",
+            logged_in=False,
+            demo_available=True, demo_enabled=True, app_mode="demo",
+            capabilities=app_mod._app_capabilities("demo"),
+            histopilot_ui_enabled=False,
+            adapter_mode="plugin-contract",
+        )
+    # 正式面板同款容器/标题栏/拖动手柄（ai-panel-shell.js 提供几何与手势）
+    assert 'class="ai-panel ai-dockable ai-title-layout demo-ai-panel"' in html
+    assert 'id="ai-panel-header"' in html
+    assert 'id="ai-panel-resize"' in html
+    assert 'id="ai-new-conversation"' in html
+    assert 'id="ai-options"' in html
+    assert 'id="ai-reset-position"' in html
+    # 旧 Demo 专属运行态标签已移除（运行反馈改为轨迹思考点 + 禁用发送钮）
+    assert 'id="ai-state"' not in html
+    # 共享本地模块先于 demo.js；仍然不加载正式 app.js / 插件 UI
+    shell_pos = html.find('src="/static/ai-panel-shell.js')
+    demo_pos = html.find('src="/static/demo.js')
+    assert shell_pos >= 0 and demo_pos > shell_pos
+    assert 'src="/static/app.js' not in html
+    assert "ai-panel-chrome.js" not in html
+    assert "/plugins/histopilot/" not in html
+
+
 def test_demo_landing_login_cta_switches_for_logged_in_users(monkeypatch):
     """/demo 已登录用户 CTA 切换「打开完整版」，匿名保持登录/注册（docs B2）。
 

@@ -41,7 +41,8 @@
     sessionAttached: false, // 本页已附着过该 session 的流（避免终态循环重连）
     rebuilding: false,    // event_reset 正在拉 snapshot
     pendingEvents: [],    // 重建期间缓存的原流事件，完成后按序回放
-    liveBubble: null,     // 当前可续写的 text_delta 回答区域
+    liveBubble: null,     // 当前可续写的 text_delta 回答气泡
+    thinkingEl: null,     // 当前「正在输入」三点行
     channelCtrl: null,    // 多通道通道着色控制器（Batch 4，channel-controls.js 共用）
   };
 
@@ -462,6 +463,16 @@
       });
   }
 
+  // 画布左上角切片标签：当前语言展示名 + 说明 tooltip；无名称时隐藏。
+  function updateCanvasSlideLabel(entry) {
+    var label = $("canvas-slide-label");
+    if (!label) return;
+    var name = demoDisplayName(entry);
+    label.textContent = name;
+    label.hidden = !name;
+    label.title = demoDescription(entry) || (entry && entry.name) || "";
+  }
+
   function openSlide(slideId) {
     var entry = state.slides.filter(function (s) { return s.slide_id === slideId; })[0];
     if (!entry) return;
@@ -476,6 +487,9 @@
       $("current-slide").textContent = demoDisplayName(entry);
       $("current-slide").title = demoDescription(entry) || entry.name || "";
     }
+    // 画布左上角切片名（正式版 app.js updateCanvasSlideLabel 同口径）：
+    // Demo 共享外壳的 #canvas-slide-label 之前一直隐藏/为空，这里补齐。
+    updateCanvasSlideLabel(entry);
     // §3.4：常驻 #current-slide 下架后，切片名进 document.title；
     // Demo 组合「Beta · Demo」标识（正式版为「切片名 · PathTogether Beta」）。
     // 工单 B：#current-slide 与 document.title 均用当前语言展示名（切换语言
@@ -628,7 +642,9 @@
       status.classList.add("error");
       status.textContent = extra;
     }
-    if ($("ai-state")) $("ai-state").textContent = state.running ? t("demo.ai.state.running") : "";
+    // 新对话在本轮运行中不可用（只清本地轨迹，不触碰服务端状态）
+    var newBtn = $("ai-new-conversation");
+    if (newBtn) newBtn.disabled = !!state.running;
   }
 
   function applyConfig(cfg) {
@@ -695,14 +711,413 @@
       });
   }
 
-  // ---------- SSE 消费（与正式 UI 同语义：event_reset 全量重建；断线按 last id） ----------
-  function appendTrace(cls, text, isHtml) {
-    var el = document.createElement("div");
-    el.className = cls;
-    if (isHtml) el.innerHTML = text; else el.textContent = text;
-    $("ai-trace").appendChild(el);
-    $("ai-trace").scrollTop = $("ai-trace").scrollHeight;
+  // ---------- 对话流渲染 ----------
+  // ported from HistoPilot plugin 0.4.9 renderer.js; keep class names in sync.
+  // 与正式面板同一 DOM 契约：气泡 / Markdown / 折叠工具行 / 快照与观察卡 /
+  // 状态行 / 思考点。所有文本先转义再套有限 Markdown（XSS 安全）。
+  function clearAiEmpty(container) {
+    if (!container || typeof container.querySelector !== "function") return;
+    var empty = container.querySelector(".ai-trace-empty");
+    if (empty && empty.parentNode) empty.parentNode.removeChild(empty);
+  }
+
+  function escHtml(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function inlineMarkdown(s) {
+    var md = escHtml(s);
+    var codes = [];
+    md = md.replace(/`([^`]+)`/g, function (_, code) {
+      codes.push("<code>" + code + "</code>");
+      return "\u0000C" + (codes.length - 1) + "\u0000";
+    });
+    md = md.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    md = md.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    md = md.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, "$1<em>$2</em>");
+    md = md.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+    md = md.replace(/(^|[^_])_([^_]+)_(?!_)/g, "$1<em>$2</em>");
+    md = md.replace(/\u0000C(\d+)\u0000/g, function (_, i) { return codes[Number(i)] || ""; });
+    return md;
+  }
+
+  function renderMarkdown(src) {
+    var text = String(src == null ? "" : src).replace(/\r\n/g, "\n");
+    // 空白输入返回空串：兜底 <p></p> 会叠出灰色空气泡
+    if (!text.trim()) return "";
+    var fences = [];
+    text = text.replace(/```[\w-]*\n?([\s\S]*?)```/g, function (_, code) {
+      fences.push("<pre class=\"ai-md-pre\"><code>" + escHtml(code.replace(/\n$/, "")) + "</code></pre>");
+      return "\n\u0000F" + (fences.length - 1) + "\u0000\n";
+    });
+    var lines = text.split("\n");
+    var out = [];
+    var i = 0;
+    var para = [];
+    var inUl = false;
+    var inOl = false;
+    function flushPara() {
+      if (!para.length) return;
+      out.push("<p>" + inlineMarkdown(para.join("\n")).replace(/\n/g, "<br>") + "</p>");
+      para = [];
+    }
+    function closeLists() {
+      if (inUl) { out.push("</ul>"); inUl = false; }
+      if (inOl) { out.push("</ol>"); inOl = false; }
+    }
+    while (i < lines.length) {
+      var line = lines[i];
+      var fence = line.match(/^\u0000F(\d+)\u0000$/);
+      if (fence) { flushPara(); closeLists(); out.push(fences[Number(fence[1])] || ""); i += 1; continue; }
+      if (/^\s*$/.test(line)) { flushPara(); closeLists(); i += 1; continue; }
+      var hm = line.match(/^(#{1,3})\s+(.+)$/);
+      if (hm) { flushPara(); closeLists(); out.push("<h" + hm[1].length + ">" + inlineMarkdown(hm[2]) + "</h" + hm[1].length + ">"); i += 1; continue; }
+      var um = line.match(/^\s*[-*+]\s+(.+)$/);
+      if (um) {
+        flushPara();
+        if (inOl) { out.push("</ol>"); inOl = false; }
+        if (!inUl) { out.push("<ul>"); inUl = true; }
+        out.push("<li>" + inlineMarkdown(um[1]) + "</li>"); i += 1; continue;
+      }
+      var om = line.match(/^\s*\d+\.\s+(.+)$/);
+      if (om) {
+        flushPara();
+        if (inUl) { out.push("</ul>"); inUl = false; }
+        if (!inOl) { out.push("<ol>"); inOl = true; }
+        out.push("<li>" + inlineMarkdown(om[1]) + "</li>"); i += 1; continue;
+      }
+      var qm = line.match(/^\s*>\s?(.*)$/);
+      if (qm) { flushPara(); closeLists(); out.push("<blockquote>" + inlineMarkdown(qm[1]) + "</blockquote>"); i += 1; continue; }
+      closeLists();
+      para.push(line);
+      i += 1;
+    }
+    flushPara();
+    closeLists();
+    return out.join("") || ("<p>" + inlineMarkdown(text) + "</p>");
+  }
+
+  function setBubbleContent(el, side, text) {
+    if (!el) return;
+    el._rawText = text == null ? "" : String(text);
+    if (side === "assistant") {
+      el.classList.add("ai-md");
+      // 空白文本清空内容，不走 markdown（避免空 <p> 空气泡）
+      el.innerHTML = el._rawText.trim() ? renderMarkdown(el._rawText) : "";
+    } else {
+      el.classList.remove("ai-md");
+      el.textContent = el._rawText;
+    }
+  }
+
+  function lastChildOf(el) {
+    if (!el) return null;
+    if (el.lastElementChild !== undefined) return el.lastElementChild;
+    return el.children && el.children.length ? el.children[el.children.length - 1] : null;
+  }
+
+  // 聊天气泡：side="user"（右，纯文本）/ "assistant"（左，Markdown）。
+  function appendChatBubble(side, text) {
+    var container = $("ai-trace");
+    if (!container) return null;
+    // 空串 / 纯空白不建 DOM（历史重建与流式共用）
+    if (!String(text == null ? "" : text).trim()) return null;
+    clearAiEmpty(container);
+    var prev = lastChildOf(container);
+    var row = document.createElement("div");
+    row.className = "ai-chat-bubble " + side;
+    if (prev && prev.classList && prev.classList.contains("ai-chat-bubble") &&
+        prev.classList.contains(side)) {
+      prev.classList.remove("tail");
+      row.classList.add("grp");
+    }
+    row.classList.add("tail");
+    setBubbleContent(row, side, text);
+    container.appendChild(row);
+    if (side === "assistant") markUserBubblesRead(container);
+    container.scrollTop = container.scrollHeight;
+    return row;
+  }
+
+  function markUserBubblesRead(container) {
+    if (!container || typeof container.querySelectorAll !== "function") return;
+    var unread = container.querySelectorAll(".ai-chat-bubble.user:not(.read)");
+    for (var i = 0; i < unread.length; i++) {
+      var b = unread[i];
+      b.classList.add("read");
+      var r = document.createElement("div");
+      r.className = "ai-read-receipt";
+      r.textContent = fmtMsgTs(new Date()) + " " + t("ai.bubble.read");
+      if (b.nextSibling) container.insertBefore(r, b.nextSibling);
+      else container.appendChild(r);
+    }
+  }
+
+  function fmtAiMag(mag) {
+    if (mag === null || mag === undefined || mag === "") return "";
+    if (typeof mag === "string") return mag;
+    var m = Number(mag);
+    if (!isFinite(m)) return String(mag);
+    return (m >= 10 ? Math.round(m) : m.toFixed(1)) + "x";
+  }
+
+  function fmtNum(v) { return v == null ? "?" : Math.round(v); }
+
+  function truncateStr(s, n) {
+    s = String(s == null ? "" : s);
+    if (s.length <= n) return s;
+    return s.slice(0, n) + "…";
+  }
+
+  // iMessage 顶部时间分隔文案：按当前界面语言走 Intl 本地化
+  function fmtMsgTs(d) {
+    var lang = (window.HP_I18N && window.HP_I18N.getLang && window.HP_I18N.getLang()) || "zh";
+    var locale = lang === "zh" ? "zh-CN" : "en-US";
+    var now = new Date();
+    var hm = ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
+    var sameDay = d.toDateString() === now.toDateString();
+    try {
+      var wd = new Intl.DateTimeFormat(locale, { weekday: "short" }).format(d);
+      if (sameDay) return wd + " " + hm;
+      if (d.getFullYear() === now.getFullYear()) {
+        var datePart = lang === "zh"
+          ? (d.getMonth() + 1) + "月" + d.getDate() + "日"
+          : new Intl.DateTimeFormat(locale, { month: "short", day: "numeric" }).format(d);
+        return datePart + " " + wd + " " + hm;
+      }
+      var fullPart = lang === "zh"
+        ? d.getFullYear() + "年" + (d.getMonth() + 1) + "月" + d.getDate() + "日"
+        : new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", year: "numeric" }).format(d);
+      return fullPart + " " + wd + " " + hm;
+    } catch (e) { return d.toLocaleString(); }
+  }
+
+  function appendMsgTs(ts) {
+    var container = $("ai-trace");
+    if (!container) return null;
+    clearAiEmpty(container);
+    var d = ts instanceof Date ? ts
+      : (typeof ts === "number" ? new Date(ts > 1e12 ? ts : ts * 1000) : new Date());
+    var row = document.createElement("div");
+    row.className = "ai-msg-ts";
+    row.textContent = fmtMsgTs(d);
+    container.appendChild(row);
+    return row;
+  }
+
+  function appendStatusRow(cls, text) {
+    if (!text) return null;
+    var container = $("ai-trace");
+    if (!container) return null;
+    clearAiEmpty(container);
+    var row = document.createElement("div");
+    row.className = "ai-status " + (cls || "info");
+    row.textContent = text;
+    container.appendChild(row);
+    container.scrollTop = container.scrollHeight;
+    return row;
+  }
+
+  // 断线恢复提示行（原地更新，不刷屏）
+  function appendReconnectStatus(p) {
+    var container = $("ai-trace");
+    if (!container) return null;
+    clearAiEmpty(container);
+    var text = (p && p.text) ? p.text : t("demo.ai.reconnecting");
+    var last = lastChildOf(container);
+    if (last && last.classList && last.classList.contains("ai-reconnect")) {
+      last.textContent = text;
+      container.scrollTop = container.scrollHeight;
+      return last;
+    }
+    var row = document.createElement("div");
+    row.className = "ai-reconnect";
+    row.textContent = text;
+    container.appendChild(row);
+    container.scrollTop = container.scrollHeight;
+    return row;
+  }
+
+  function appendToolCall(name, detail) {
+    var container = $("ai-trace");
+    if (!container) return null;
+    clearAiEmpty(container);
+    var el = document.createElement("details");
+    el.className = "ai-tool-call";
+    var sum = document.createElement("summary");
+    sum.className = "ai-tool-summary";
+    var label = document.createElement("span");
+    label.className = "ai-tool-name";
+    label.textContent = toolCallLabel(name);
+    sum.appendChild(label);
+    if (detail) {
+      var brief = document.createElement("span");
+      brief.className = "ai-tool-brief";
+      brief.textContent = truncateStr(String(detail), 72);
+      sum.appendChild(brief);
+    }
+    el.appendChild(sum);
+    if (detail && String(detail).length > 72) {
+      var body = document.createElement("div");
+      body.className = "ai-tool-body";
+      body.textContent = String(detail);
+      el.appendChild(body);
+    }
+    container.appendChild(el);
+    container.scrollTop = container.scrollHeight;
     return el;
+  }
+
+  function toolCallLabel(name) {
+    var map = { goto: "tool.goto", snapshot: "tool.snapshot", result: "tool.result",
+                context: "tool.context", compact: "tool.compact" };
+    return t(map[name] || "tool.fallback", { n: (name || "tool") });
+  }
+
+  // 快照卡标题后缀：whole_slide → 全片；viewport → 倍率（+ 解码层）
+  function snapshotTitleSuffix(view, mag) {
+    if (view && view.scope === "whole_slide") {
+      return " · " + t("ai.snapshot.whole_slide");
+    }
+    var parts = [];
+    if (mag != null && mag !== "") parts.push(fmtAiMag(mag));
+    if (view && view.read_level != null) parts.push("read_level=" + view.read_level);
+    return parts.length ? " · " + parts.join(" · ") : "";
+  }
+
+  // 快照卡：点击是用户主动回看（允许移动只读视口）；实时 snapshot_captured
+  // 事件本身绝不自动导航，避免抢走用户正在看的视野。
+  function appendSnapshotCard(view) {
+    var container = $("ai-trace");
+    if (!container) return null;
+    clearAiEmpty(container);
+    var card = document.createElement("div");
+    card.className = "ai-attach snapshot";
+    var title = document.createElement("div");
+    title.className = "ai-attach-title";
+    title.textContent = t("ai.snapshot.title") +
+      snapshotTitleSuffix(view || null, view && view.magnification) +
+      t("ai.snapshot.jump");
+    card.appendChild(title);
+    if (view && view.bbox) {
+      card.style.cursor = "pointer";
+      card.title = t("ai.attach.jump.title");
+      card.addEventListener("click", function () {
+        state.currentSnapshotView = view;
+        registerSnapshotView(view);
+        navigateToBbox(view.bbox);
+        drawObservations();
+      });
+    }
+    container.appendChild(card);
+    container.scrollTop = container.scrollHeight;
+    return card;
+  }
+
+  // ---------- 观察卡与选中（fix-plan §7.1/§7.2：临时观察统一称「观察/观察区」） ----------
+  function appendObservationCard(obs) {
+    if (!obs) return;
+    var container = $("ai-trace");
+    if (!container) return;
+    clearAiEmpty(container);
+    var el = document.createElement("div");
+    el.className = "ai-attach ai-mutter observation" +
+      (obs.scope === "viewport" ? " obs-viewport" : " obs-region");
+    if (obs.id) el.dataset.obsId = obs.id;
+    var head = document.createElement("div");
+    head.className = "ai-attach-title";
+    head.textContent = obs.label || t("demo.ai.obs.default");
+    el.appendChild(head);
+    if (obs.note) {
+      var note = document.createElement("div");
+      note.className = "ai-attach-body";
+      note.textContent = obs.note;
+      el.appendChild(note);
+    }
+    var tag = document.createElement("span");
+    tag.className = "ai-attach-scope";
+    tag.textContent = t(obs.scope === "viewport"
+      ? "demo.ai.obs.scope.viewport"
+      : "demo.ai.obs.scope.region");
+    el.appendChild(tag);
+    if (obs.region_ok && obs.bbox && obs.id) {
+      // 仅可画框的局部观察支持点选高亮；整视野小结不承载 Viewer 交互
+      el.style.cursor = "pointer";
+      el.title = t("ai.attach.jump.title");
+      el.addEventListener("click", function () { toggleObservationSelect(obs.id); });
+    }
+    container.appendChild(el);
+    container.scrollTop = container.scrollHeight;
+  }
+
+  function appendReviewCard(title, summary, reason) {
+    var container = $("ai-trace");
+    if (!container) return null;
+    clearAiEmpty(container);
+    var card = document.createElement("div");
+    card.className = "ai-attach ai-mutter review";
+    var head = document.createElement("div");
+    head.className = "ai-attach-title";
+    head.textContent = title;
+    card.appendChild(head);
+    if (summary) {
+      var body = document.createElement("div");
+      body.className = "ai-attach-body";
+      body.textContent = summary;
+      card.appendChild(body);
+    }
+    if (reason && String(reason).trim()) {
+      var sub = document.createElement("div");
+      sub.className = "ai-attach-sub";
+      sub.textContent = t("ai.observation.reason", { s: reason });
+      card.appendChild(sub);
+    }
+    container.appendChild(card);
+    container.scrollTop = container.scrollHeight;
+    return card;
+  }
+
+  // ---------- 思考点 / 流式气泡 ----------
+  function removeThinkingRow() {
+    var el = state.thinkingEl;
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+    state.thinkingEl = null;
+  }
+
+  function setThinkingRow() {
+    var container = $("ai-trace");
+    if (!container) return;
+    if (state.thinkingEl && state.thinkingEl.parentNode === container) return;
+    removeThinkingRow();
+    clearAiEmpty(container);
+    var row = document.createElement("div");
+    row.className = "ai-chat-thinking";
+    row.setAttribute("aria-label", t("ai.thinking.aria"));
+    for (var i = 0; i < 3; i++) {
+      var dot = document.createElement("span");
+      dot.className = "dot";
+      row.appendChild(dot);
+    }
+    container.appendChild(row);
+    state.thinkingEl = row;
+    markUserBubblesRead(container);
+    container.scrollTop = container.scrollHeight;
+  }
+
+  // 内容/终态事件统一收尾：移除思考点；空白流式气泡直接移除（不留空气泡），
+  // 非空气泡标记 closed（下一条 text_delta 另起气泡）。
+  function clearThinkingRow() {
+    removeThinkingRow();
+    var b = state.liveBubble;
+    if (b && !String(b._rawText || "").trim()) {
+      if (b.parentNode) b.parentNode.removeChild(b);
+      state.liveBubble = null;
+      return;
+    }
+    if (b) b.closed = true;
   }
 
   function closeLiveTextBubble() {
@@ -711,18 +1126,34 @@
   }
 
   function appendLiveText(text) {
-    if (!text) return;
-    var bubble = state.liveBubble;
-    if (bubble && !bubble.closed && bubble.parentNode) {
-      bubble._rawText = (bubble._rawText || "") + text;
-      bubble.textContent = bubble._rawText;
-      $("ai-trace").scrollTop = $("ai-trace").scrollHeight;
-      return;
+    text = text || "";
+    var container = $("ai-trace");
+    if (!container) return;
+    var alive = state.liveBubble && !state.liveBubble.closed &&
+      state.liveBubble.parentNode === container;
+    var next = (alive ? (state.liveBubble._rawText || "") : "") + text;
+    if (!String(next).trim()) return;
+    clearAiEmpty(container);
+    removeThinkingRow();
+    if (!alive) {
+      var prev = lastChildOf(container);
+      var el = document.createElement("div");
+      el.className = "ai-chat-bubble assistant";
+      if (prev && prev.classList && prev.classList.contains("ai-chat-bubble") &&
+          prev.classList.contains("assistant")) {
+        prev.classList.remove("tail");
+        el.classList.add("grp");
+      }
+      el.classList.add("tail");
+      el._rawText = "";
+      el.closed = false;
+      container.appendChild(el);
+      state.liveBubble = el;
+      markUserBubblesRead(container);
     }
-    var el = appendTrace("ai-msg agent", text);
-    el._rawText = text;
-    el.closed = false;
-    state.liveBubble = el;
+    state.liveBubble._rawText = next;
+    setBubbleContent(state.liveBubble, "assistant", next);
+    container.scrollTop = container.scrollHeight;
   }
 
   function assistantTextFromMessage(msg) {
@@ -737,37 +1168,6 @@
       }).join("");
     }
     return msg && (msg.display_text || msg.text) || "";
-  }
-
-  // ---------- 观察卡与选中（fix-plan §7.1/§7.2：临时观察统一称「观察/观察区」） ----------
-  function appendObservationCard(obs) {
-    if (!obs) return;
-    var el = document.createElement("div");
-    el.className = "ai-obs" +
-      (obs.scope === "viewport" ? " obs-viewport" : " obs-region");
-    el.dataset.obsId = obs.id;
-    var head = document.createElement("b");
-    head.textContent = obs.label || t("demo.ai.obs.default");
-    el.appendChild(head);
-    if (obs.note) {
-      var note = document.createElement("div");
-      note.className = "ai-obs-note";
-      note.textContent = obs.note;
-      el.appendChild(note);
-    }
-    var tag = document.createElement("span");
-    tag.className = "ai-obs-scope";
-    tag.textContent = t(obs.scope === "viewport"
-      ? "demo.ai.obs.scope.viewport"
-      : "demo.ai.obs.scope.region");
-    el.appendChild(tag);
-    if (obs.region_ok && obs.bbox) {
-      // 仅可画框的局部观察支持点选高亮；整视野小结不承载 Viewer 交互
-      el.style.cursor = "pointer";
-      el.addEventListener("click", function () { toggleObservationSelect(obs.id); });
-    }
-    $("ai-trace").appendChild(el);
-    $("ai-trace").scrollTop = $("ai-trace").scrollHeight;
   }
 
   // 登记快照视角索引（§7.4，对齐正式插件 S.snapshotViews）：仅带 snapshot_id
@@ -831,26 +1231,17 @@
     drawObservations();
   }
 
-  function appendGotoRow(p) {
-    // goto 只是移动意图：只更新「AI 正在移动」轨迹状态，不导航、不画框（§4.1.6/7.3）
-    var bits = [];
-    if (p.x != null && p.y != null) bits.push("(" + fmtCoord(p.x) + ", " + fmtCoord(p.y) + ")");
-    if (p.magnification) bits.push(String(p.magnification));
-    else if (p.level != null) bits.push("level " + p.level);
-    if (p.reason) bits.push(String(p.reason));
-    appendTrace("ai-row", t("demo.ai.goto") + (bits.length ? " · " + bits.join(" · ") : ""));
-  }
-
-  function fmtCoord(n) {
-    n = Number(n);
-    if (!isFinite(n)) return "?";
-    return Math.abs(n - Math.round(n)) < 0.05 ? String(Math.round(n)) : n.toFixed(1);
+  // goto 只是移动意图：只出轨迹行，不导航、不画框（§4.1.6/7.3）
+  function appendGotoTool(p) {
+    appendToolCall("goto", "(" + fmtNum(p.x) + "," + fmtNum(p.y) + ") @ " +
+      (p.magnification || (p.level != null ? "level " + p.level : "")) +
+      (p.reason ? " · " + p.reason : ""));
   }
 
   function handleEvent(type, payload) {
     var p = payload || {};
     if (type === "observation") {
-      closeLiveTextBubble();
+      clearThinkingRow();
       var obs = normalizeObservationEntry(p, state.currentSnapshotView);
       obs.id = "obs-" + (++state.obsSeq);
       state.observations.push(obs);
@@ -864,61 +1255,83 @@
       if (state.rebuilding) return;
       state.rebuilding = true;
       state.pendingEvents = [];
-      appendTrace("ai-row", t("demo.ai.reset"));
+      clearThinkingRow();
+      appendStatusRow("info", t("demo.ai.reset"));
       rebuildFromSnapshot();
       return;
     }
     if (type === "run_deduplicated") {
-      appendTrace("ai-row", t("demo.ai.dedup"));
+      clearThinkingRow();
+      appendStatusRow("info", t("demo.ai.dedup"));
       return;
     }
     if (type === "slide_opened" || type === "agent_started") {
-      appendTrace("ai-row", t("demo.ai.started"));
+      clearThinkingRow();
+      appendStatusRow("info", t("demo.ai.started"));
+      return;
+    }
+    if (type === "agent_thinking") {
+      setThinkingRow();
       return;
     }
     if (type === "goto") {
       // 兼容期旧独立 goto 事件：与 tool_started{tool:"goto"} 归一化为同一轨迹
-      // 状态；不读取 p.zoom、不导航 Viewer（§4.1.7）。确认部署基线均不发送
-      // 独立 goto 后再删除本分支。
-      closeLiveTextBubble();
-      appendGotoRow(p);
+      // 状态；不读取 p.zoom、不导航 Viewer（§4.1.7）。
+      clearThinkingRow();
+      appendGotoTool(p);
       return;
     }
     if (type === "tool_started") {
-      closeLiveTextBubble();
+      clearThinkingRow();
       if (p.tool === "goto") {
-        appendGotoRow(p);
+        appendGotoTool(p);
         return;
       }
-      if (p.tool === "snapshot") appendTrace("ai-row", t("demo.ai.snapshot"));
-      else if (p.tool && p.tool !== "finish" && p.tool !== "mark_observation" &&
-               p.tool !== "complete_snapshot_review" && p.tool !== "create_annotation") {
-        appendTrace("ai-row", p.tool);
+      if (p.tool === "snapshot") {
+        appendToolCall("snapshot", t("ai.tool.snapshot"));
+        return;
       }
+      if (p.tool === "finish" || p.tool === "mark_observation" ||
+          p.tool === "complete_snapshot_review" || p.tool === "create_annotation") {
+        // 结果以附件/状态呈现，过程区不重复刷工具名
+        return;
+      }
+      appendToolCall(p.tool || "tool", "");
       return;
     }
     if (type === "snapshot_captured") {
       // 唯一权威取景来源：用实际 bbox 更新当前视角虚线框。不自动平移人眼 Viewer
       // （Agent 有自己的看图视角）。无效 bbox 不得覆盖旧视角。
-      closeLiveTextBubble();
+      clearThinkingRow();
       var prevView = state.currentSnapshotView;
       state.currentSnapshotView = normalizeSnapshotView(p, prevView);
       // 登记视角索引：观察卡回跳据此恢复该快照的 bbox（§7.4）
       registerSnapshotView(state.currentSnapshotView);
       drawObservations();
-      var mag = state.currentSnapshotView && state.currentSnapshotView.magnification;
-      appendTrace("ai-row", t("demo.ai.snapshot") + (mag ? " · " + mag : ""));
+      appendSnapshotCard(state.currentSnapshotView);
+      return;
+    }
+    if (type === "snapshot_reviewed") {
+      // 新取景自动关闭上一张快照：服务端记账，不是模型的判读动作，不出卡片。
+      if (p.auto === true || p.disposition === "auto") return;
+      clearThinkingRow();
+      var disp = p.disposition || "";
+      var reviewTitle = disp === "annotated" ? t("ai.review.annotated")
+        : disp === "no_annotation" ? t("ai.review.no.anno") : t("ai.review.done");
+      appendReviewCard(reviewTitle, p.summary || "",
+        disp === "no_annotation" ? (p.no_annotation_reason || "") : "");
       return;
     }
     if (type === "annotation_created") {
       // 正式标注：写入 PathTogether 标注库、待人工审核。不复用临时观察
       // overlay 冒充成功状态；Demo 只读，仅以状态行呈现（§7.3）。
-      closeLiveTextBubble();
-      appendTrace("ai-row", t("demo.ai.annotation.created"));
+      clearThinkingRow();
+      appendStatusRow("info", t("demo.ai.annotation.created"));
       return;
     }
     if (type === "security_profile_applied") {
-      appendTrace("ai-row", t("demo.ai.security.applied"));
+      clearThinkingRow();
+      appendStatusRow("info", t("demo.ai.security.applied"));
       return;
     }
     if (type === "text_delta") {
@@ -926,19 +1339,25 @@
       return;
     }
     if (type === "agent_message" || type === "message") {
-      closeLiveTextBubble();
+      clearThinkingRow();
       var txt = p.text || p.content || p.message || "";
-      if (txt) appendTrace("ai-msg agent", txt);
+      if (txt) appendChatBubble("assistant", txt);
+      return;
+    }
+    if (type === "session_compacted") {
+      clearThinkingRow();
+      appendToolCall("compact", p.reason === "context_length_exceeded"
+        ? t("ai.compact.full") : t("ai.compact.cont"));
       return;
     }
     if (type === "agent_paused") {
       // 匿名 Demo 没有 continue 入口：暂停即本轮结束，禁止随后重连回放。
-      closeLiveTextBubble();
+      clearThinkingRow();
       state.terminal = true;
-      appendTrace("ai-row", p.summary
+      appendStatusRow("paused", p.summary
         ? (t("demo.ai.paused") + " · " + p.summary)
         : t("demo.ai.paused"));
-      appendTrace("ai-row", t("demo.ai.ended"));
+      appendStatusRow("info", t("demo.ai.ended"));
       finishRun();
       return;
     }
@@ -948,24 +1367,24 @@
       // 总结；空 summary 不追加。
       var finSum = String(p.summary || "").trim();
       var liveText = String((state.liveBubble && state.liveBubble._rawText) || "").trim();
-      closeLiveTextBubble();
+      clearThinkingRow();
       state.terminal = true;
       if (finSum && liveText.indexOf(finSum) === -1) {
-        appendTrace("ai-msg agent", p.summary);
+        appendChatBubble("assistant", p.summary);
       }
-      appendTrace("ai-row", t("demo.ai.finished"));
+      appendStatusRow("finished", t("demo.ai.finished"));
       finishRun();
       return;
     }
     if (type === "agent_error") {
-      closeLiveTextBubble();
+      clearThinkingRow();
       state.terminal = true;
-      appendTrace("ai-row error", t("demo.ai.error", { e: p.error || p.message || "" }));
+      appendStatusRow("error", t("demo.ai.error", { e: p.error || p.message || "" }));
       finishRun();
       return;
     }
     if (type === "session_ended") {
-      closeLiveTextBubble();
+      clearThinkingRow();
       state.terminal = true;
       finishRun();
       return;
@@ -1027,7 +1446,7 @@
   function onStreamClosed() {
     // 正常收尾（terminal）不动作；否则按 last id 增量重连（不扣额度，docs §5.5）
     if (state.terminal || !state.running || !state.sessionId) return;
-    appendTrace("ai-row", t("demo.ai.reconnecting"));
+    appendReconnectStatus({ text: t("demo.ai.reconnecting") });
     setTimeout(function () { reconnectStream(state.lastSeq, false); }, 1500);
   }
 
@@ -1064,7 +1483,7 @@
     if (!state.sessionId) {
       state.rebuilding = false;
       state.pendingEvents = [];
-      appendTrace("ai-row error", t("demo.ai.reset.fail"));
+      appendStatusRow("error", t("demo.ai.reset.fail"));
       return;
     }
     demoApi().aiSession(state.sessionId).then(function (resp) {
@@ -1102,17 +1521,18 @@
         }
       });
       drawObservations();
-      $("ai-trace").innerHTML = "";
       closeLiveTextBubble();
+      clearThinkingRow();
+      $("ai-trace").innerHTML = "";
       tx.forEach(function (msg) {
         if (!msg) return;
         if (msg.role === "user") {
           var ut = msg.display_text || assistantTextFromMessage(msg);
           if (typeof ut !== "string") ut = "";
-          if (ut) appendTrace("ai-msg user", ut);
+          if (ut) appendChatBubble("user", ut);
         } else if (msg.role === "assistant") {
           var at = assistantTextFromMessage(msg);
-          if (at && String(at).trim()) appendTrace("ai-msg agent", at);
+          if (at && String(at).trim()) appendChatBubble("assistant", at);
         }
       });
       // 观察卡随重建恢复（历史观察保留在轨迹中，但不全部铺到 Viewer 上，§7.1）
@@ -1130,7 +1550,7 @@
       var queued = state.pendingEvents;
       state.pendingEvents = [];
       state.rebuilding = false;
-      appendTrace("ai-row error", t("demo.ai.reset.fail"));
+      appendStatusRow("error", t("demo.ai.reset.fail"));
       queued.forEach(function (ev) { handleEvent(ev.type, ev.payload); });
     });
   }
@@ -1138,6 +1558,7 @@
   // ---------- 起跑 ----------
   function finishRun() {
     state.running = false;
+    clearThinkingRow();
     closeActiveStream();
     // 过渡态保持禁用：run 终态（finished）由 loadConfig → applyConfig 落定为
     // 「可再次体验」（批次 E：顺序多次 run，无每浏览器次数上限）
@@ -1146,12 +1567,28 @@
   }
 
   function startRun() {
-    if (state.running) return;
+    if (state.running) { toast(t("ai.busy")); return; }
+    // 键盘 Enter 也必须尊重状态机：发送钮被禁用（配置未就绪/额度用尽/
+    // 平台不可用/Demo 关闭/刷新中）时只提示当前状态，不清轨迹、不发送。
+    var runBtn = $("ai-run-btn");
+    if (runBtn && runBtn.disabled) {
+      var quotaChip = $("demo-quota-chip");
+      var why = (quotaChip && quotaChip.textContent) ||
+        runBtn.title || t("demo.ai.run.unavailable");
+      toast(why);
+      return;
+    }
     var slideId = state.current && state.current.slide_id;
     if (!slideId) { toast(t("demo.ai.need.slide")); return; }
-    closeActiveStream();
     var taskEl = $("ai-task");
     var task = ((taskEl && taskEl.value) || "").trim();
+    // 升级 D 同口径：空白输入不触发默认「全片读片」。
+    if (!task) {
+      toast(t("demo.ai.need.input"));
+      if (taskEl && taskEl.focus) taskEl.focus();
+      return;
+    }
+    closeActiveStream();
     state.running = true;
     state.terminal = false;
     state.sessionAttached = false;
@@ -1159,9 +1596,16 @@
     // 新 run 开始：清空旧当前视角与临时观察高亮（§7.2.5）
     clearRunOverlays();
     closeLiveTextBubble();
+    clearThinkingRow();
     $("ai-trace").innerHTML = "";
     setAiButton("running");
-    appendTrace("ai-msg user", task || t("demo.ai.default.task"));
+    appendMsgTs(new Date());
+    appendChatBubble("user", task);
+    setThinkingRow();
+    if (taskEl) {
+      taskEl.value = "";
+      autoGrowTask();
+    }
 
     var rid = newRequestId();
     state.abortCtrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
@@ -1177,6 +1621,8 @@
           resp.status === 400 || resp.status === 503) {
         return resp.json().then(function (body) {
           var code = body && body.code;
+          // 先落运行态再刷新按钮：setAiButton 会据此恢复「新对话」可用性。
+          state.running = false;
           if (code === "spend_budget_exhausted") setAiButton("spend_budget_exhausted");
           else if (code === "demo_budget_exhausted") setAiButton("demo_budget_exhausted");
           else if (code === "demo_ip_request_rate_limited") setAiButton("demo_ip_request_rate_limited");
@@ -1189,8 +1635,8 @@
                    code === "pg_backend_required") setAiButton("unavailable");
           else if (code === "demo_run_request_final") setAiButton("available");
           else setAiButton("refreshing");
-          state.running = false;
-          appendTrace("ai-row error", (body && body.error) || ("HTTP " + resp.status));
+          clearThinkingRow();
+          appendStatusRow("error", (body && body.error) || ("HTTP " + resp.status));
         });
       }
       if (!resp.ok || !resp.body) {
@@ -1203,7 +1649,8 @@
       if (e && e.name === "AbortError") return;
       state.running = false;
       setAiButton("available");
-      appendTrace("ai-row error", t("demo.ai.error", { e: (e && e.message) || e }));
+      clearThinkingRow();
+      appendStatusRow("error", t("demo.ai.error", { e: (e && e.message) || e }));
     });
   }
 
@@ -1211,6 +1658,168 @@
     var panel = $("ai-panel");
     if (!panel) return;
     panel.style.display = open ? "flex" : "none";
+    if (!open) setOptionsOpen(false);
+  }
+
+  // ---------- AI 面板外框 / 选项弹层 / 新对话 / composer ----------
+  var aiPanelCtrl = null;
+
+  // 隐私模式/localStorage 被策略禁用时访问本身可能抛错：偏好不持久化即可
+  function safeLocalStorage() {
+    try {
+      var s = window.localStorage;
+      if (s && typeof s.getItem === "function") { s.getItem("pt.aip.probe"); return s; }
+    } catch (e) { /* 忽略：无持久化 */ }
+    return null;
+  }
+
+  function initAiPanelChrome() {
+    var shell = window.HP_AI_PANEL;
+    if (!shell || typeof shell.createAIPanelController !== "function") return;
+    var panel = $("ai-panel");
+    var header = $("ai-panel-header");
+    if (!panel || !header) return;
+    var mq = window.matchMedia ? window.matchMedia("(max-width: 768px)") : null;
+    aiPanelCtrl = shell.createAIPanelController({
+      panel: panel,
+      header: header,
+      handle: $("ai-panel-resize"),
+      frame: $("viewer-wrap"),
+      mq: mq,
+      storage: safeLocalStorage(),
+      scope: "demo:local",
+      doc: document,
+      win: window,
+    });
+    aiPanelCtrl.init();
+    var reset = $("ai-reset-position");
+    if (reset) {
+      reset.addEventListener("click", function () {
+        aiPanelCtrl.resetPosition();
+        setOptionsOpen(false);
+      });
+    }
+    if (mq) {
+      var onChange = function () { if (aiPanelCtrl) aiPanelCtrl.onBreakpointChange(); };
+      if (typeof mq.addEventListener === "function") mq.addEventListener("change", onChange);
+      else if (typeof mq.addListener === "function") mq.addListener(onChange);
+    }
+  }
+
+  function optionsOpen() {
+    var pop = $("ai-options");
+    return !!(pop && !pop.hidden);
+  }
+
+  function setOptionsOpen(open) {
+    var pop = $("ai-options");
+    var btn = $("ai-options-toggle");
+    if (!pop || !btn) return;
+    pop.hidden = !open;
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) {
+      var first = typeof pop.querySelector === "function"
+        ? pop.querySelector(".ai-menu-row") : null;
+      if (first && first.focus) first.focus();
+    }
+  }
+
+  function bindOptionsPopover() {
+    var btn = $("ai-options-toggle");
+    var pop = $("ai-options");
+    var panel = $("ai-panel");
+    if (!btn || !pop) return;
+    btn.addEventListener("click", function () { setOptionsOpen(!optionsOpen()); });
+    document.addEventListener("pointerdown", function (e) {
+      if (!optionsOpen()) return;
+      var target = e && e.target;
+      var withinPop = false;
+      if (target && pop && typeof pop.contains === "function") withinPop = pop.contains(target);
+      if (target && btn && typeof btn.contains === "function") withinPop = withinPop || btn.contains(target);
+      if (!withinPop && target && typeof target.closest === "function") {
+        withinPop = !!target.closest("#ai-options, #ai-options-toggle");
+      }
+      if (!withinPop) setOptionsOpen(false);
+    });
+    document.addEventListener("keydown", function (e) {
+      if (!optionsOpen() || !e || e.key !== "Escape") return;
+      setOptionsOpen(false);
+      if (btn.focus) btn.focus();
+    });
+    // 起拖即关闭弹层（与正式面板 ai-panel-chrome.js 同事件契约）
+    if (panel) {
+      panel.addEventListener("ai-panel-dragstart", function () { setOptionsOpen(false); });
+    }
+  }
+
+  // 空状态：标题/引导语/三个快捷提问。动态重建时保留与模板一致的
+  // data-i18n / data-task-key，切语言无需重载即可重绘。
+  function renderEmptyTrace() {
+    var trace = $("ai-trace");
+    if (!trace) return;
+    var wrap = document.createElement("div");
+    wrap.className = "ai-trace-empty";
+    function textEl(cls, key) {
+      var el = document.createElement("div");
+      el.className = cls;
+      el.setAttribute("data-i18n", key);
+      el.textContent = t(key);
+      return el;
+    }
+    wrap.appendChild(textEl("ai-empty-title", "ai.trace.empty.title"));
+    wrap.appendChild(textEl("ai-empty-sub", "ai.trace.empty"));
+    var row = document.createElement("div");
+    row.className = "ai-suggest-row";
+    [
+      ["ai.suggest.overview.task", "ai.suggest.overview"],
+      ["ai.suggest.focus.task", "ai.suggest.focus"],
+      ["ai.suggest.view.task", "ai.suggest.view"],
+    ].forEach(function (pair) {
+      var chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "ai-suggest-chip";
+      chip.setAttribute("data-task-key", pair[0]);
+      chip.setAttribute("data-i18n", pair[1]);
+      chip.textContent = t(pair[1]);
+      row.appendChild(chip);
+    });
+    wrap.appendChild(row);
+    trace.innerHTML = "";
+    trace.appendChild(wrap);
+  }
+
+  // 新对话：只清本页轨迹与本地视角/观察状态，不调用任何 API、不改服务端会话。
+  function newConversation() {
+    closeLiveTextBubble();
+    clearThinkingRow();
+    clearRunOverlays();
+    renderEmptyTrace();
+    var task = $("ai-task");
+    if (task) {
+      task.value = "";
+      autoGrowTask();
+      if (task.focus) task.focus();
+    }
+  }
+
+  // pill 内 1~5 行自适应高度（与正式 main.js autoGrowAiTask 同口径）
+  function autoGrowTask() {
+    var el = $("ai-task");
+    if (!el || !el.style) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(Number(el.scrollHeight) || 0, 96) + "px";
+  }
+
+  function bindAiComposer() {
+    var task = $("ai-task");
+    if (!task) return;
+    task.addEventListener("keydown", function (e) {
+      if (!e || e.key !== "Enter" || e.shiftKey || e.isComposing || e.keyCode === 229) return;
+      e.preventDefault();
+      startRun();
+    });
+    task.addEventListener("input", autoGrowTask);
+    autoGrowTask();
   }
 
   // ---------- 侧栏开合（升级 A；与 app.js 同款行为的轻量副本） ----------
@@ -1338,6 +1947,11 @@
       $("ai-panel-close").addEventListener("click", function () { setAiPanelOpen(false); });
     }
     if ($("ai-run-btn")) $("ai-run-btn").addEventListener("click", startRun);
+    if ($("ai-new-conversation")) {
+      $("ai-new-conversation").addEventListener("click", newConversation);
+    }
+    bindAiComposer();
+    bindOptionsPopover();
     var moreBtn = $("tbb-more-btn");
     var more = $("tbb-more");
     var moreMask = $("tbb-more-mask");
@@ -1366,6 +1980,7 @@
         $("current-slide").title =
           demoDescription(state.current) || state.current.name || "";
       }
+      updateCanvasSlideLabel(state.current);
       document.title =
         demoDisplayName(state.current) + " · " + t("app.doc.title.demo");
     }
@@ -1398,13 +2013,15 @@
   }
 
   document.addEventListener("DOMContentLoaded", function () {
-    if (typeof OpenSeadragon === "undefined") return;
-    initViewer();
-    initQualityControl();
-    resizeObsCanvas();
+    // 外壳/面板交互先装配：即使 Viewer 依赖缺失，按钮与输入框也不应是死的。
+    initAiPanelChrome();
     bindShellChrome();
     // 升级 A：侧栏开合（桌面收起/展开 + 手机抽屉）与空态入口
     bindSidebarChrome();
+    if (typeof OpenSeadragon !== "function" && !window.HP_ViewerCore) return;
+    initViewer();
+    initQualityControl();
+    resizeObsCanvas();
     setAiPanelOpen(true);
     loadConfig({ restore: true });
     loadSlides();
@@ -1421,6 +2038,9 @@
     toggleObservationSelect: toggleObservationSelect,
     visibleRegionObservations: visibleRegionObservations,
     drawObservations: drawObservations,
+    newConversation: newConversation,
+    autoGrowTask: autoGrowTask,
+    renderEmptyTrace: renderEmptyTrace,
     state: state,
   };
 })();
