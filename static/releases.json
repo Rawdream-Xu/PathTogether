@@ -3,6 +3,31 @@
   "version_scheme": "YYYY.MM.DD product release. Do not use PathTogether package.json 0.1.0 (test package) as the product version.",
   "releases": [
     {
+      "version": "2026.11.02",
+      "date": "2026-11-02",
+      "published": true,
+      "components": {
+        "histopilot": "0.4.9",
+        "pathtogether": "suite-20261102"
+      },
+      "items": {
+        "zh": [
+          "Demo 的 AI 面板换成与工作台相同的样式：拖动标题栏可移动面板，拖右下角可调整大小，「⋯」里可重置位置；「新对话」回到初始状态重新提问。",
+          "Demo 的快捷提问（浏览全片并总结、找最可疑的区域、判读当前视野）点击后会填入输入框，可修改后再发送；回车发送，Shift+回车换行，输入框为空时不会自动开始。",
+          "Demo 中 AI 的回答按工作台的方式显示：列表、加粗等格式正常呈现，移动视野与截图步骤可展开查看，点截图卡可回到 AI 当时观察的位置。",
+          "Demo 打开切片后，画面左上角重新显示当前切片名称。",
+          "修复（HistoPilot 0.4.9，10 月 30 日已上线）：切片文件名与另一张历史切片相同时，启动 AI 读片可能被误拒并显示「平台不可达」；现在按切片的稳定 ID 核对授权，平台确实拒绝时显示真实原因。"
+        ],
+        "en": [
+          "The Demo AI panel now matches the workbench: drag the title bar to move it, drag the bottom-right corner to resize it, and reset its position from “⋯”; “New conversation” returns to the starting state.",
+          "Demo suggestion chips (Overview the slide, Find the most suspicious area, Read the current view) fill the input box again so you can edit before sending; Enter sends, Shift+Enter adds a line, and an empty box no longer starts a run.",
+          "Demo AI answers are shown the same way as in the workbench: lists and bold text are formatted, view moves and snapshots can be expanded, and clicking a snapshot card returns to where the AI was looking.",
+          "After you open a slide in the Demo, its name is shown again at the top left of the image.",
+          "Fix (HistoPilot 0.4.9, live since October 30): when a slide had the same file name as another, older slide, starting an AI reading could be wrongly refused with “platform unreachable”; authorization is now checked by the slide’s stable ID, and a real refusal shows its actual reason."
+        ]
+      }
+    },
+    {
       "version": "2026.10.29",
       "date": "2026-10-29",
       "published": true,
