@@ -95,6 +95,11 @@ interface DemoMocks {
 	nonDemoWrites: string[];
 }
 
+interface DemoMockOptions {
+	/** 第一轮 run 结束后的首次 config 仍返回 accepted（模拟服务端尚未落 finished） */
+	configLagAfterRun?: boolean;
+}
+
 async function pageApi(page: Page, method: string, path: string, body?: unknown) {
 	return page.evaluate(async ({ method, path, body }) => {
 		const csrf = decodeURIComponent(document.cookie.split("; ")
@@ -134,8 +139,10 @@ async function json(route: Route, body: unknown, status = 200) {
 	});
 }
 
-async function mockDemoApi(page: Page): Promise<DemoMocks> {
+async function mockDemoApi(page: Page, opts: DemoMockOptions = {}): Promise<DemoMocks> {
 	const mocks: DemoMocks = { runRequests: 0, pluginRequests: [], nonDemoWrites: [] };
+	let configCalls = 0;
+	let firstRunConfigBase = -1;
 	page.on("request", (req) => {
 		const url = req.url();
 		if (url.includes("/plugins/histopilot/")) mocks.pluginRequests.push(url);
@@ -152,14 +159,26 @@ async function mockDemoApi(page: Page): Promise<DemoMocks> {
 		const url = new URL(req.url());
 		const p = url.pathname;
 		if (p === "/api/demo/config") {
+			configCalls += 1;
+			let runState: string | null = null;
+			let activeRun = false;
+			if (opts.configLagAfterRun && firstRunConfigBase >= 0) {
+				// 第一轮 run 开始后的第一次 config 仍是在途态，之后才终态
+				if (configCalls === firstRunConfigBase + 1) {
+					runState = "accepted";
+					activeRun = true;
+				} else {
+					runState = "finished";
+				}
+			}
 			return json(route, {
 				demo_enabled: true,
 				ai_available: true,
 				task_max_chars: 300,
 				task_max_steps: 100,
-				run_state: null,
+				run_state: runState,
 				histopilot_session_id: null,
-				active_run: false,
+				active_run: activeRun,
 				budget: null,
 				spend: null,
 			});
@@ -190,6 +209,7 @@ async function mockDemoApi(page: Page): Promise<DemoMocks> {
 			});
 		}
 		if (p === "/api/demo/ai/run") {
+			if (firstRunConfigBase < 0) firstRunConfigBase = configCalls;
 			mocks.runRequests += 1;
 			return route.fulfill({
 				status: 200,
@@ -216,12 +236,17 @@ async function mockDemoApi(page: Page): Promise<DemoMocks> {
 	return mocks;
 }
 
-async function openDemo(page: Page, lang: "zh" | "en" = "zh", width = 1440) {
+async function openDemo(
+	page: Page,
+	lang: "zh" | "en" = "zh",
+	width = 1440,
+	mockOpts: DemoMockOptions = {},
+) {
 	await page.setViewportSize({ width, height: width <= 768 ? 844 : 900 });
 	await page.addInitScript((l) => {
 		try { window.localStorage.setItem("hp_lang", l); } catch { /* 忽略 */ }
 	}, lang);
-	const mocks = await mockDemoApi(page);
+	const mocks = await mockDemoApi(page, mockOpts);
 	await page.goto("/demo");
 	await expect(page.locator("#ai-panel")).toBeVisible();
 	await expect(page.locator(".ai-suggest-chip").first()).toBeVisible();
@@ -269,7 +294,7 @@ test.afterAll(async ({ browser }) => {
 });
 
 test("desktop zh：面板外观 / chip / Enter / 正式轨迹 DOM / 只读边界", async ({ page }, testInfo) => {
-	const mocks = await openDemo(page, "zh");
+	const mocks = await openDemo(page, "zh", 1440, { configLagAfterRun: true });
 
 	// 正式标题栏布局 + 可拖动标记；拖动手柄桌面可见
 	const panelClass = await page.locator("#ai-panel").getAttribute("class");
@@ -308,6 +333,9 @@ test("desktop zh：面板外观 / chip / Enter / 正式轨迹 DOM / 只读边界
 
 	// 正式轨迹组件（Markdown 气泡 / 工具折叠行 / 快照卡 / 观察卡 / 终态行）
 	await expect(page.locator(".ai-status.finished")).toBeVisible({ timeout: 15_000 });
+	// 生产缺陷回归：首次 post-run config 仍是 accepted，必须短暂重试到 finished，
+	// 发送钮最迟 5s 内恢复可用（不能永远停在「AI 正在读片…」）。
+	await expect(page.locator("#ai-run-btn")).toBeEnabled({ timeout: 5_000 });
 	await expect(page.locator(".ai-chat-bubble.user").first()).toContainText("请解读这张切片");
 	const assistant = page.locator(".ai-chat-bubble.assistant.ai-md").first();
 	await expect(assistant).toBeVisible();
@@ -330,6 +358,16 @@ test("desktop zh：面板外观 / chip / Enter / 正式轨迹 DOM / 只读边界
 		path: testInfo.outputPath("demo-ai-desktop-zh-conversation.png"),
 		fullPage: false,
 	});
+
+	// 第二次 run：发送钮恢复后，键盘 Enter 必须真的能再发一次
+	await page.locator("#ai-task").fill("再读一遍这张切片");
+	await page.locator("#ai-task").focus();
+	await page.keyboard.press("Enter");
+	await expect.poll(() => mocks.runRequests).toBe(2);
+	await expect(page.locator(".ai-chat-bubble.user").first())
+		.toContainText("再读一遍这张切片");
+	await expect(page.locator(".ai-status.finished")).toBeVisible({ timeout: 15_000 });
+	await expect(page.locator("#ai-task")).toHaveValue("");
 
 	// 新对话：恢复空状态三个 chip，不请求任何接口
 	const runsBeforeNew = mocks.runRequests;

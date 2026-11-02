@@ -684,11 +684,38 @@
     setAiButton("available");
   }
 
+  // 旧刷新链的代号：新的刷新链/新 run 开始后，旧的定时重试不得再落配置
+  var configRefreshGen = 0;
+
+  function scheduleConfigRetry(gen, attempt) {
+    if (attempt >= DEMO_FINISH_RETRY_DELAYS.length) return false;
+    setTimeout(function () {
+      if (gen !== configRefreshGen) return;
+      // 新 run 已开始：post-run 刷新链立即作废
+      if (state.running) return;
+      loadConfig({ restore: false, attempt: attempt + 1, gen: gen });
+    }, DEMO_FINISH_RETRY_DELAYS[attempt]);
+    return true;
+  }
+
   function loadConfig(opts) {
+    opts = opts || {};
     var restore = !!(opts && opts.restore);
+    var attempt = opts.attempt || 0;
+    // attempt=0 是新的刷新链（finishRun / 页面加载）；后续 attempt 继承链代号
+    var gen = opts.gen != null ? opts.gen : (++configRefreshGen);
     return demoApi().config()
       .then(function (r) { return r.json(); })
       .then(function (cfg) {
+        if (gen !== configRefreshGen) return;
+        if (!restore && state.running) return;
+        // 终态刷新：服务端要等上游 SSE 流关闭后才把 run 标记为 finished，
+        // 这里短暂重试；未见终态前不要落成「running」，保持 refreshing。
+        if (!restore && cfg &&
+            (cfg.run_state === "reserved" || cfg.run_state === "accepted")) {
+          setAiButton("refreshing");
+          if (scheduleConfigRetry(gen, attempt)) return;
+        }
         applyConfig(cfg);
         // 仅页面首次加载、尚未附着流、且确有在途 accepted run 时才重连轨迹。
         // finishRun 刷新 config 时 restore=false，禁止对终态 session 再开流。
@@ -705,6 +732,13 @@
         }
       })
       .catch(function () {
+        if (gen !== configRefreshGen) return;
+        if (!restore && state.running) return;
+        // 终态刷新失败同样短暂重试；耗尽后保持保守禁用。
+        if (!restore && scheduleConfigRetry(gen, attempt)) {
+          setAiButton("refreshing");
+          return;
+        }
         // 页面首次加载失败 → AI 不可用；finishRun 后的状态刷新失败 → 保守
         // 禁用（本轮 run 状态未知，不能误显示可再跑）
         setAiButton(restore ? "unavailable" : "refreshing");
@@ -1556,6 +1590,11 @@
   }
 
   // ---------- 起跑 ----------
+  // 服务端只在本次上游 SSE 流关闭后才把 demo run 从 accepted 落到 finished
+  // （HistoPilot 在 agent_finished 后还会晚 0.5~1s 关流）。post-run config
+  // 刷新按这些间隔短暂重试，避免发送钮永久停在「AI 正在读片…」。
+  var DEMO_FINISH_RETRY_DELAYS = [500, 1000, 1500, 2000, 3000, 5000];
+
   function finishRun() {
     state.running = false;
     clearThinkingRow();
@@ -1589,6 +1628,8 @@
       return;
     }
     closeActiveStream();
+    // 新 run 开始：作废上一轮的 post-run config 重试链
+    configRefreshGen += 1;
     state.running = true;
     state.terminal = false;
     state.sessionAttached = false;

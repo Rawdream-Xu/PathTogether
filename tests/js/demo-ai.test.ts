@@ -1607,3 +1607,137 @@ describe("demo.js 失败收尾与发送闸", () => {
 		expect(toasts[toasts.length - 1].textContent).toBe("demo.ai.run.spend.exhausted");
 	});
 });
+
+// =========================================================================
+// 生产缺陷回归：agent_finished 后服务端尚未把 run 落为 finished 时，
+// post-run config 刷新必须短暂重试，发送钮不能永久停在「正在读片」。
+// =========================================================================
+describe("demo.js 终态后 config 仍在途时短暂重试", () => {
+	const AVAILABLE = "demo.ai.run.available";
+	const RUNNING = "demo.ai.run.running";
+	const REFRESHING = "demo.ai.refreshing";
+
+	function cfg(runState: string | null) {
+		return {
+			demo_enabled: true,
+			ai_available: true,
+			run_state: runState,
+			histopilot_session_id: null,
+			active_run: runState === "accepted",
+			budget: { demo_used: 1, demo_limit: 10, demo_exhausted: false, platform_exhausted: false },
+			spend: null,
+		};
+	}
+
+	function harness(configs: Array<unknown>) {
+		const calls: string[] = [];
+		let idx = 0;
+		const fetchImpl = vi.fn((url: string) => {
+			const u = String(url);
+			calls.push(u);
+			if (u.includes("/api/demo/config")) {
+				const item = configs[Math.min(idx, configs.length - 1)];
+				idx += 1;
+				if (item instanceof Error) return Promise.reject(item);
+				return jsonResponse(item);
+			}
+			if (u.includes("/api/demo/ai/run")) return sseResponse("");
+			return jsonResponse({});
+		}) as unknown as typeof fetch;
+		const w = loadDemo(fetchImpl);
+		return {
+			w,
+			configCalls: () => calls.filter((u) => u.includes("/api/demo/config")).length,
+		};
+	}
+
+	function runBtn(w: ReturnType<typeof loadDemo>) {
+		return (w as any).__els["ai-run-btn"];
+	}
+
+	it("accepted → finished：500ms 后恢复可用，期间只显示 refreshing", async () => {
+		vi.useFakeTimers();
+		try {
+			const { w, configCalls } = harness([cfg("accepted"), cfg("finished")]);
+			w.HP_DEMO.finishRun();
+			await flushMicrotasks();
+			expect(configCalls()).toBe(1);
+			expect(runBtn(w).disabled).toBe(true);
+			expect(runBtn(w).title).toBe(REFRESHING);
+			expect(runBtn(w).title).not.toBe(RUNNING);
+			await vi.advanceTimersByTimeAsync(500);
+			await flushMicrotasks();
+			expect(configCalls()).toBe(2);
+			expect(runBtn(w).disabled).toBe(false);
+			expect(runBtn(w).title).toBe(AVAILABLE);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("始终 accepted：1 次首读 + 6 次重试后回落为 running", async () => {
+		vi.useFakeTimers();
+		try {
+			const { w, configCalls } = harness([cfg("accepted")]);
+			w.HP_DEMO.finishRun();
+			await flushMicrotasks();
+			expect(configCalls()).toBe(1);
+			for (const delay of [500, 1000, 1500, 2000, 3000, 5000]) {
+				await vi.advanceTimersByTimeAsync(delay);
+				await flushMicrotasks();
+			}
+			expect(configCalls()).toBe(7);
+			expect(runBtn(w).disabled).toBe(true);
+			expect(runBtn(w).title).toBe(RUNNING);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("post-run config 首次失败：重试成功后可再运行", async () => {
+		vi.useFakeTimers();
+		try {
+			const { w, configCalls } = harness([new Error("boom"), cfg(null)]);
+			w.HP_DEMO.finishRun();
+			await flushMicrotasks();
+			expect(configCalls()).toBe(1);
+			expect(runBtn(w).title).toBe(REFRESHING);
+			await vi.advanceTimersByTimeAsync(500);
+			await flushMicrotasks();
+			expect(configCalls()).toBe(2);
+			expect(runBtn(w).disabled).toBe(false);
+			expect(runBtn(w).title).toBe(AVAILABLE);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("重试窗口内开始新 run：旧链不得回写陈旧 config", async () => {
+		vi.useFakeTimers();
+		try {
+			const { w, configCalls } = harness([cfg("accepted"), cfg("finished")]);
+			w.HP_DEMO.finishRun();
+			await flushMicrotasks();
+			expect(configCalls()).toBe(1);
+			expect(runBtn(w).title).toBe(REFRESHING);
+
+			// 新 run 开始（正常情况下 refreshing 会挡住按钮入口，这里直接驱动 core）
+			w.HP_DEMO.state.current = { slide_id: "sld_x" };
+			(w as any).__els["ai-task"].value = "新问题";
+			runBtn(w).disabled = false;
+			w.HP_DEMO.startRun();
+			await flushMicrotasks();
+			expect(w.HP_DEMO.state.running).toBe(true);
+			expect(runBtn(w).title).toBe(RUNNING);
+
+			await vi.advanceTimersByTimeAsync(500);
+			await flushMicrotasks();
+			// 旧链的 500ms 定时器已作废：不再读 config，也不把 finished 落回按钮
+			expect(configCalls()).toBe(1);
+			expect(runBtn(w).title).toBe(RUNNING);
+			expect(w.HP_DEMO.state.running).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
