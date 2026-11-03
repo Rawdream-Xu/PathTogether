@@ -849,8 +849,20 @@ export class SlideToolsRunner {
   /// copied into OPFS.
   async _prepare(file, opts = {}) {
     const head = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+    const tmapNamed = /\.tmap$/i.test(String(file.name || ''));
+    const tmapVersion = E.tmapHeaderVersion(head);
     let sourceAdapter = null;
-    if (E.isTiffHeader(head)) {
+    if (tmapVersion !== null || tmapNamed) {
+      // Unic TMAP06：识别只认真实头部（前 6 字节 'TMAP06'）。TMAP07/未知
+      // 版本给稳定中文拒绝；.tmap 里装 TIFF/KFB 等改名文件同样拒绝——
+      // 绝不回退为 TIFF 嗅探或「暂时直传」。
+      const cap = E.sniffTmapHeader(head);
+      if (!cap.supported) {
+        throw E.stError(E.ERROR_CODES.UNSUPPORTED_INPUT,
+          `不支持该 TMAP 文件：${cap.reason}`, { kind: 'tmap-sniff' });
+      }
+      sourceAdapter = cap.adapter;
+    } else if (E.isTiffHeader(head)) {
       const cap = await E.sniffTiffSlideCapability(file);
       if (!cap.supported) {
         throw E.stError(E.ERROR_CODES.UNSUPPORTED_INPUT,
@@ -1188,6 +1200,13 @@ export class SlideToolsRunner {
           `v${E.BIF_ADAPTER_VERSION}（金字塔 ${E.BIF_PYRAMID_METHOD}）：两种适配器配方不得混合`,
           { kind: 'source-adapter' });
       }
+      // Unic TMAP06：同一合同（绝对坐标合成 + 源层级尺寸随适配器代际固定）
+      if (recordAdapter === E.TMAP_SOURCE_ADAPTER &&
+          (st.gen.adapterVersion || '1') !== E.TMAP_ADAPTER_VERSION) {
+        refuse(`进度记录属于 TMAP06 适配器 v${st.gen.adapterVersion || '1'}，当前为 ` +
+          `v${E.TMAP_ADAPTER_VERSION}（金字塔 ${E.TMAP_PYRAMID_METHOD}）：两种适配器配方不得混合`,
+          { kind: 'source-adapter' });
+      }
       // same contract for the encoding: the journal generation and every
       // committed state must agree with the record (missing = preserve)
       const journalledEnc = st.gen.encodingProfile || E.ENCODING_PROFILES.PRESERVE;
@@ -1195,6 +1214,18 @@ export class SlideToolsRunner {
           (st.lastCommit && st.lastCommit.st.encoding &&
            st.lastCommit.st.encoding !== journalledEnc)) {
         refuse(`进度记录的画质（${journalledEnc}）与任务记录不符`, { kind: 'encoding-profile' });
+      }
+      // Unic TMAP06: every checkpoint journals the compose fingerprint
+      // (quality/sampling of the re-encode); progress written under another
+      // recipe — or without one — is never continued (the core refuses again)
+      if (recordAdapter === E.TMAP_SOURCE_ADAPTER && st.lastCommit) {
+        const wantCompose = journalledEnc === E.ENCODING_PROFILES.COMPACT
+          ? E.COMPACT_JPEG_V1_FINGERPRINT : E.TMAP_PRESERVE_COMPOSE_FINGERPRINT;
+        const gotCompose = st.lastCommit.st.compose || null;
+        if (gotCompose !== wantCompose) {
+          refuse(`进度记录的 TMAP06 编码指纹（${gotCompose || '缺失'}）与当前（${wantCompose}）不符：` +
+            '不同画质/采样的像素不得混入同一输出', { kind: 'compose-fingerprint' });
+        }
       }
       if (st.lastCommit) {
         resume = { st: st.lastCommit.st };

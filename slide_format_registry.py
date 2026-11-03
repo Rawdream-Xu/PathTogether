@@ -112,6 +112,15 @@ _FORMATS = {
                  "金字塔 OME-TIFF；保留通道名/颜色/曝光/mpp；"
                  "不得从明场路径推导",
     },
+    # --- 明确需转换（Unic TMAP06：浏览器转换后上传） -----------------------
+    ".tmap": {
+        "capability": CAP_CONVERT_REQUIRED,
+        "canonical_ext": ".ome.tif",
+        "notes": "Unic TMAP06（单文件明场，公开样片已验证）→ 金字塔 "
+                 "OME-TIFF/经典 TIFF；重叠 JPEG 瓦片按块记录绝对坐标拼接后"
+                 "重编码；头部像素尺寸未核验 → 输出不写 PhysicalSize；"
+                 "原始 .tmap 不进入平台直传/OpenSlide 受理集",
+    },
 }
 
 #: 归档扩展名：不是切片格式，解压后按成员再查注册表（zip 上传解包用）
@@ -382,6 +391,22 @@ _CATALOG_DISPLAY = (
         "direct_import": "closed",
         "import_mode": "convert",
         "limits": ["在本机浏览器中转换为多通道 OME-TIFF（荧光）后上传"],
+        "selectable_for_upload": True,
+    },
+    {
+        "id": "tmap",
+        "display_name": "TMAP06（Unic，单文件明场）",
+        "extensions": [".tmap"],
+        "capability": CAP_CONVERT_REQUIRED,
+        "canonical_format": "ome-tiff",
+        "bundle_required": False,
+        "browser_convert": "available",
+        "direct_import": "closed",
+        "import_mode": "convert",
+        "limits": ["仅 TMAP06 单文件明场（已验证公开样片）在本机浏览器转换后"
+                   "上传：重叠瓦片按绝对坐标拼接后高质量重编码（不是无损）；"
+                   "头部像素尺寸未经标定核验，输出不写 µm/px，测量只按像素；"
+                   "关联缩略图/标签/宏图不嵌入；原始 .tmap 不直接导入"],
         "selectable_for_upload": True,
     },
 )

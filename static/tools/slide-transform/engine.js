@@ -373,6 +373,7 @@ export function checkDiskBudget(estimate, storageEstimate, opts = {}) {
 export const SUPPORTED_MAGICS = [
   [0xF1, 0x01, 0xEE, 0xEE, 0x4B, 0x46, 0x42, 0x00], // KFB
   [0xF1, 0x01, 0xEE, 0xEE, 0x4B, 0x46, 0x42, 0x46], // KFBF
+  [0x54, 0x4D, 0x41, 0x50, 0x30, 0x36],             // TMAP06（前 6 字节）
 ];
 
 /// F8: plain-image header prefixes (BMP 'BM'; baseline JPEG FF D8 FF — the
@@ -418,6 +419,8 @@ export function magicSupported(head) {
 export function magicModality(head) {
   if (SUPPORTED_MAGICS[1].every((b, i) => head[i] === b)) return 'fluorescence';
   if (SUPPORTED_MAGICS[0].every((b, i) => head[i] === b)) return 'brightfield';
+  // TMAP06（Unic 单文件明场）——版本由下面的嗅探/核心终审，这里只判模态
+  if (isTmapHeader(head)) return 'brightfield';
   if (isTiffHeader(head)) return 'brightfield';
   if (isRasterHeader(head)) return 'brightfield';
   return null;
@@ -480,7 +483,19 @@ export const SVS_JP2K_COMPRESSIONS = [33003, 33005];
 /// (the static data-i18n text stays). The page re-applies this after every
 /// language switch (rerenderForLang → renderQualitySection).
 export function qualityOptionDescOverride(doc) {
-  if (!doc || doc.codec !== 'jpeg2000-reencode') return null;
+  if (!doc || doc.codec !== 'jpeg2000-reencode') {
+    // keyed on the adapter, not the codec: Ventana BIF probes report the same
+    // 'stitch-compose-reencode' codec and keep their own (default) text
+    if (doc && doc.adapter === TMAP_SOURCE_ADAPTER) {
+      // TMAP06：没有字节搬运路径——重叠瓦片按绝对坐标拼接后重编码，
+      // 「保留画质」是高质量重编码（不是无损/原 JPEG 字节）
+      return {
+        preserve: 'tools.quality.preserve.desc.tmap',
+        compact: 'tools.quality.compact.desc.tmap',
+      };
+    }
+    return null;
+  }
   return {
     preserve: 'tools.quality.preserve.desc.jp2k',
     compact: 'tools.quality.compact.desc.jp2k',
@@ -523,6 +538,83 @@ export const BIF_ADAPTER_VERSION = '1';
 export const BIF_PYRAMID_METHOD = 'l0-box2';
 /// Must equal the Rust `PRESERVE_COMPOSE_FINGERPRINT` (bif.rs).
 export const BIF_PRESERVE_COMPOSE_FINGERPRINT = 'bif-mosaic-compose:q96:y422:hstd:v1';
+/// Unic TMAP06（单文件、单平面、8 位明场 RGB；612×512 重叠 JPEG 瓦片按
+/// 块记录绝对坐标合成后重编码，保留源三层精确尺寸）。首版只接受真实
+/// 头部为 TMAP06 的文件；TMAP07/未知版本、DT 伴随文件、多平面/荧光、
+/// 非基线 JPEG 由核心在复制后给类型化拒绝。Must equal the Rust
+/// `ADAPTER_VERSION` (resume refuses on mismatch).
+export const TMAP_SOURCE_ADAPTER = 'unic-tmap06-jpeg';
+export const TMAP_ADAPTER_VERSION = '1';
+/// Must equal the Rust `PYRAMID_METHOD` (tmap.rs).
+export const TMAP_PYRAMID_METHOD = 'tmap06-stored-absolute-canvas-v1';
+/// Must equal the Rust `default_compose().fingerprint()` (tmap.rs
+/// `DEFAULT_COMPOSE_*`). 首版 preserve 对 TMAP06 表示高质量拼接重编码
+/// （q90 / 4:2:2 / standard Huffman，按两张公开样片整张画质/体积比较冻结），
+/// 不是无损，也不保留原 JPEG 字节。
+export const TMAP_PRESERVE_COMPOSE_FINGERPRINT = 'tmap06-compose:q90:y422:hstd:v1';
+/// 头部布局：前 6 字节 'TMAP06'（真实样片第 7/8 字节为 0 填充）；其他
+/// 'TMAP'+两位数字是未支持版本。扩展名 .tmap 只是提示，识别以头部为准。
+export const TMAP_MAGIC = [0x54, 0x4D, 0x41, 0x50];       // 'TMAP'
+export const TMAP_SUPPORTED_MAGIC = [0x54, 0x4D, 0x41, 0x50, 0x30, 0x36]; // 'TMAP06'
+
+/// 头部是否真实 TMAP06（前 6 字节；要求至少 8 字节以覆盖完整头字段）。
+export function isTmapHeader(head) {
+  if (!head || head.length < 8) return false;
+  return TMAP_SUPPORTED_MAGIC.every((b, i) => head[i] === b);
+}
+
+/// 'TMAP' + 两位 ASCII 数字 → 版本串（'06'/'07'）；否则 null。
+/// 用于把未知版本与「根本不是 TMAP」区分成稳定的中文说明。
+export function tmapHeaderVersion(head) {
+  if (!head || head.length < 6) return null;
+  if (!TMAP_MAGIC.every((b, i) => head[i] === b)) return null;
+  const a = head[4];
+  const b = head[5];
+  if (a < 0x30 || a > 0x39 || b < 0x30 || b > 0x39) return null;
+  return String.fromCharCode(a, b);
+}
+
+/// 有界头部嗅探（复制前）：只读前 8 字节，TMAP06 → supported；TMAP07/
+/// 未知版本 → 稳定中文拒绝；非 TMAP 头部 → 拒绝（.tmap 里装 TIFF 等
+/// 改名文件不得回退为 TIFF/KFB 或「暂时直传」）。深层结构/几何由 wasm
+/// 核心在复制后的同一份副本上终审。
+///
+///   sniffTmapHeader(head) → { supported: true, modality: 'brightfield',
+///       format: TMAP_SOURCE_ADAPTER, adapter: TMAP_SOURCE_ADAPTER }
+///     | { supported: false, modality: null, reason: '<typed reason>' }
+export function sniffTmapHeader(head) {
+  const bad = (reason) => ({ supported: false, modality: null, reason });
+  if (!head || head.length < 8) {
+    return bad('TMAP 头部不完整（文件小于 8 字节）');
+  }
+  const version = tmapHeaderVersion(head);
+  if (version === null) {
+    return bad('文件头不是 TMAP（TMAP + 两位版本号）；.tmap 改名的 TIFF/KFB 等不在支持集');
+  }
+  if (version !== '06') {
+    return bad(`TMAP 版本 TMAP${version} 不在支持集（首版仅支持 TMAP06 单文件明场）`);
+  }
+  if (!isTmapHeader(head)) {
+    return bad('TMAP06 头部不完整或已截断');
+  }
+  return {
+    supported: true,
+    modality: 'brightfield',
+    format: TMAP_SOURCE_ADAPTER,
+    adapter: TMAP_SOURCE_ADAPTER,
+  };
+}
+
+/// File 版本的复制前嗅探（与 sniffTiffSlideCapability 同合同）。
+export async function sniffTmapCapability(file) {
+  let head;
+  try {
+    head = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+  } catch (e) {
+    return { supported: false, modality: null, reason: `无法读取文件头：${errText(e)}` };
+  }
+  return sniffTmapHeader(head);
+}
 /// F8: 普通图片（BMP / 基线 JPEG；单张大图，无瓦片无物理标尺）。BMP 逐行
 /// 有界读取，JPEG 带 restart 走分段、无 restart 走 MCU 行 band 解码；
 /// 全部 256px tile 重编码，降采样层 l0-box2 生成。Must equal the Rust
@@ -558,6 +650,7 @@ export const CONVERTER_SOURCE_FORMATS = [
   VMS_SOURCE_ADAPTER,
   RASTER_SOURCE_ADAPTER,
   BIF_SOURCE_ADAPTER,
+  TMAP_SOURCE_ADAPTER,
 ];
 const LEICA_SCN_XML_NS = /leica-microsystems\.com\/scn/;
 /// Pure helpers (vitest-covered): OME-XML and converter-marked description
@@ -1570,7 +1663,7 @@ export function isOmeProfile(profile) {
 /// after the entry stem.
 export function outputFileName(sourceName, job) {
   const base = String(sourceName || 'slide')
-    .replace(/\.(kfb|kfbf|svs|scn|ndpi|bif|tif|tiff|mrxs|vms|bmp|jpg|jpeg)$/i, '') || 'slide';
+    .replace(/\.(kfb|kfbf|svs|scn|ndpi|bif|tmap|tif|tiff|mrxs|vms|bmp|jpg|jpeg)$/i, '') || 'slide';
   return isOmeProfile(jobOutputProfile(job)) ? `${base}.ome.tif` : `${base}.tif`;
 }
 

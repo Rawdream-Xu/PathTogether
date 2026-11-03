@@ -61,6 +61,7 @@
     "hamamatsu-vms-bundle": 1,
     "plain-image-bmp-jpeg": 1,
     "ventana-bif-jpeg": 1,
+    "unic-tmap06-jpeg": 1,
   };
 
   // 结果类别
@@ -509,6 +510,19 @@
     return bad;
   }
 
+  // ---- Unic TMAP06（单文件明场；头部识别，绝不回退） --------------------
+  // 首版只接受真实头部 TMAP06（前 6 字节）。TMAP07/未知版本 → unsupported；
+  // .tmap 里装 TIFF/KFB 等改名文件 → unsupported（不落入 tiff/raster 路由，
+  // 也不按「暂时直传」放行）。深层结构/几何由工具页有界探测与 wasm 核心终审。
+  function classifyTmapHead(headBytes) {
+    var bad = { cls: CLS.UNSUPPORTED, directClass: null, compression: 0 };
+    if (!headBytes || headBytes.byteLength < 8) return bad;
+    if (headBytes[0] !== 0x54 || headBytes[1] !== 0x4D ||
+        headBytes[2] !== 0x41 || headBytes[3] !== 0x50) return bad;
+    if (headBytes[4] !== 0x30 || headBytes[5] !== 0x36) return bad;
+    return { cls: CLS.CONVERT, directClass: null, compression: 0 };
+  }
+
   // ---- 上传前置魔数校验（upload-liveness：fail-fast） ----------------
   // 生产事故：WeChat/手机导出的 PNG/WebP 改名 .jpg、或非 TIFF 内容改名
   // .tif，浏览器不再先建任务/先传分块，而是在**创建 ingestion 之前**按
@@ -752,6 +766,10 @@
         // 头解析分派（IFD0 XMLPacket 带 iScan + BigTIFF + JPEG 压缩 →
         // convert；JPEG2000/经典 TIFF/其余变体 → temporary）
         return { route: "tiff", ext: ext, bif: true };
+      case ".tmap":
+        // Unic TMAP06：头部识别分派（前 6 字节 TMAP06 → convert；
+        // TMAP07/未知版本/改名 TIFF 等 → unsupported，绝不回退直传）
+        return { route: "tmap", ext: ext };
       case ".vmu":
       case ".svslide":
         return { cls: CLS.TEMPORARY, directClass: DIRECT_CLASS.LEGACY,
@@ -799,6 +817,23 @@
           }, function () {
             // 嗅探读失败：按暂时直传降级（服务端终审）
             return { cls: CLS.TEMPORARY, directClass: DIRECT_CLASS.LEGACY,
+                     ext: routed.ext, bundle: false, svsJp2k: false,
+                     compression: 0 };
+          });
+      }
+      // Unic TMAP06：只读前 8 字节按真实头部判定（TMAP06 → convert；
+      // TMAP07/未知/改名 TIFF → unsupported）。读失败同样按 unsupported
+      // 处理——.tmap 不允许凭扩展名降级为暂时直传。
+      if (routed.route === "tmap") {
+        return read(0, Math.min(8, file.size || 8))
+          .then(function (headBuf) {
+            var r = classifyTmapHead(new Uint8Array(headBuf));
+            r.ext = routed.ext;
+            r.bundle = false;
+            r.svsJp2k = false;
+            return r;
+          }, function () {
+            return { cls: CLS.UNSUPPORTED, directClass: null,
                      ext: routed.ext, bundle: false, svsJp2k: false,
                      compression: 0 };
           });

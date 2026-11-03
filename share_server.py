@@ -63,6 +63,9 @@ import crop_guard
 # 瓦片内存缓存（bytes LRU + single-flight + 指标）为共享实现，不复制策略。
 import tile_cache
 import viewer_display
+# 标定 provenance（TMAP06 转换产物声明「不采用推算值」）：与主应用/worker
+# 共用同一有界 IFD0 判定，不复制第二份字符串表。
+import upload_direct_class
 
 app = Flask(__name__)
 
@@ -236,6 +239,18 @@ def _read_metadata(osr, path: Path) -> dict:
         }
     props = osr.properties
     objective_f = _to_float(props.get("openslide.objective-power"))
+
+    # TMAP06 转换产物：头部像素尺寸未经标定核验 → 不得从 objective 反推
+    # 默认 MPP（0.25）；分享查看器与主站同口径按未知标定（像素）显示。
+    if upload_direct_class.declares_unknown_physical_scale(path):
+        return {
+            "width": width,
+            "height": height,
+            "mpp_x": None,
+            "mpp_y": None,
+            "objective": objective_f,
+            "mpp_source": "missing",
+        }
 
     mpp_x_f = _to_float(props.get("openslide.mpp-x"))
     mpp_y_f = _to_float(props.get("openslide.mpp-y"))

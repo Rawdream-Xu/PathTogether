@@ -61,6 +61,8 @@ const els = {
   qualityVmsNote: $('quality-vms-note'),
   qualityRasterNote: $('quality-raster-note'),
   qualityBifNote: $('quality-bif-note'),
+  qualityTmapNote: $('quality-tmap-note'),
+  tmapCalibrationNote: $('tmap-calibration-note'),
   qualityJp2kNote: $('quality-jp2k-note'),
   qualityPreserveDesc: $('quality-preserve-desc'),
   qualityCompactDesc: $('quality-compact-desc'),
@@ -1169,6 +1171,7 @@ function formatFamilyLabel(id) {
   if (s.startsWith('hamamatsu-vms')) return 'VMS (Hamamatsu)';
   if (s.startsWith('hamamatsu-ndpi')) return 'NDPI (Hamamatsu)';
   if (s.startsWith('ventana-bif')) return 'BIF (Ventana)';
+  if (s.startsWith('unic-tmap06')) return 'TMAP06（Unic，单文件明场）';
   if (s.startsWith('plain-image')) return '普通图片 (BMP/JPEG)';
   return s;
 }
@@ -1419,6 +1422,11 @@ function updateMrsxQualityNote() {
   // Ventana BIF：瓦片带重叠，必须拼接后重编码——「保留画质」是高质量
   // 重编码而非字节复制
   els.qualityBifNote.hidden = !(!!page.prep && fmt.startsWith('ventana-bif') && bf);
+  // Unic TMAP06：重叠瓦片按绝对坐标拼接后重编码——「保留画质」是高质量
+  // 重编码而非无损/原 JPEG 字节
+  els.qualityTmapNote.hidden = !(!!page.prep && fmt.startsWith('unic-tmap06') && bf);
+  // TMAP06 标定/关联图提醒：头部像素尺寸未核验 → 不写 µm/px；关联图不嵌入
+  els.tmapCalibrationNote.hidden = !(!!page.prep && fmt.startsWith('unic-tmap06'));
   // F2（Aperio JPEG 2000 33003/33005）：没有字节搬运路径，两种画质都是
   // 解码后重编码（有损）
   els.qualityJp2kNote.hidden = !(!!page.prep && fmt.startsWith('aperio-svs-jp2k') && bf);

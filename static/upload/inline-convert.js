@@ -835,7 +835,11 @@
         var supported = null;
         var p;
         if (cls.cls === "convert") {
-          if (engine && engine.isTiffHeader && engine.isTiffHeader(head)) {
+          if (engine && engine.isTmapHeader && engine.isTmapHeader(head)) {
+            // Unic TMAP06：与工具页同一有界头部嗅探（TMAP07/未知版本
+            // 稳定拒绝；几何/结构由核心复制后终审）
+            p = engine.sniffTmapCapability(e.file);
+          } else if (engine && engine.isTiffHeader && engine.isTiffHeader(head)) {
             p = engine.sniffTiffSlideCapability(e.file);
           } else if (engine && engine.isRasterHeader && engine.isRasterHeader(head)) {
             p = engine.sniffRasterCapability(e.file);

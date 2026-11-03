@@ -12966,6 +12966,11 @@
     { id: "kfb-kfbf", display_name: "KFB / KFBF", extensions: [".kfb", ".kfbf"],
       import_mode: "convert",
       limits: ["在本机浏览器中转换后上传：KFB 转为 BigTIFF（明场），KFBF 转为多通道 OME-TIFF（荧光）"] },
+    { id: "tmap", display_name: "TMAP06（Unic，单文件明场）", extensions: [".tmap"],
+      import_mode: "convert",
+      limits: ["仅 TMAP06 单文件明场（已验证公开样片）在本机浏览器转换后上传；"
+             + "重叠瓦片按绝对坐标拼接后高质量重编码，头部像素尺寸未经标定核验"
+             + "（输出不写 µm/px），关联缩略图/标签/宏图不嵌入；原始 .tmap 不直接导入"] },
     { id: "mrxs", display_name: "MRXS", extensions: [".mrxs"], import_mode: "convert",
       limits: ["需要完整包（主文件 + 同名伴随目录）；在工作台选择整个文件夹，在本机浏览器转换后上传"] },
   ];
@@ -12974,7 +12979,7 @@
   // 的展开结果（单一权威链：后端目录 → fallback 目录 → accept → 模板属性）。
   // 契约（两处断言）由 raster-image-compat.test.ts 锁定；接口可用时该串会被
   // 同一函数对线上目录的派生结果覆盖。
-  var FILE_INPUT_ACCEPT_FALLBACK = ".svs,.tif,.tiff,.ome.tif,.ome.tiff,.ndpi,.vms,.vmu,.scn,.bif,.svslide,.bmp,.jpg,.jpeg,.kfb,.kfbf,.mrxs,.zip";
+  var FILE_INPUT_ACCEPT_FALLBACK = ".svs,.tif,.tiff,.ome.tif,.ome.tiff,.ndpi,.vms,.vmu,.scn,.bif,.svslide,.bmp,.jpg,.jpeg,.kfb,.kfbf,.tmap,.mrxs,.zip";
 
   // 由格式目录派生文件选择器 accept（Wave 3）：
   //   - 只取 selectable_for_upload !== false 的条目扩展名（小写、去重、保序）；

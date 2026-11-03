@@ -75,7 +75,17 @@ CONVERTER_SOURCE_FORMATS = frozenset({
     "hamamatsu-vms-bundle",  # VMS → classic/ome（描述 JSON 带 adapter）
     "plain-image-bmp-jpeg",  # 普通图片 BMP/JPEG → classic/ome（F8；描述 JSON 带 adapter）
     "ventana-bif-jpeg",  # Ventana BIF → classic/ome（重叠瓦片拼接重编码；描述 JSON 带 adapter）
+    "unic-tmap06-jpeg",  # Unic TMAP06 → classic/ome（绝对坐标拼接重编码；描述 JSON 带 adapter）
 })
+
+#: TMAP06 转换产物的来源标记与未知标定策略（与 Rust probe/report、engine.js
+#: 同文）：出现任一标记时，平台摄取后的 slide info/查看器不得从 objective
+#: 反推默认 MPP（0.25 µm/px）。
+TMAP_SOURCE_FORMAT = "unic-tmap06-jpeg"
+TMAP_MPP_POLICY = "tmap-header-mpp-not-adopted"
+
+#: 原始 TMAP 魔数：'TMAP' + 两位版本（TMAP06 是可转换输入；其余版本拒绝）。
+_TMAP_MAGIC = b"TMAP"
 
 #: sniff 结果词表（actual 类别）
 ACTUAL_OME = "ome-tiff"
@@ -298,6 +308,56 @@ def sniff_tiff_class(path):
         return ACTUAL_NON_TIFF
 
 
+def is_tmap_content(path):
+    """内容级判定：文件头是否为原始 TMAP（'TMAP' + 两位版本）。
+
+    原始 TMAP 必须先在浏览器转换；无论扩展名是 .tmap 还是被改成 .tif，
+    服务端 worker 都在 open_slide 之前拒绝（convert_in_browser）。转换
+    产物是 TIFF/BigTIFF，不会以 TMAP 魔数开头——不会误拒合法产物。
+    读取有界（8 字节）；失败按 False（交 open_slide 终审）。
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(8)
+    except OSError:
+        return False
+    if len(head) < 6 or head[:4] != _TMAP_MAGIC:
+        return False
+    return head[4:5].isdigit() and head[5:6].isdigit()
+
+
+def ifd0_description(path):
+    """有界读取 IFD0 ImageDescription（≤ _DESC_READ_CAP）；失败返回 ""。
+
+    只解析 TIFF/BigTIFF 头与首 IFD（与 sniff_tiff_class 同一有界读取
+    路径），不触碰像素数据。供标定 provenance 判定复用。
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = _parse_tiff_head(fh)
+            if head is None:
+                return ""
+            desc_entry = head["entries"].get(270)
+            if desc_entry is None:
+                return ""
+            return _bounded_text(fh, head["bo"], desc_entry, head["bigtiff"])
+    except OSError:
+        return ""
+
+
+def declares_unknown_physical_scale(path):
+    """文件是否声明「物理标定未知/未采用」（TMAP06 转换产物）。
+
+    命中任一稳定标记（source id 或 mpp_policy）即返回 True：平台后续的
+    slide info/查看器不得再用 objective 反推 MPP。标记只在转换器写出的
+    描述 JSON / OME-XML provenance 中出现，不匹配普通 TIFF。
+    """
+    desc = ifd0_description(path)
+    if not desc:
+        return False
+    return TMAP_SOURCE_FORMAT in desc or TMAP_MPP_POLICY in desc
+
+
 def is_aperio_svs_jpeg(path):
     """内容级判定：JPEG 编码 Aperio SVS（厂商标记 + 压缩 7）。
 
@@ -329,11 +389,18 @@ def enforcement_failure(path, declared_class, format_ext):
     """阶段 1 内容级关闭策略（worker 用，declaration_matches 之后调用）。
 
     返回错误码（目前仅 ``convert_in_browser``）或 None：
-      仅对 .tif/.tiff 名 + 无声明/legacy-direct 的任务做 Aperio-SVS-JPEG
-      内容检查（伪装扩展名绕过创建闸的唯一现实通道——ndpi/vms 等本就是
-      暂时开放的格式）。其余声明路径由 declaration_matches 裁定；JP2K
-      变体是放行的暂时直传，不做此检查。
+      - 原始 TMAP（'TMAP' + 两位版本）无论扩展名（.tmap 在创建闸已拒，
+        改名为 .tif/.svs 等同样在此拒绝）→ convert_in_browser；
+      - 仅对 .tif/.tiff 名 + 无声明/legacy-direct 的任务做 Aperio-SVS-JPEG
+        内容检查（伪装扩展名绕过创建闸的唯一现实通道——ndpi/vms 等本就是
+        暂时开放的格式）。其余声明路径由 declaration_matches 裁定；JP2K
+        变体是放行的暂时直传，不做此检查。
     """
+    # 原始 TMAP 不是 TIFF/OpenSlide 可读格式，必须先在本机转换。放在声明
+    # 分支之前：伪造 direct_class（ome-tiff/converter-bigtiff）也会在
+    # declaration_matches 失败，这里保证未声明/legacy-direct 同样拒绝。
+    if is_tmap_content(path):
+        return "convert_in_browser"
     declared = str(declared_class or "").strip().lower()
     if declared not in ("", "legacy-direct"):
         return None
@@ -375,9 +442,10 @@ def declaration_matches(path, declared_class, filename=None):
     return False
 
 
-#: zip 内视为关闭的成员后缀：MRXS 包（本阶段 zip-MRXS 关闭）与 .svs
-#: （直传关闭；zip 成员无法逐个声明 JP2K 例外——svs 请直传并带声明）
-_ZIP_CLOSED_SUFFIXES = (".mrxs", ".svs")
+#: zip 内视为关闭的成员后缀：MRXS 包（本阶段 zip-MRXS 关闭）、.svs
+#: （直传关闭；zip 成员无法逐个声明 JP2K 例外——svs 请直传并带声明）与
+#: 原始 .tmap（必须先在本机浏览器转换）。
+_ZIP_CLOSED_SUFFIXES = (".mrxs", ".svs", ".tmap")
 
 
 def zip_closed_format_entries(path):

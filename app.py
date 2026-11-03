@@ -2190,6 +2190,10 @@ def _read_metadata(osr: OpenSlide, path: Path) -> dict:
     3. 按扫描倍率估算 mpp = 10 / objective-power（标记为 estimated）
     4. 缺失（missing）
 
+    例外：转换器 provenance 明确声明「物理标定未知/未采用」（TMAP06 的
+    ``unic-tmap06-jpeg`` / ``tmap-header-mpp-not-adopted``）时，不进入
+    2/3——输出没有可信标尺，必须按 missing 返回（查看器按像素操作）。
+
     普通图片（BMP/JPEG，``osr.is_raster_image``）：读取器 properties 无任何
     mpp/objective 键，且文件 DPI/EXIF 分辨率**不得**当作组织的 µm/px
     （raster-image-compat 任务书 §4.4）——恒输出 ``mpp_x/mpp_y/objective =
@@ -2208,6 +2212,19 @@ def _read_metadata(osr: OpenSlide, path: Path) -> dict:
             "mpp_source": "missing",
         }
     objective_f = _to_float(props.get("openslide.objective-power"))
+
+    # TMAP06 转换产物：头部像素尺寸未经标定核验（provenance 明确「不采用
+    # 推算值」）。绝不能从 objective（如 40×）反推 0.25 µm/px，也不能把
+    # TIFF 分辨率标签当作已核验标尺——按未知标定返回（查看器据此按像素）。
+    if upload_direct_class.declares_unknown_physical_scale(path):
+        return {
+            "width": width,
+            "height": height,
+            "mpp_x": None,
+            "mpp_y": None,
+            "objective": objective_f,
+            "mpp_source": "missing",
+        }
 
     mpp_x_f = _to_float(props.get("openslide.mpp-x"))
     mpp_y_f = _to_float(props.get("openslide.mpp-y"))
