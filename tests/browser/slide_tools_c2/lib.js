@@ -8,7 +8,13 @@ const { chromium } = require('playwright');
 
 const HERE = __dirname;
 const REPO = path.resolve(HERE, '../../..');
-const GATE = path.join(REPO, '.gate-tmp/slide-tools-c2/browser');
+// Gate workspace. Defaults to the historical repo path; PT_TEST_OUTPUT_ROOT
+// points every artifact (fixtures, OPFS profiles, reports) at an explicit
+// directory so local runs can keep AGENTS.md's SSD2 rule without touching
+// the repository.
+const GATE = process.env.PT_TEST_OUTPUT_ROOT
+  ? path.resolve(process.env.PT_TEST_OUTPUT_ROOT)
+  : path.join(REPO, '.gate-tmp/slide-tools-c2/browser');
 
 function arg(name, dflt) {
   const i = process.argv.indexOf('--' + name);

@@ -101,6 +101,17 @@ build_synthetic_kfb(${JSON.stringify(out)}, width=${width}, height=${height})
   return out;
 }
 
+/** 合成 TMAP06（Rust CLI gen-tmap，测试数据；无患者数据）。 */
+function ensureTmap(): string {
+  mkdirSync(FIXTURE_DIR, { recursive: true });
+  const out = join(FIXTURE_DIR, "synth-400x300.tmap");
+  if (existsSync(out)) return out;
+  const repo = join(__dirname, "..", "..");
+  const cli = join(repo, "slide-transform-core", "target", "release", "slide-transform");
+  execFileSync(cli, ["gen-tmap", out], { cwd: repo, stdio: "inherit" });
+  return out;
+}
+
 async function login(page: Page, loginId: string, password: string) {
   await page.goto("/login");
   await page.fill('form[action="/login"] input[name="username"]', loginId);
@@ -338,6 +349,104 @@ test("A 小合成 KFB 在工作台面板内转换并上传，拼回的分块被 
   expect(probe.pixels_rgb, "区域像素可读").toBeTruthy();
   expect(probe.pixels_rgb!.length).toBeGreaterThan(0);
   // 已发布字节 == 上传字节（同一份 sha）
+  expect(probe.sha256).toBe(stitch.published_sha256);
+  expect(pageErrors, `pageerror: ${pageErrors.join(" | ")}`).toEqual([]);
+});
+
+// --------------------------------------------------------------------------- //
+// 用例 A-TMAP：工作台识别 TMAP06 → 本机转换交接 → 上传标准 OME-TIFF
+// --------------------------------------------------------------------------- //
+test("A-TMAP 原始 .tmap 不能直传；工作台本机转换后上传 OME-TIFF 并由读取器打开", async ({ page }) => {
+  test.setTimeout(240_000);
+  const tmap = ensureTmap();
+
+  const creates: Array<Record<string, unknown>> = [];
+  const cosPuts: string[] = [];
+  page.on("request", (r) => {
+    const u = new URL(r.url());
+    if (u.pathname === "/api/ingestions" && r.method() === "POST") {
+      creates.push(JSON.parse(r.postData() || "{}"));
+    }
+    if (r.method() === "PUT" && u.hostname === "127.0.0.1"
+        && /\/incoming\//.test(u.pathname)) {
+      cosPuts.push(u.pathname);
+    }
+  });
+  const pageErrors: string[] = [];
+  page.on("pageerror", (e) => pageErrors.push(e.message));
+
+  await openWorkbench(page);
+  expect(await page.evaluate(() => (window as any).HP_UPLOAD.inlineEnabled())).toBe(true);
+
+  // 服务端创建闸（登录后）：原始 .tmap 声明任何直传类别都不能创建
+  //（conversion 形态且 SERVER_CONVERSION_CREATION=False → 422
+  // convert_in_browser）。
+  const csrf = await page.evaluate(() => {
+    const m = document.cookie.match(/(?:^|; )csrf_token=([^;]+)/);
+    return m ? decodeURIComponent(m[1]) : "";
+  });
+  expect(csrf).toBeTruthy();
+  const direct = await page.request.post("/api/ingestions", {
+    headers: { "X-CSRF-Token": csrf },
+    data: { filename: "raw.tmap", declared_size: 1234, direct_class: "legacy-direct" },
+  });
+  expect(direct.status()).toBe(422);
+  const directBody = await direct.json() as { code?: string; error?: string };
+  expect(directBody.code).toBe("convert_in_browser");
+
+  const before = await panelRows(page).count();
+  await page.setInputFiles("#file-input", tmap);
+  await expect(panelRows(page)).toHaveCount(before + 1, { timeout: 30_000 });
+  const row = panelRows(page).last();
+  await expect(row).toContainText(/正在准备上传文件|正在上传|上传成功/);
+  await waitSettled(page);
+
+  const entry = await entryOf(page);
+  expect(entry, "entry 存在").toBeTruthy();
+  expect(entry!.error, `转换失败：${JSON.stringify(entry!.error)}`).toBeNull();
+  expect(entry!.state).toBe("done");
+  await expect(row.locator(".upload-item-status").first()).toHaveText("上传成功");
+
+  // 创建体是转换后的标准产物；原始 .tmap 从未进入创建/直传
+  expect(creates).toHaveLength(1);
+  expect(creates[0].filename).toBe("synth-400x300.ome.tif");
+  expect(creates[0].direct_class).toBe("ome-tiff");
+  expect(creates.some((c) => String(c.filename).toLowerCase().endsWith(".tmap"))).toBe(false);
+  expect(cosPuts.length).toBeGreaterThan(0);
+
+  const ingestionId = entry!.uploadJobId as string;
+  expect(ingestionId).toBeTruthy();
+  expect(entry!.slideId).toMatch(/^sld_/);
+  const stitch = await (await page.request.get(
+    `/api/__test/stitch?ingestion=${encodeURIComponent(ingestionId)}`)).json() as {
+    state: string; stitched_bytes: number; stitched_sha256: string;
+    published_sha256: string | null; reader: string | null;
+    levels: number[][]; open_error: string | null;
+    direct_class: string | null; declaration_matches: boolean | null;
+  };
+  expect(stitch.state).toBe("completed");
+  expect(stitch.open_error).toBeNull();
+  expect(stitch.reader).toBeTruthy();
+  expect(stitch.levels[0]).toEqual([400, 300]);
+  expect(stitch.direct_class).toBe("ome-tiff");
+  expect(stitch.declaration_matches).toBe(true);
+  expect(stitch.stitched_sha256).toBe(stitch.published_sha256);
+
+  const probe = await (await page.request.get(
+    `/api/__test/slide-probe?slide_id=${encodeURIComponent(entry!.slideId)}`)).json() as {
+    reader: string; level_count: number; level_dimensions: number[][];
+    width: number; height: number; pixels_rgb: number[][] | null; sha256: string;
+  };
+  // TMAP06 的输出是三层 OME（源三层）；平台 OME 路径（TiffFileSlide）必须
+  // 读到三个层级，而不是退化成只认 level 0 的 generic OpenSlide。
+  expect(probe.level_count, JSON.stringify({
+    reader: probe.reader, level_dimensions: probe.level_dimensions,
+    stitchReader: stitch.reader, stitchLevels: stitch.levels,
+  })).toBe(3);
+  expect(probe.level_dimensions[0]).toEqual([400, 300]);
+  expect(probe.width).toBe(400);
+  expect(probe.height).toBe(300);
+  expect(probe.pixels_rgb, "区域像素可读").toBeTruthy();
   expect(probe.sha256).toBe(stitch.published_sha256);
   expect(pageErrors, `pageerror: ${pageErrors.join(" | ")}`).toEqual([]);
 });

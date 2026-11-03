@@ -37,7 +37,8 @@ def test_gate_is_closed_and_not_env_driven():
     assert not re.search(r"SERVER_CONVERSION_CREATION\s*=\s*.*environ", src)
 
 
-@pytest.mark.parametrize("name", ["gate-a.kfb", "gate-b.kfbf", "GATE-C.KFB"])
+@pytest.mark.parametrize("name", ["gate-a.kfb", "gate-b.kfbf", "GATE-C.KFB",
+                                  "gate-d.tmap", "GATE-E.TMAP"])
 def test_convert_required_upload_refused_without_side_effects(owner_client,
                                                               name):
     before = (_count("SELECT count(*) FROM ingestion_jobs"),
@@ -61,6 +62,17 @@ def test_native_upload_still_accepted(owner_client):
     r = _create(owner_client, filename="gate-native.tif", size=100_000)
     assert r.status_code == 202, r.get_json()
     assert r.get_json()["kind"] == "native"
+
+
+def test_tmap_forged_direct_class_cannot_bypass(owner_client):
+    """原始 .tmap 即使伪造 legacy-direct/converter-bigtiff 声明，创建闸仍按
+    convert-required 拒绝（不建行/不占预约）。"""
+    for declared in ("legacy-direct", "converter-bigtiff", "ome-tiff"):
+        r = _create(owner_client, filename="forged.tmap", size=100_000,
+                    direct_class=declared)
+        assert r.status_code == 422, declared
+        assert r.get_json()["code"] == "convert_in_browser", declared
+        assert r.get_json()["tools_url"] == "/tools/slides", declared
 
 
 def test_conversion_retry_closed(owner_client):
@@ -91,7 +103,7 @@ def test_capability_routes_convert_required_to_browser(monkeypatch):
     # direct_import 仍 open——RLE/位域/调色板位深 BMP 与渐进/灰度 JPEG 在
     # 头级嗅探按 temporary 分流）
     assert {"kfb", "kfbf", "svs", "mrxs", "scn", "tif", "tiff",
-            "ndpi", "vms", "bif", "bmp", "jpg", "jpeg"} == set(p["browser_convert"]["formats"])
+            "ndpi", "vms", "bif", "bmp", "jpg", "jpeg", "tmap"} == set(p["browser_convert"]["formats"])
     assert p["browser_convert"]["url"] == "/tools/slides"
     # direct_upload 清单：直传开放格式（不含 svs/kfb/kfbf/mrxs/zip）
     du = set(p["direct_upload"]["formats"])

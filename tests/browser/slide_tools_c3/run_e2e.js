@@ -1702,6 +1702,112 @@ async function scenarioBI() {
   });
 }
 
+// (tm) Unic TMAP06 页面入口（合成夹具）。真实样片的浏览器==原生字节一致
+// 由 C2 parity（gate parity-tmap）负责；这里验证页面合同：文件/拖入识别、
+// 格式名、重编码说明、未知标定/关联图提醒、preserve+compact 端到端 sha ==
+// 原生、刷新后任务行、TMAP07 复制前拒绝且无任务目录。
+async function scenarioTM() {
+  const fx = L.ensureFixture('tmap-400x300.tmap', ['gen-tmap']);
+  const nativeSha = L.nativeConvertSha(fx,
+    path.join(L.GATE, 'fixtures', 'tmap-400x300-native-ome.tif'), ['--profile', 'bf-ome']);
+  const nativeCompactSha = L.nativeConvertSha(fx,
+    path.join(L.GATE, 'fixtures', 'tmap-400x300-native-compact.tif'),
+    ['--profile', 'bf-ome', '--encoding', 'compact']);
+  const fxBytes = fs.readFileSync(fx).toString('base64');
+  const { context, page } = await L.launch('tm', [L.savePickerStub(), L.downloadGuard()]);
+  page.on('dialog', (d) => d.accept());
+  try {
+    await L.openTools(page, PORT);
+    const readNotes = async () => {
+      const q = await page.evaluate(() => {
+        const el = document.getElementById('quality-tmap-note');
+        return { hidden: !el || el.hidden, text: (el && el.textContent) || '' };
+      });
+      const cal = await page.evaluate(() => {
+        const el = document.getElementById('tmap-calibration-note');
+        return { hidden: !el || el.hidden, text: (el && el.textContent) || '' };
+      });
+      if (q.hidden) throw new Error('TMAP quality note hidden');
+      if (cal.hidden) throw new Error('TMAP calibration note hidden');
+      if (!/重编码|re-encode/i.test(q.text)) throw new Error(`quality note "${q.text.slice(0, 80)}"`);
+      if (!/µm\/px|PhysicalSize/.test(cal.text)) throw new Error(`calibration note "${cal.text.slice(0, 80)}"`);
+      if (!/关联|label|macro/i.test(cal.text)) throw new Error(`associated note "${cal.text.slice(0, 80)}"`);
+      return { quality: q.text.trim().slice(0, 100), calibration: cal.text.trim().slice(0, 100) };
+    };
+    const runOnce = async (compact) => {
+      await L.clearJobs(page);
+      await page.reload({ waitUntil: 'load' });
+      await page.waitForFunction(() => !!(window.__stToolsReady), null, { timeout: 30000 });
+      await L.setFile(page, fx);
+      await waitVisible(page, '#summary-section:not([hidden])', 120000);
+      const fmt = (await page.textContent('#summary-format')).trim();
+      if (fmt !== 'TMAP06（Unic，单文件明场）') throw new Error(`summary format "${fmt}"`);
+      const notes = await readNotes();
+      if (compact) await page.check('#quality-compact');
+      await page.click('#convert-btn');
+      await waitVisible(page, '#result-section:not([hidden])', 600000);
+      const composed = ((await page.textContent('#result-composed')) || '').trim();
+      await page.click('#save-btn');
+      await waitText(page, '#save-status', /已保存|Saved/, 120000);
+      const saved = await L.opfsSha256(page);
+      return { fmt, notes, composed, sha: saved.sha256 };
+    };
+    const pres = await runOnce(false);
+    if (pres.sha !== nativeSha) throw new Error(`preserve sha ${pres.sha} != native ${nativeSha}`);
+    // 刷新后任务行仍在（ready 任务从 OPFS 恢复，可再次导出）
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForFunction(() => !!(window.__stToolsReady), null, { timeout: 30000 });
+    await waitVisible(page, '.job-row[data-next-action="export"] button[data-action="export"]', 60000);
+    const rowAfterReload = ((await page.textContent('.job-row')) || '').trim();
+
+    const comp = await runOnce(true);
+    if (comp.sha !== nativeCompactSha) throw new Error(`compact sha ${comp.sha} != native ${nativeCompactSha}`);
+
+    // TMAP07：复制前稳定拒绝，零任务目录
+    const v = L.ensureFixture('tmap07.tmap', ['gen-tmap', '--bad', 'tmap07']);
+    await L.clearJobs(page);
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForFunction(() => !!(window.__stToolsReady), null, { timeout: 30000 });
+    await L.setFile(page, v);
+    await waitText(page, '#page-error', /TMAP|不支持|unsupported/i, 60000);
+    const variantMsg = ((await page.textContent('#page-error')) || '').trim();
+    if ((await L.jobDirs(page)).length !== 0) throw new Error('TMAP07 variant left a job dir');
+
+    // 拖入入口：真实 .tmap 字节 → 摘要 → 转换 → 下载 sha == 原生
+    await L.clearJobs(page);
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForFunction(() => !!(window.__stToolsReady), null, { timeout: 30000 });
+    await page.evaluate((b64) => {
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const dt = new DataTransfer();
+      dt.items.add(new File([bytes], 'dropped.tmap', { type: '' }));
+      document.getElementById('drop-zone')
+        .dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+      return true;
+    }, fxBytes);
+    await waitVisible(page, '#summary-section:not([hidden])', 120000);
+    const dropFmt = (await page.textContent('#summary-format')).trim();
+    if (dropFmt !== 'TMAP06（Unic，单文件明场）') throw new Error(`drop format "${dropFmt}"`);
+    await page.click('#convert-btn');
+    await waitVisible(page, '#result-section:not([hidden])', 600000);
+    await page.click('#save-btn');
+    await waitText(page, '#save-status', /已保存|Saved/, 120000);
+    const dropSha = (await L.opfsSha256(page)).sha256;
+    if (dropSha !== nativeSha) throw new Error(`drop sha ${dropSha} != native ${nativeSha}`);
+    record('tm-tmap-page-e2e', true, {
+      fixture: 'tmap-400x300.tmap', format: pres.fmt,
+      preserveSha: pres.sha, nativeSha, compactSha: comp.sha, nativeCompactSha,
+      qualityNote: pres.notes.quality, calibrationNote: pres.notes.calibration,
+      composed: pres.composed.slice(0, 120), rowAfterReload: rowAfterReload.slice(0, 60),
+      variant: `TMAP07 rejected: ${variantMsg.slice(0, 60)}`, dropSha,
+    });
+  } catch (e) {
+    record('tm-tmap-page-e2e', false, { error: String(e).slice(0, 400) });
+  } finally {
+    await context.close();
+  }
+}
+
 // (ra) F8 普通图片页面入口（合成夹具，基线 JPEG——与真实样本同类）。
 // 真实 JPEG 字节一致 → gate parity-raster。画质说明行（有界解码重编码 +
 // 无物理标尺）与变体拒绝（渐进 JPEG）不变。
@@ -1795,7 +1901,7 @@ const SCENARIOS = [
   ['v', scenarioV], ['w', scenarioW], ['x', scenarioX], ['y', scenarioY],
   ['z', scenarioZ], ['sv', scenarioSV], ['mx', scenarioMX], ['sc', scenarioSC],
   ['gt', scenarioGT], ['nd', scenarioND], ['vm', scenarioVM],
-  ['ra', scenarioRA], ['bi', scenarioBI],
+  ['ra', scenarioRA], ['bi', scenarioBI], ['tm', scenarioTM],
 ];
 
 async function main() {

@@ -9,7 +9,12 @@ const nativeCache = require('../native_cache.js');
 
 const HERE = __dirname;
 const REPO = path.resolve(HERE, '../../..');
-const GATE = path.join(REPO, '.gate-tmp/slide-tools-c3');
+// Gate workspace. Defaults to the historical repo path; PT_TEST_OUTPUT_ROOT
+// points every artifact (fixtures, profiles, screenshots, reports) at an
+// explicit directory so local runs can keep AGENTS.md's SSD2 rule.
+const GATE = process.env.PT_TEST_OUTPUT_ROOT
+  ? path.resolve(process.env.PT_TEST_OUTPUT_ROOT)
+  : path.join(REPO, '.gate-tmp/slide-tools-c3');
 const SCREENS = path.join(GATE, 'screens');
 
 function arg(name, dflt) {
@@ -260,13 +265,13 @@ async function opfsSha256(page, name = '__saved-output.bin') {
 
 /// setInputFiles 总是触发 change：先清空 value，避免 Chromium 对同一路径
 /// 跳过 change（C2 lib.js 的同款教训）。
+/// 页面在 change 处理器里同步清空 #file-input（P1-2：再次选择同一路径仍要
+/// 触发 change），因此 setInputFiles 返回后再等 input.files[0] 会与清空
+/// 竞争（页面快时必然超时）。File 已在处理器内捕获；调用方按摘要/错误
+/// 等页面状态等待即可。
 async function setFile(page, p) {
   await page.evaluate(() => { const el = document.getElementById('file-input'); if (el) el.value = ''; });
   await page.setInputFiles('#file-input', p);
-  await page.waitForFunction(() => {
-    const f = document.querySelector('#file-input').files[0];
-    return !!(f && f.size > 0);
-  }, null, { timeout: 20000 });
   return true;
 }
 

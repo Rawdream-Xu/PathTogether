@@ -156,7 +156,7 @@ def test_sniff_ome_tiff(tmp_path):
 @pytest.mark.parametrize("source_format", [
     "kfb_bf_v1", "kfb_kfbio_jpeg", "aperio-svs-jpeg", "leica-scn-jpeg",
     "mirax-bundle", "hamamatsu-ndpi-jpeg", "hamamatsu-vms-bundle",
-    "plain-image-bmp-jpeg", "ventana-bif-jpeg"])
+    "plain-image-bmp-jpeg", "ventana-bif-jpeg", "unic-tmap06-jpeg"])
 def test_sniff_converter_bigtiff(tmp_path, source_format):
     p = _write(tmp_path, "out.tif",
                _classic_tiff(description=_converter_description(source_format)))
@@ -168,6 +168,51 @@ def test_sniff_plain_tiff_and_non_tiff(tmp_path):
     assert udc.sniff_tiff_class(str(p)) == udc.ACTUAL_TIFF_OTHER
     p2 = _write(tmp_path, "fake.tif", b"not a tiff at all")
     assert udc.sniff_tiff_class(str(p2)) == udc.ACTUAL_NON_TIFF
+
+
+def test_tmap_content_detection_and_gate(tmp_path):
+    """原始 TMAP（'TMAP'+两位版本）按内容拒绝：无论扩展名（.tif 改名）与
+    声明（无声明/legacy-direct），都不得进入 open_slide。"""
+    raw = b"TMAP06\x00\x00" + b"\x00" * 16
+    p = _write(tmp_path, "renamed.tif", raw)
+    assert udc.is_tmap_content(str(p)) is True
+    assert udc.enforcement_failure(str(p), None, "tif") == "convert_in_browser"
+    assert udc.enforcement_failure(str(p), "legacy-direct", "tif") == \
+        "convert_in_browser"
+    # 其他扩展名同样是原始 TMAP 内容（不依赖 .tmap 后缀）
+    assert udc.enforcement_failure(str(p), None, "svs") == "convert_in_browser"
+    # TMAP07 也是原始 TMAP：首版不支持，但内容级门禁同样拦住
+    p7 = _write(tmp_path, "renamed7.tif", b"TMAP07\x00\x00" + b"\x00" * 16)
+    assert udc.is_tmap_content(str(p7)) is True
+    assert udc.enforcement_failure(str(p7), None, "tif") == \
+        "convert_in_browser"
+    # 转换产物是 TIFF/BigTIFF，不会以 TMAP 魔数开头（不误拒合法产物）
+    out = _write(tmp_path, "converted.tif", _classic_tiff())
+    assert udc.is_tmap_content(str(out)) is False
+    assert udc.enforcement_failure(str(out), None, "tif") is None
+
+
+def test_declares_unknown_physical_scale(tmp_path):
+    """TMAP06 转换产物 provenance → 平台不得从 objective 反推 MPP。"""
+    marker = (b'{"source_format":"unic-tmap06-jpeg",'
+              b'"mpp_policy":"tmap-header-mpp-not-adopted"}\x00')
+    p = _write(tmp_path, "tmap-out.tif", _classic_tiff(description=marker))
+    assert udc.declares_unknown_physical_scale(str(p)) is True
+    # 单个标记也成立（OME/classic 的 provenance 字段集合可能不同）
+    only_source = _write(
+        tmp_path, "only-source.tif",
+        _classic_tiff(description=b'{"source_format":"unic-tmap06-jpeg"}\x00'))
+    assert udc.declares_unknown_physical_scale(str(only_source)) is True
+    only_policy = _write(
+        tmp_path, "only-policy.tif",
+        _classic_tiff(description=b'{"mpp_policy":"tmap-header-mpp-not-adopted"}\x00'))
+    assert udc.declares_unknown_physical_scale(str(only_policy)) is True
+    # 其他转换器来源 / 普通 TIFF 不受影响
+    kfb = _write(tmp_path, "kfb-out.tif",
+                 _classic_tiff(description=_converter_description("kfb_bf_v1")))
+    assert udc.declares_unknown_physical_scale(str(kfb)) is False
+    plain = _write(tmp_path, "plain.tif", _classic_tiff())
+    assert udc.declares_unknown_physical_scale(str(plain)) is False
 
 
 def test_sniff_bigtiff_layouts(tmp_path):
@@ -412,16 +457,18 @@ def test_declaration_vocab_guards(tmp_path):
 
 
 def test_zip_closed_format_entries(tmp_path):
-    """zip 成员门：.mrxs 与 .svs 都是本阶段关闭成员；.tif 等照常放行。"""
+    """zip 成员门：.mrxs、.svs 与原始 .tmap 都是本阶段关闭成员；
+    .tif 等照常放行。"""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("CMU-1.mrxs", b"stub")
         zf.writestr("CMU-1/Slidedat.ini", b"stub")
         zf.writestr("scan.svs", b"stub")
+        zf.writestr("scan.tmap", b"stub")
         zf.writestr("other.tif", b"stub")
     p = _write(tmp_path, "pack.zip", buf.getvalue())
     assert udc.zip_closed_format_entries(str(p)) == [
-        "CMU-1.mrxs", "scan.svs"]
+        "CMU-1.mrxs", "scan.svs", "scan.tmap"]
     assert udc.zip_contains_bundle_entry(str(p))  # 兼容别名
     buf2 = io.BytesIO()
     with zipfile.ZipFile(buf2, "w") as zf:
@@ -689,6 +736,33 @@ def test_worker_svs_renamed_tif_fails_convert_in_browser(
                                direct_class="legacy-direct")
     assert ciw.process_validating(cos=fake, state=st) == job["job_id"]
     assert ist.get_job(job["job_id"])["state"] == ist.READY
+
+
+def test_worker_tmap_renamed_tif_fails_convert_in_browser(
+        monkeypatch, tmp_path):
+    """原始 TMAP06 改名 .tif：创建闸只看扩展名放行，worker 在 open_slide
+    之前按内容拒绝（无声明 / legacy-direct / 伪造 converter-bigtiff 都拦）；
+    不创建可进入后端转换/查看器的任务。"""
+    seen = {"open": 0}
+
+    def explode(path, format_hint=None):
+        seen["open"] += 1
+        raise AssertionError("原始 TMAP 内容级拒绝后不得再调用 open_slide")
+
+    monkeypatch.setattr(slide_io, "open_slide", explode)
+    payload = b"TMAP06\x00\x00" + b"\x00" * 32
+
+    for declared in (None, "legacy-direct", "converter-bigtiff"):
+        fake, st = _FakeCos(), {}
+        job = _drive_to_validating(fake, st, payload, "renamed.tmap.tif", "tif",
+                                   direct_class=declared)
+        assert ciw.process_validating(cos=fake, state=st) is None, declared
+        out = ist.get_job(job["job_id"])
+        assert out["state"] == ist.FAILED, declared
+        assert out["fail_code"] == "convert_in_browser", declared
+        assert not slide_storage.staging_task_dir(
+            job["job_id"], root=str(tmp_path)).exists()
+    assert seen["open"] == 0
 
 
 def test_worker_zip_with_svs_member_fails_convert_in_browser(

@@ -24,6 +24,11 @@ const PROFILE = L.arg('profile', 'saver');
 const ENCODING = L.arg('encoding', 'preserve');
 const BROWSER = L.arg('browser', 'chromium');
 const BASELINE_S = Number(L.arg('baseline-seconds', '6'));
+// Explicit input (e.g. a real TMAP sample) instead of a synthetic KFB.
+// `--native-sha` supplies the already-computed native reference so the heavy
+// native conversion is not repeated just to report parity.
+const INPUT = L.arg('input', '');
+const NATIVE_SHA = L.arg('native-sha', '');
 
 // pixel sides targeting total synthetic-KFB bytes (measured ~1.6427 B/px
 // over the whole pyramid at q90 422; refined after generation by reporting
@@ -81,8 +86,21 @@ function findBrowserPid(userDataDir) {
   return pids.length ? Math.min(...pids) : null;
 }
 
+function deviceInfo() {
+  let cpu = null;
+  try {
+    const text = fs.readFileSync('/proc/cpuinfo', 'utf8');
+    cpu = (text.match(/^model name\s*:\s*(.+)$/m) || [])[1] || null;
+  } catch { /* non-Linux */ }
+  return {
+    cpu,
+    cores: require('os').cpus().length,
+    memTotalBytes: require('os').totalmem(),
+  };
+}
+
 async function main() {
-  const input = inputFor(SIZE);
+  const input = INPUT || inputFor(SIZE);
   const inBytes = fs.statSync(input).size;
   console.log(`input ${SIZE}: ${(inBytes / MIB).toFixed(0)} MiB (${(inBytes / 2 ** 30).toFixed(2)} GiB)`);
 
@@ -99,9 +117,13 @@ async function main() {
   if (!pid) throw new Error('browser pid not found');
 
   const report = {
-    label: LABEL, size: SIZE, profile: PROFILE, encoding: ENCODING, browser: BROWSER,
+    label: LABEL, size: INPUT ? 'explicit' : SIZE, profile: PROFILE, encoding: ENCODING,
+    browser: BROWSER,
+    browserVersion: (() => { try { return context.browser() ? context.browser().version() : null; } catch { return null; } })(),
+    device: deviceInfo(),
     cgroup: process.env.CGROUP_DESC || null,
     inputBytes: inBytes,
+    inputName: INPUT ? path.basename(INPUT) : null,
     startedAt: new Date().toISOString(),
   };
 
@@ -216,15 +238,19 @@ async function main() {
     } else {
       console.log('JOB DID NOT COMPLETE:', JSON.stringify(done).slice(0, 300));
     }
-    // hash parity vs native for the small size only (big ones take minutes)
-    if (SIZE === '1g' && done && done.ok) {
-      const nativeOut = input.replace(/\.kfb$/, '-native.tif');
-      if (!fs.existsSync(nativeOut)) {
-        execFileSync(L.CLI, ['convert', input, nativeOut, '--overwrite',
-          '--profile', /\.kfbf$/i.test(input) ? 'fl-ome' : 'bf-ome',
-          ...(ENCODING === 'compact' ? ['--encoding', 'compact'] : [])]);
+    // hash parity vs native: --native-sha supplies the reference; the small
+    // synthetic size computes it once (big/sample native runs take minutes)
+    if (done && done.ok && (NATIVE_SHA || SIZE === '1g')) {
+      let nativeSha = NATIVE_SHA;
+      if (!nativeSha) {
+        const nativeOut = input.replace(/\.kfb$/, '-native.tif');
+        if (!fs.existsSync(nativeOut)) {
+          execFileSync(L.CLI, ['convert', input, nativeOut, '--overwrite',
+            '--profile', /\.kfbf$/i.test(input) ? 'fl-ome' : 'bf-ome',
+            ...(ENCODING === 'compact' ? ['--encoding', 'compact'] : [])]);
+        }
+        nativeSha = await L.sha256File(nativeOut);
       }
-      const nativeSha = await L.sha256File(nativeOut);
       report.nativeSha256 = nativeSha;
       report.browserSha256 = done.sha256;
       report.parity = nativeSha === done.sha256;

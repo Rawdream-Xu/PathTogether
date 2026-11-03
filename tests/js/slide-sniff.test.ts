@@ -215,6 +215,37 @@ describe("slide-sniff：扩展名快路径（不读字节）", () => {
 		expect(S.classifyExt("a.svs").route).toBe("tiff");
 		expect(S.classifyExt("a.ndpi").route).toBe("tiff");
 		expect(S.classifyExt("a.ome.tif").route).toBe("tiff");
+		// Unic TMAP06：头部识别分派（TMAP06 → convert；其他版本/改名 → 拒绝）
+		expect(S.classifyExt("a.tmap").route).toBe("tmap");
+		expect(S.classifyExt("A.TMAP").route).toBe("tmap");
+	});
+});
+
+describe("slide-sniff：Unic TMAP06（头部识别，绝不回退直传）", () => {
+	const tmapBytes = (version = "06", len = 8) => {
+		const out = new Uint8Array(len);
+		const magic = [...new TextEncoder().encode("TMAP" + version)];
+		out.set(magic.slice(0, Math.min(magic.length, len)), 0);
+		return out;
+	};
+
+	it("TMAP06 → convert", async () => {
+		const r = await S.classifyFile(fakeFile("scan.tmap", tmapBytes("06")));
+		expect(r.cls).toBe("convert");
+		expect(r.directClass).toBeNull();
+	});
+
+	it("TMAP07 / 未知版本 → unsupported（不是 temporary）", async () => {
+		for (const v of ["07", "05"]) {
+			const r = await S.classifyFile(fakeFile("scan.tmap", tmapBytes(v)));
+			expect(r.cls, v).toBe("unsupported");
+		}
+	});
+
+	it("TIFF 改名 .tmap → unsupported（不按 TIFF 路由）", async () => {
+		const tiff = new Uint8Array([0x49, 0x49, 0x2a, 0x00, 8, 0, 0, 0]);
+		const r = await S.classifyFile(fakeFile("renamed.tmap", tiff));
+		expect(r.cls).toBe("unsupported");
 	});
 });
 

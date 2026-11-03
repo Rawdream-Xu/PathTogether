@@ -69,7 +69,7 @@ describe("U2 default view (template structure)", () => {
 	it("drop zone + pick button + hidden-but-focusable file input, one accept list", () => {
 		expect(shellSrc).toContain('id="drop-zone"');
 		expect(shellSrc).toContain('id="pick-file-btn"');
-		expect(shellSrc).toMatch(/<input id="file-input" name="file" type="file" accept="\.kfb,\.kfbf,\.svs,\.scn,\.ndpi,\.bif,\.ome\.tif,\.ome\.tiff,\.tif,\.tiff,\.vms,\.vmu,\.mrxs,\.dat,\.bmp,\.jpg,\.jpeg" class="visually-hidden-input"/);
+		expect(shellSrc).toMatch(/<input id="file-input" name="file" type="file" accept="\.kfb,\.kfbf,\.svs,\.scn,\.ndpi,\.bif,\.tmap,\.TMAP,\.ome\.tif,\.ome\.tiff,\.tif,\.tiff,\.vms,\.vmu,\.mrxs,\.dat,\.bmp,\.jpg,\.jpeg" class="visually-hidden-input"/);
 		expect(cssSrc).toContain(".visually-hidden-input");
 		expect(cssSrc).not.toMatch(/#file-input\s*\{[^}]*display:\s*none/);
 		expect(cssSrc).toContain(".drop-zone.dragover");

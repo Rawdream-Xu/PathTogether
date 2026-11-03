@@ -62,6 +62,16 @@ def test_kfbf_is_convert_required():
     assert info["canonical_ext"] == ".ome.tif"
 
 
+@pytest.mark.parametrize("filename", ["sample.tmap", "SAMPLE.TMAP",
+                                      "/tmp/x/切片.tmap"])
+def test_tmap_is_convert_required(filename):
+    """Unic TMAP06：浏览器转换后上传；原始 .tmap 不进入直传/原生受理集。"""
+    info = reg.lookup(filename)
+    assert info["ext"] == ".tmap"
+    assert info["capability"] == reg.CAP_CONVERT_REQUIRED
+    assert info["canonical_ext"] == ".ome.tif"
+
+
 @pytest.mark.parametrize("filename", [
     "a.zip",          # 归档：不是切片格式（解包后按成员再查）
     "a.png",
@@ -103,8 +113,8 @@ def test_registry_covers_supported_exts_exactly():
     native = {"." + e for e in app.SUPPORTED_EXTS}
     registered = {ext for ext in reg._FORMATS}  # noqa: SLF001
     assert native <= registered
-    # 登记表允许额外包含 convert-required 项（kfb/kfbf）
-    assert registered - native == {".kfb", ".kfbf"}
+    # 登记表允许额外包含 convert-required 项（kfb/kfbf/tmap）
+    assert registered - native == {".kfb", ".kfbf", ".tmap"}
 
 
 def test_upload_whitelist_unchanged_no_kfb():
@@ -118,6 +128,21 @@ def test_upload_whitelist_unchanged_no_kfb():
 
     assert ".kfb" not in slide_io.LOGICAL_EXTS
     assert ".kfbf" not in slide_io.LOGICAL_EXTS
+
+
+def test_tmap_not_in_direct_or_native_sets():
+    """原始 TMAP 不进入原生/直传/OpenSlide 受理集（必须先浏览器转换）。
+
+    服务端创建闸经 registry 的 convert-required 拒绝；转换产物（TIFF/
+    BigTIFF）走既有 native 入口。"""
+    import app
+    import slide_io
+
+    assert "tmap" not in app.SUPPORTED_EXTS
+    assert ".tmap" not in slide_io.LOGICAL_EXTS
+    assert "tmap" not in app._direct_upload_formats()
+    assert "tmap" not in app._cos_accepted_formats()
+    assert app.SERVER_CONVERSION_CREATION is False
 
 
 # --------------------------------------------------------------------------- #
@@ -239,6 +264,16 @@ def test_public_catalog_direct_class_flags():
     assert rows["bif"]["import_mode"] == "convert"
     assert rows["bif"]["browser_convert"] == "available"
     assert rows["bif"]["direct_import"] == "open"
+    # Unic TMAP06：转换可用、直传关闭（原始 .tmap 不能进入平台受理集）
+    assert rows["tmap"]["import_mode"] == "convert"
+    assert rows["tmap"]["browser_convert"] == "available"
+    assert rows["tmap"]["direct_import"] == "closed"
+    assert rows["tmap"]["capability"] == reg.CAP_CONVERT_REQUIRED
+    assert rows["tmap"]["canonical_format"] == "ome-tiff"
+    assert rows["tmap"]["bundle_required"] is False
+    assert rows["tmap"]["selectable_for_upload"] is True
+    assert "TMAP06" in "".join(rows["tmap"]["limits"])
+    assert "TMAP06" in rows["tmap"]["display_name"]
     # 暂时直接导入：尚无浏览器转换器的格式
     for rid in ("vmu", "svslide"):
         assert rows[rid]["import_mode"] == "direct-temporary", rid
@@ -249,12 +284,13 @@ def test_public_catalog_direct_class_flags():
 def test_catalog_flag_derived_vocabularies():
     """catalog_rows_by_flag 派生两张词表（app 能力下发/关闭闸共用）。"""
     closed = reg.catalog_rows_by_flag("direct_import", "closed")
-    assert closed == {"svs", "mrxs", "kfb", "kfbf"}
+    assert closed == {"svs", "mrxs", "kfb", "kfbf", "tmap"}
     # F5/F6/F8：tif/tiff、ndpi、vms 与 raster-image（bmp/jpg/jpeg）加入
-    # browser_convert 集合（direct_import 仍 open）
+    # browser_convert 集合（direct_import 仍 open）；TMAP06 转换可用且
+    # 直传关闭
     bc = reg.catalog_rows_by_flag("browser_convert", "available")
     assert bc == {"svs", "mrxs", "kfb", "kfbf", "scn", "tif", "tiff", "ndpi",
-                  "vms", "bif", "bmp", "jpg", "jpeg"}
+                  "vms", "bif", "bmp", "jpg", "jpeg", "tmap"}
 
 
 def test_vendor_names_corrected():

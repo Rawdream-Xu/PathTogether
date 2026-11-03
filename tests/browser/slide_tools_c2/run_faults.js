@@ -58,6 +58,7 @@ async function prepareFixtures() {
   const ndpi = path.join(dir, 'syn.ndpi'); // F6: NDPI adapter rows
   const raster = path.join(dir, 'syn.jpg'); // F8: plain-image adapter rows (band path)
   const bif = path.join(dir, 'syn.bif'); // Ventana BIF adapter rows (overlap stitch)
+  const tmap = path.join(dir, 'syn.tmap'); // Unic TMAP06 adapter rows (absolute compose)
   const mrxsDir = path.join(dir, 'mrxs'); // F3: bundle rows (entry + dir)
   const vmsDir = path.join(dir, 'vms'); // F7: VMS flat-bundle rows
   if (!fs.existsSync(bf)) execFileSync(L.CLI, ['gen-kfb', bf, '--width', '700', '--height', '500']);
@@ -69,6 +70,7 @@ async function prepareFixtures() {
   if (!fs.existsSync(ndpi)) execFileSync(L.CLI, ['gen-ndpi', ndpi, '--width', '512', '--height', '320', '--levels', '2']);
   if (!fs.existsSync(raster)) execFileSync(L.CLI, ['gen-raster', raster, '--kind', 'jpeg', '--width', '512', '--height', '320', '--no-restart']);
   if (!fs.existsSync(bif)) execFileSync(L.CLI, ['gen-bif', bif]);
+  if (!fs.existsSync(tmap)) execFileSync(L.CLI, ['gen-tmap', tmap]);
   if (!fs.existsSync(path.join(mrxsDir, 'synthetic.mrxs'))) {
     execFileSync(L.CLI, ['gen-mrxs', mrxsDir, '--images-x', '24', '--images-y', '18']);
   }
@@ -88,6 +90,7 @@ async function prepareFixtures() {
     ['ndpi', ndpi, 'bf-ome', null],
     ['raster', raster, 'bf-ome', null],
     ['bif', bif, 'bf-ome', null],
+    ['tmap', tmap, 'bf-ome', null],
     ['mrxs', path.join(mrxsDir, 'synthetic.mrxs'), 'bf-ome', null],
     ['vms', path.join(vmsDir, 'synthetic.vms'), 'bf-ome', null]]) {
     const out = path.join(dir, `${k}-native.tif`);
@@ -95,7 +98,7 @@ async function prepareFixtures() {
       ...(enc ? ['--encoding', enc] : [])]);
     native[k] = await L.sha256File(out);
   }
-  return { bf, bf2, fl, svs, scn, gtiff, ndpi, raster, bif, mrxsDir, vmsDir, native, dir };
+  return { bf, bf2, fl, svs, scn, gtiff, ndpi, raster, bif, tmap, mrxsDir, vmsDir, native, dir };
 }
 
 // ---------------------------------------------------------------- scenarios
@@ -936,6 +939,178 @@ function makeScenarios(F) {
       outBefore: outBefore && outBefore.size, outAfter: outAfter && outAfter.size };
   }]);
 
+  // ---- Unic TMAP06 lifecycle rows (absolute-coordinate compose) ---------- //
+  // The committed checkpoint JSON carries TMAP's adapter identity beyond the
+  // generic {level,channel,cell,out,ifds}: source_format / pyramid / compose /
+  // in. The runner must persist them verbatim and the wasm resume must read
+  // them back — otherwise every TMAP resume would be refused as "missing
+  // journal identity".
+  S.push(['tmap-resume-matches-native', async (page) => {
+    const b = await begin(page, F.tmap, { profileId: 'saver',
+      faults: { crashAtWrite: 6, journalIntervalBytes: 1024 } }); const jobId = b.jobId; const base = b.base;
+    await waitForFault(page, 'crashAtWrite', base, jobId);
+    await page.evaluate(() => window.__c2.terminateWorker());
+    const cp = await page.evaluate((id) => window.__c2.journalCheckpoint(id), jobId);
+    const outMid = await page.evaluate((id) => window.__c2.outputInfo(id), jobId);
+    await page.evaluate((id) => window.__c2.resume({ jobId: id }), jobId);
+    const done = await page.evaluate(() => window.__c2.awaitDone());
+    return { done, sha: await shaOf(page, jobId), expect: F.native.tmap,
+      checkpoint: cp.lastCommit, gen: cp.gen, torn: cp.torn, outMid: outMid && outMid.size };
+  }]);
+
+  S.push(['tmap-adapter-change-refused', async (page) => {
+    const b = await begin(page, F.tmap, { profileId: 'saver',
+      faults: { crashAtWrite: 6, journalIntervalBytes: 1024 } }); const jobId = b.jobId; const base = b.base;
+    await waitForFault(page, 'crashAtWrite', base, jobId);
+    await page.evaluate(() => window.__c2.terminateWorker());
+    const rec0 = await page.evaluate((id) => window.__c2.jobRecord(id), jobId);
+    await page.evaluate((id) => window.__c2.tamperJobRecord({ sourceAdapter: null }, id), jobId);
+    const asKfb = await page.evaluate((id) => window.__c2.tryResume({ jobId: id }), jobId);
+    await page.evaluate((id) => window.__c2.tamperJobRecord({ sourceAdapter: 'unic-tmap06-jpeg' }, id), jobId);
+    await page.evaluate((id) => window.__c2.resume({ jobId: id }), jobId);
+    const done = await page.evaluate(() => window.__c2.awaitDone());
+    return { recAdapter: rec0.sourceAdapter, asKfb, done,
+      sha: await shaOf(page, jobId), expect: F.native.tmap };
+  }]);
+
+  S.push(['tmap-encoding-change-refused', async (page) => {
+    const b = await begin(page, F.tmap, { profileId: 'saver',
+      faults: { crashAtWrite: 6, journalIntervalBytes: 1024 } }); const jobId = b.jobId; const base = b.base;
+    await waitForFault(page, 'crashAtWrite', base, jobId);
+    await page.evaluate(() => window.__c2.terminateWorker());
+    const refused = await page.evaluate((id) =>
+      window.__c2.tryResume({ jobId: id, encoding: 'compact-jpeg-v1' }), jobId);
+    const outAfterRefusal = await page.evaluate((id) => window.__c2.outputInfo(id), jobId);
+    await page.evaluate((id) => window.__c2.resume({ jobId: id }), jobId);
+    const done = await page.evaluate(() => window.__c2.awaitDone());
+    return { refused, outAfterRefusal: outAfterRefusal && outAfterRefusal.size,
+      done, sha: await shaOf(page, jobId), expect: F.native.tmap };
+  }]);
+
+  S.push(['tmap-output-profile-change-refused', async (page) => {
+    const b = await begin(page, F.tmap, { profileId: 'saver',
+      faults: { crashAtWrite: 6, journalIntervalBytes: 1024 } }); const jobId = b.jobId; const base = b.base;
+    await waitForFault(page, 'crashAtWrite', base, jobId);
+    await page.evaluate(() => window.__c2.terminateWorker());
+    const refused = await page.evaluate((id) =>
+      window.__c2.tryResume({ jobId: id, outputProfile: 'bf-classic' }), jobId);
+    const outAfterRefusal = await page.evaluate((id) => window.__c2.outputInfo(id), jobId);
+    await page.evaluate((id) => window.__c2.resume({ jobId: id }), jobId);
+    const done = await page.evaluate(() => window.__c2.awaitDone());
+    return { refused, outAfterRefusal: outAfterRefusal && outAfterRefusal.size,
+      done, sha: await shaOf(page, jobId), expect: F.native.tmap };
+  }]);
+
+  S.push(['tmap-adapter-version-refused', async (page) => {
+    const b = await begin(page, F.tmap, { profileId: 'saver',
+      faults: { crashAtWrite: 6, journalIntervalBytes: 1024 } }); const jobId = b.jobId; const base = b.base;
+    await waitForFault(page, 'crashAtWrite', base, jobId);
+    await page.evaluate(() => window.__c2.terminateWorker());
+    const gen0 = await page.evaluate((id) => window.__c2.journalCheckpoint(id), jobId);
+    const originalVersion = (gen0.gen && gen0.gen.adapterVersion) || '1';
+    await page.evaluate((id) => window.__c2.tamperJournalGen({ adapterVersion: '2' }, id), jobId);
+    const refused = await page.evaluate((id) => window.__c2.tryResume({ jobId: id }), jobId);
+    await page.evaluate(([id, version]) => window.__c2.tamperJournalGen(
+      { adapterVersion: version }, id), [jobId, originalVersion]);
+    await page.evaluate((id) => window.__c2.resume({ jobId: id }), jobId);
+    const done = await page.evaluate(() => window.__c2.awaitDone());
+    return { refused, done, sha: await shaOf(page, jobId), expect: F.native.tmap };
+  }]);
+
+  S.push(['tmap-compose-fingerprint-refused', async (page) => {
+    // A checkpoint journalled under another TMAP06 compose recipe (quality/
+    // sampling) is refused by the runner's pre-checks (resume_refused, kind
+    // compose-fingerprint) before the output is touched; the core refuses the
+    // same identity again as defence in depth.
+    const b = await begin(page, F.tmap, { profileId: 'saver',
+      faults: { crashAtWrite: 6, journalIntervalBytes: 1024 } }); const jobId = b.jobId; const base = b.base;
+    await waitForFault(page, 'crashAtWrite', base, jobId);
+    await page.evaluate(() => window.__c2.terminateWorker());
+    const cp = await page.evaluate((id) => window.__c2.journalCheckpoint(id), jobId);
+    const original = cp.lastCommit && cp.lastCommit.compose;
+    const journal0 = await page.evaluate((id) => window.__c2.journalRaw(id), jobId);
+    const outBefore = await page.evaluate((id) => window.__c2.outputInfo(id), jobId);
+    await page.evaluate((id) => window.__c2.tamperJournalCheckpoint(
+      { compose: 'tmap06-compose:q80:y420:hstd:v1' }, id), jobId);
+    const refused = await page.evaluate((id) => window.__c2.tryResume({ jobId: id }), jobId);
+    const outAfter = await page.evaluate((id) => window.__c2.outputInfo(id), jobId);
+    // restore the captured pre-tamper journal (q90) for the honest retry
+    await page.evaluate(([id, text]) => window.__c2.restoreJournal(text, id),
+      [jobId, journal0]);
+    await page.evaluate((id) => window.__c2.resume({ jobId: id }), jobId);
+    const done = await page.evaluate(() => window.__c2.awaitDone());
+    return { original, refused, outBefore: outBefore && outBefore.size,
+      outAfter: outAfter && outAfter.size,
+      done, sha: await shaOf(page, jobId), expect: F.native.tmap };
+  }]);
+
+  S.push(['tmap-source-changed-refused', async (page) => {
+    // The staged copy must still be exactly the bytes hashed at staging; a
+    // flipped byte refuses before the output is touched.
+    const b = await begin(page, F.tmap, { profileId: 'saver',
+      faults: { crashAtWrite: 6, journalIntervalBytes: 1024 } }); const jobId = b.jobId; const base = b.base;
+    await waitForFault(page, 'crashAtWrite', base, jobId);
+    await page.evaluate(() => window.__c2.terminateWorker());
+    const outBefore = await page.evaluate((id) => window.__c2.outputInfo(id), jobId);
+    await page.evaluate((id) => window.__c2.tamperSource(id, 'flip'), jobId);
+    const refused = await page.evaluate((id) => window.__c2.tryResume({ jobId: id }), jobId);
+    const outAfter = await page.evaluate((id) => window.__c2.outputInfo(id), jobId);
+    return { refused,
+      outBefore: outBefore && outBefore.size, outAfter: outAfter && outAfter.size };
+  }]);
+
+  S.push(['tmap-reload-mid-resume', async (page) => {
+    const b = await begin(page, F.tmap, { profileId: 'saver',
+      faults: { crashAtWrite: 6, journalIntervalBytes: 1024 } }); const jobId = b.jobId; const base = b.base;
+    await waitForFault(page, 'crashAtWrite', base, jobId);
+    await page.reload({ waitUntil: 'load' });
+    await L.open(page, PORT);
+    await L.setFile(page, F.tmap);
+    const cp = await page.evaluate((id) => window.__c2.journalCheckpoint(id), jobId);
+    await page.evaluate((id) => window.__c2.resume({ jobId: id }), jobId);
+    const done = await page.evaluate(() => window.__c2.awaitDone());
+    return { done, sha: await shaOf(page, jobId), expect: F.native.tmap,
+      checkpoint: cp.lastCommit, torn: cp.torn };
+  }]);
+
+  S.push(['tmap-finalize-crash-resume', async (page) => {
+    const b = await begin(page, F.tmap, { profileId: 'saver',
+      faults: { crashInFinalize: true, journalIntervalBytes: 1024, finalizeWriteThreshold: 4 } });
+    const jobId = b.jobId; const base = b.base;
+    await waitForFault(page, 'crashInFinalize', base, jobId);
+    await page.evaluate(() => window.__c2.terminateWorker());
+    await page.evaluate((id) => window.__c2.resume({ jobId: id }), jobId);
+    const done = await page.evaluate(() => window.__c2.awaitDone());
+    return { done, sha: await shaOf(page, jobId), expect: F.native.tmap };
+  }]);
+
+  S.push(['tmap-write-failure-recoverable', async (page) => {
+    const b = await begin(page, F.tmap, { profileId: 'saver',
+      faults: { quotaErrorAtWrite: 4, journalIntervalBytes: 1024 } });
+    const jobId = b.jobId;
+    const first = await page.evaluate(() => window.__c2.awaitDone());
+    await page.evaluate((id) => window.__c2.resume({ jobId: id }), jobId);
+    const done = await page.evaluate(() => window.__c2.awaitDone());
+    return { first, done, sha: await shaOf(page, jobId), expect: F.native.tmap };
+  }]);
+
+  S.push(['tmap-cancel-no-artifact', async (page) => {
+    await L.clearJobs(page);
+    await L.setFile(page, F.tmap);
+    const jobId = await page.evaluate(() => window.__c2.start(
+      { profileId: 'saver', faults: { writeDelayMs: 150 } }));
+    await page.evaluate(() => window.__c2.waitState('running', 60000));
+    await page.evaluate(() => window.__c2.cancel());
+    await page.waitForTimeout(600);
+    const latency = await page.evaluate(() => window.__c2.cancelLatency());
+    const dirDeleted = !(await page.evaluate((id) => window.__c2.jobDirExists(id), jobId));
+    const events = await page.evaluate(() => window.__c2.events
+      .filter((e) => e.kind === 'cancel-result').map((e) => e.data));
+    const rec = await page.evaluate((id) => window.__c2.jobRecord(id), jobId).catch(() => null);
+    return { latencyMs: latency, dirDeleted, state: rec && rec.state,
+      cancelResult: events[0] || null };
+  }]);
+
   S.push(['vms-bundle-converts-and-matches-native', async (page) => {
     // F7 baseline: the flat VMS bundle converts through the browser bundle
     // path and completes at the native bytes (segment-compose + l0-box2)
@@ -1292,6 +1467,80 @@ function verdict(name, r) {
         && r.outAfter === r.outBefore
         ? ok({ code: m.code }) : fail(safeJson({ refused: m, out: [r.outBefore, r.outAfter] }));
     }
+    case 'tmap-resume-matches-native':
+    case 'tmap-reload-mid-resume': {
+      const c = r.checkpoint || {};
+      const identity = c.source_format === 'unic-tmap06-jpeg'
+        && c.pyramid === 'tmap06-stored-absolute-canvas-v1'
+        && c.compose === 'tmap06-compose:q90:y422:hstd:v1'
+        && typeof c.in === 'number' && c.in > 0
+        && typeof c.adapter_version === 'string';
+      const genOk = !r.gen || r.gen.adapterVersion === '1';
+      return r.done && r.done.ok && r.sha === r.expect && identity && r.torn === false && genOk
+        ? ok({ identity, compose: c.compose })
+        : fail(safeJson({ done: r.done && r.done.ok, sha: r.sha && r.sha.slice(0, 8),
+          expect: r.expect && r.expect.slice(0, 8), identity, checkpoint: c, torn: r.torn, gen: r.gen }));
+    }
+    case 'tmap-adapter-change-refused': {
+      const m = r.asKfb || {};
+      return r.recAdapter === 'unic-tmap06-jpeg' && m.refused && m.code === 'resume_refused'
+        && m.kind === 'source-adapter' && m.message.includes('适配器')
+        && r.done && r.done.ok && r.sha === r.expect
+        ? ok() : fail(safeJson({ rec: r.recAdapter, asKfb: m, done: r.done && r.done.ok,
+          sha: r.sha && r.sha.slice(0, 8) }));
+    }
+    case 'tmap-encoding-change-refused': {
+      const m = r.refused || {};
+      return m.refused && m.code === 'resume_refused' && m.kind === 'encoding-profile'
+        && r.outAfterRefusal > 0 && r.done && r.done.ok && r.sha === r.expect
+        ? ok() : fail(safeJson({ refused: m, out: r.outAfterRefusal,
+          done: r.done && r.done.ok, sha: r.sha && r.sha.slice(0, 8) }));
+    }
+    case 'tmap-output-profile-change-refused': {
+      const m = r.refused || {};
+      return m.refused && m.code === 'resume_refused' && m.kind === 'output-profile'
+        && r.outAfterRefusal > 0 && r.done && r.done.ok && r.sha === r.expect
+        ? ok() : fail(safeJson({ refused: m, out: r.outAfterRefusal,
+          done: r.done && r.done.ok, sha: r.sha && r.sha.slice(0, 8) }));
+    }
+    case 'tmap-adapter-version-refused': {
+      const m = r.refused || {};
+      return m.refused && m.code === 'resume_refused' && m.kind === 'source-adapter'
+        && r.done && r.done.ok && r.sha === r.expect
+        ? ok() : fail(safeJson({ refused: m, done: r.done && r.done.ok,
+          sha: r.sha && r.sha.slice(0, 8) }));
+    }
+    case 'tmap-compose-fingerprint-refused': {
+      const m = r.refused || {};
+      // refused by the runner before the output is touched (same contract
+      // as the encoding/profile/adapter rows)
+      return m.refused && m.code === 'resume_refused' && m.kind === 'compose-fingerprint'
+        && typeof r.outAfter === 'number' && r.outAfter === r.outBefore && r.original
+        && r.done && r.done.ok && r.sha === r.expect
+        ? ok({ code: m.code, out: [r.outBefore, r.outAfter] })
+        : fail(safeJson({ refused: m, out: [r.outBefore, r.outAfter],
+          original: r.original, done: r.done && r.done.ok,
+          sha: r.sha && r.sha.slice(0, 8) }));
+    }
+    case 'tmap-source-changed-refused': {
+      const m = r.refused || {};
+      return m.refused && m.code === 'source_changed_refuse_resume'
+        && r.outAfter === r.outBefore
+        ? ok({ code: m.code }) : fail(safeJson({ refused: m, out: [r.outBefore, r.outAfter] }));
+    }
+    case 'tmap-finalize-crash-resume':
+      return r.done && r.done.ok && r.sha === r.expect
+        ? ok({ sha: r.sha }) : fail(safeJson({ done: r.done, sha: r.sha && r.sha.slice(0, 8) }));
+    case 'tmap-write-failure-recoverable': {
+      const firstCode = r.first && r.first.error && r.first.error.code;
+      return firstCode === 'quota_exceeded_recoverable'
+        && r.done && r.done.ok && r.sha === r.expect
+        ? ok({ firstCode }) : fail(safeJson({ first: r.first && r.first.error,
+          done: r.done && r.done.ok, sha: r.sha && r.sha.slice(0, 8) }));
+    }
+    case 'tmap-cancel-no-artifact':
+      return typeof r.latencyMs === 'number' && r.latencyMs <= 250 && r.dirDeleted === true
+        ? ok({ latencyMs: r.latencyMs }) : fail(safeJson(r));
     case 'vms-bundle-converts-and-matches-native': {
       return r.done && r.done.ok && r.sha === r.expect && r.adapter === 'hamamatsu-vms-bundle'
         ? ok() : fail(safeJson({ done: r.done && r.done.ok, sha: r.sha && r.sha.slice(0, 8),

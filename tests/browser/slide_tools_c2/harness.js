@@ -446,6 +446,93 @@ window.__c2 = {
     await engine.writeSlotRecord(dir, 'job', { ...prev, ...patch });
     return true;
   },
+  async journalCheckpoint(id = currentJob) {
+    // test hook: inspect what the host persisted for the last committed
+    // checkpoint (TMAP06 identity fields must survive runner → journal →
+    // wasm resume verbatim; an absent field would refuse every resume).
+    const engine = await import('/tools/engine.js');
+    const root = await navigator.storage.getDirectory();
+    const jobs = await root.getDirectoryHandle('slide-jobs');
+    const dir = await jobs.getDirectoryHandle(id);
+    const fh = await dir.getFileHandle('journal.jsonl');
+    const text = new TextDecoder().decode(await (await fh.getFile()).arrayBuffer());
+    const { records, torn } = engine.decodeJournal(text);
+    const st = engine.journalState(records);
+    return { torn, records: records.length, gen: st.gen || null,
+      lastCommit: st.lastCommit ? st.lastCommit.st : null };
+  },
+  async journalRaw(id = currentJob) {
+    const root = await navigator.storage.getDirectory();
+    const jobs = await root.getDirectoryHandle('slide-jobs');
+    const dir = await jobs.getDirectoryHandle(id);
+    const fh = await dir.getFileHandle('journal.jsonl');
+    return new TextDecoder().decode(await (await fh.getFile()).arrayBuffer());
+  },
+  async restoreJournal(text, id = currentJob) {
+    // test hook: put a previously captured journal back (after a refused
+    // resume appended a fresh generation header).
+    const engine = await import('/tools/engine.js');
+    const root = await navigator.storage.getDirectory();
+    const jobs = await root.getDirectoryHandle('slide-jobs');
+    const dir = await jobs.getDirectoryHandle(id);
+    const fh = await dir.getFileHandle('journal.jsonl', { create: true });
+    const w = await engine.withRetry(() => fh.createWritable({ keepExistingData: false }),
+      { attempts: 20, delayMs: 300, name: 'restore journal' });
+    await w.write(new TextEncoder().encode(text));
+    await w.close();
+    return { bytes: text.length };
+  },
+  async tamperJournalCheckpoint(patch, id = currentJob) {
+    // test hook: rewrite the LAST committed checkpoint's extra fields with
+    // a valid journal checksum (simulates a checkpoint written under a
+    // different TMAP recipe / input identity).
+    const engine = await import('/tools/engine.js');
+    const root = await navigator.storage.getDirectory();
+    const jobs = await root.getDirectoryHandle('slide-jobs');
+    const dir = await jobs.getDirectoryHandle(id);
+    const fh = await dir.getFileHandle('journal.jsonl');
+    const text = new TextDecoder().decode(await (await fh.getFile()).arrayBuffer());
+    const { records } = engine.decodeJournal(text);
+    const state = engine.journalState(records);
+    const seq = state.lastCommit ? state.lastCommit.seq : null;
+    if (seq === null) throw new Error('no committed checkpoint to tamper');
+    const out = records.map((r) => {
+      const o = { ...r };
+      delete o.rc;
+      if (o.t === 'c' && o.seq === seq) o.st = { ...o.st, ...patch };
+      return engine.encodeJournalRecord(o);
+    }).join('');
+    const w = await engine.withRetry(() => fh.createWritable({ keepExistingData: false }),
+      { attempts: 20, delayMs: 300, name: 'tamper journal' });
+    await w.write(out);
+    await w.close();
+    return { seq };
+  },
+  async tamperJournalGen(patch, id = currentJob) {
+    // test hook: rewrite the effective generation header (adapter version /
+    // source adapter drift), with a valid checksum.
+    const engine = await import('/tools/engine.js');
+    const root = await navigator.storage.getDirectory();
+    const jobs = await root.getDirectoryHandle('slide-jobs');
+    const dir = await jobs.getDirectoryHandle(id);
+    const fh = await dir.getFileHandle('journal.jsonl');
+    const text = new TextDecoder().decode(await (await fh.getFile()).arrayBuffer());
+    const { records } = engine.decodeJournal(text);
+    const state = engine.journalState(records);
+    const g = state.gen ? state.gen.gen : null;
+    if (g === null) throw new Error('no journal generation to tamper');
+    const out = records.map((r) => {
+      const o = { ...r };
+      delete o.rc;
+      if (o.t === 'gen' && o.gen === g) Object.assign(o, patch);
+      return engine.encodeJournalRecord(o);
+    }).join('');
+    const w = await engine.withRetry(() => fh.createWritable({ keepExistingData: false }),
+      { attempts: 20, delayMs: 300, name: 'tamper journal gen' });
+    await w.write(out);
+    await w.close();
+    return { gen: g };
+  },
   async legacyizeJob(id = currentJob) {
     // test hook: make a job look like it was written before output profiles
     // existed — no outputProfile in the record, no outputProfile/profile in
