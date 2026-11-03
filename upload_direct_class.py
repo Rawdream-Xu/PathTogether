@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import struct
+import xml.etree.ElementTree as ET
 import zipfile
 
 #: 声明词表（``unconverted-variant:<variant>`` 按前缀匹配，variant 白名单
@@ -348,14 +349,44 @@ def ifd0_description(path):
 def declares_unknown_physical_scale(path):
     """文件是否声明「物理标定未知/未采用」（TMAP06 转换产物）。
 
-    命中任一稳定标记（source id 或 mpp_policy）即返回 True：平台后续的
-    slide info/查看器不得再用 objective 反推 MPP。标记只在转换器写出的
-    描述 JSON / OME-XML provenance 中出现，不匹配普通 TIFF。
+    仅检查转换器 JSON 的明确字段，或其 OME MapAnnotation provenance。
+    图像名称、普通说明或其他命名空间中提到适配器不改变有效标定。
     """
     desc = ifd0_description(path)
     if not desc:
         return False
-    return TMAP_SOURCE_FORMAT in desc or TMAP_MPP_POLICY in desc
+    body = desc.split("\x00", 1)[0].strip()
+
+    def unknown(fields):
+        return (fields.get("source_format") == TMAP_SOURCE_FORMAT
+                or fields.get("mpp_policy") == TMAP_MPP_POLICY)
+
+    if body.startswith("{"):
+        try:
+            fields = json.loads(body)
+        except ValueError:
+            return False
+        return isinstance(fields, dict) and unknown(fields)
+    if not body.startswith("<"):
+        return False
+    try:
+        root = ET.fromstring(body)
+    except (ET.ParseError, ValueError):
+        return False
+    if root.tag.rsplit("}", 1)[-1] != "OME":
+        return False
+    # The generated OME namespace can have a prefix; use each element's
+    # namespace instead of matching serialized XML text.
+    for annotation in root.iter():
+        if (annotation.tag.rsplit("}", 1)[-1] != "MapAnnotation"
+                or annotation.get("Namespace") != "pathtogether.slide-transform/provenance"):
+            continue
+        fields = {element.get("K"): element.text
+                  for element in annotation.iter()
+                  if element.tag.rsplit("}", 1)[-1] == "M"}
+        if unknown(fields):
+            return True
+    return False
 
 
 def is_aperio_svs_jpeg(path):

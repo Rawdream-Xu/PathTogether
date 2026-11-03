@@ -147,3 +147,40 @@ def test_unknown_scale_helper_is_bounded_and_marker_specific(tmp_path):
     junk = tmp_path / "junk.tif"
     junk.write_bytes(b"not a tiff")
     assert udc.declares_unknown_physical_scale(str(junk)) is False
+
+
+@pytest.mark.parametrize("description", [
+    b'{"source_format":"kfb_bf_v1","notes":"unic-tmap06-jpeg"}\x00',
+    b'{"source_format":"kfb_bf_v1","notes":"tmap-header-mpp-not-adopted"}\x00',
+    b'<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06">'
+    b'<Image Name="review of unic-tmap06-jpeg output"/></OME>\x00',
+    b'<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06">'
+    b'<StructuredAnnotations><MapAnnotation Namespace="unrelated">'
+    b'<Value><M K="source_format">unic-tmap06-jpeg</M></Value>'
+    b'</MapAnnotation></StructuredAnnotations></OME>\x00',
+])
+def test_mentions_outside_converter_provenance_preserve_calibration(tmp_path, description):
+    path = tmp_path / "unrelated.tif"
+    path.write_bytes(_classic_tiff(description))
+    assert udc.declares_unknown_physical_scale(path) is False
+    slide = _FakeSlide()
+    slide.properties.update({"openslide.mpp-x": "0.5", "openslide.mpp-y": "0.5"})
+    meta = app_mod._read_metadata(slide, path)
+    assert meta["mpp_x"] == pytest.approx(0.5)
+    assert meta["mpp_y"] == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("prefix", ["", "ome:"])
+def test_unknown_scale_ome_provenance_is_namespace_aware(tmp_path, prefix):
+    ns = f'xmlns:{prefix[:-1]}' if prefix else 'xmlns'
+    description = (
+        f'<{prefix}OME {ns}="http://www.openmicroscopy.org/Schemas/OME/2016-06">'
+        f'<{prefix}StructuredAnnotations><{prefix}MapAnnotation '
+        'Namespace="pathtogether.slide-transform/provenance">'
+        f'<{prefix}Value><{prefix}M K="source_format">unic-tmap06-jpeg</{prefix}M>'
+        f'</{prefix}Value></{prefix}MapAnnotation></{prefix}StructuredAnnotations>'
+        f'</{prefix}OME>\x00'
+    ).encode()
+    path = tmp_path / "tmap.ome.tif"
+    path.write_bytes(_classic_tiff(description))
+    assert udc.declares_unknown_physical_scale(path) is True
