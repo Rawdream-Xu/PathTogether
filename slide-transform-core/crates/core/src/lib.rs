@@ -36,6 +36,8 @@ pub mod convert_scn;
 #[cfg(feature = "codecs")]
 pub mod convert_svs;
 #[cfg(feature = "codecs")]
+pub mod convert_tmap;
+#[cfg(feature = "codecs")]
 pub mod convert_vms;
 pub mod error;
 pub mod estimate;
@@ -61,6 +63,7 @@ pub mod segment;
 pub mod validate;
 pub mod bigtiff;
 pub mod tiff_read;
+pub mod tmap;
 #[cfg(feature = "codecs")]
 pub mod svs;
 #[cfg(feature = "codecs")]
@@ -95,6 +98,9 @@ pub mod vms_fixture;
 
 #[cfg(all(feature = "codecs", feature = "fixtures"))]
 pub mod bif_fixture;
+
+#[cfg(all(feature = "codecs", feature = "fixtures"))]
+pub mod tmap_fixture;
 
 pub use error::{CoreError, CoreResult};
 pub use plan::{

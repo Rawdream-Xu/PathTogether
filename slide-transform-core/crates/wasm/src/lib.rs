@@ -421,6 +421,10 @@ struct HostCheckpoint {
     /// adapter's version for every adapter; each adapter journals its own
     /// generation now — the runner pins it next to the job record).
     adapter_version: Option<&'static str>,
+    /// Adapter-specific journal identity fragment (TMAP06: source id,
+    /// pyramid method, compose fingerprint and input length). `None` for
+    /// every other adapter — their journal format is unchanged.
+    extra: Option<String>,
 }
 
 impl slide_transform_core::job::CheckpointCallback for HostCheckpoint {
@@ -436,8 +440,9 @@ impl slide_transform_core::job::CheckpointCallback for HostCheckpoint {
             (Some(a), None) => format!(",\"adapter\":\"{a}\""),
             _ => String::new(),
         };
+        let extra = self.extra.as_deref().unwrap_or("");
         let json = format!(
-            "{{\"level\":{},\"channel\":{},\"cell\":{},\"out\":{},\"ifds\":[{}],\"profile\":\"{}\",\"encoding\":\"{}\"{}}}",
+            "{{\"level\":{},\"channel\":{},\"cell\":{},\"out\":{},\"ifds\":[{}],\"profile\":\"{}\",\"encoding\":\"{}\"{}{}}}",
             c.level,
             c.channel.map(|v| v.to_string()).unwrap_or_else(|| "0".into()),
             c.cell_done,
@@ -445,7 +450,8 @@ impl slide_transform_core::job::CheckpointCallback for HostCheckpoint {
             ifds.join(","),
             self.profile.id(),
             self.encoding.id(),
-            adapter
+            adapter,
+            extra
         );
         host_checkpoint(&json);
     }
@@ -548,10 +554,15 @@ enum InputKind {
     /// Ventana BIF：BigTIFF，IFD 0 XMLPacket 携带 iScan 厂商块——由同一
     /// 有界嗅探分派（重叠瓦片拼接重编码）。
     Bif,
+    /// UNIC TMAP06：`TMAP06` 魔数单文件容器（绝对坐标重叠瓦片、三层源
+    /// 层级、JPEG 重编码）。上级版本在 probe 里稳定拒绝。
+    Tmap,
 }
 
 fn input_kind(magic: &[u8; 8]) -> InputKind {
-    if *magic == slide_transform_core::kfbf::KFBF_MAGIC {
+    if slide_transform_core::tmap::is_tmap_magic(magic) {
+        InputKind::Tmap
+    } else if *magic == slide_transform_core::kfbf::KFBF_MAGIC {
         InputKind::Kfbf
     } else if slide_transform_core::raster::is_raster_magic(magic) {
         InputKind::Raster
@@ -587,6 +598,7 @@ fn adapter_of(kind: InputKind) -> Option<&'static str> {
         InputKind::Ndpi => Some(slide_transform_core::ndpi::SOURCE_FORMAT),
         InputKind::Raster => Some(slide_transform_core::raster::SOURCE_FORMAT),
         InputKind::Bif => Some(slide_transform_core::bif::SOURCE_FORMAT),
+        InputKind::Tmap => Some(slide_transform_core::tmap::SOURCE_FORMAT),
         _ => None,
     }
 }
@@ -601,6 +613,7 @@ fn adapter_version_of(kind: InputKind) -> Option<&'static str> {
         InputKind::Ndpi => Some(slide_transform_core::ndpi::ADAPTER_VERSION),
         InputKind::Raster => Some(slide_transform_core::raster::ADAPTER_VERSION),
         InputKind::Bif => Some(slide_transform_core::bif::ADAPTER_VERSION),
+        InputKind::Tmap => Some(slide_transform_core::tmap::ADAPTER_VERSION),
         _ => None,
     }
 }
@@ -1047,7 +1060,10 @@ pub fn probe() -> String {
         Ok(m) => m,
         Err(e) => return err_json(&e),
     };
-    let res = if slide_transform_core::raster::is_raster_magic(&magic) {
+    let res = if slide_transform_core::tmap::is_tmap_magic(&magic) {
+        slide_transform_core::tmap::probe_tmap(&src)
+            .map(|doc| slide_transform_core::tmap::probe_json(&doc))
+    } else if slide_transform_core::raster::is_raster_magic(&magic) {
         // F8: 普通图片（BMP/JPEG）——按魔数在 TIFF/厂商嗅探之前路由
         let size = src.size();
         slide_transform_core::raster::probe_raster(&src)
@@ -1167,6 +1183,51 @@ fn resume_encoding_field(resume_json: &str) -> Option<String> {
     resume_string_field(resume_json, "encoding")
 }
 
+/// Numeric `"key":N` of a checkpoint state (bounded, digits only).
+fn resume_u64_field(resume_json: &str, key: &str) -> Option<u64> {
+    let needle = format!("\"{key}\"");
+    let at = resume_json.find(&needle)? + needle.len();
+    let rest = resume_json[at..].trim_start().strip_prefix(':')?.trim_start();
+    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    rest[..end].parse().ok()
+}
+
+/// TMAP06 journal identity (source id, adapter version, pyramid method,
+/// output/encoding profile, compose fingerprint, input length). Every field
+/// is read from the checkpoint JSON the host recorded; a state that does not
+/// carry them fails the converter's identity check (never a blind continue).
+fn resume_tmap_identity(resume_json: &str) -> slide_transform_core::tmap::TmapResumeIdentity {
+    slide_transform_core::tmap::TmapResumeIdentity {
+        source_format: resume_string_field(resume_json, "source_format"),
+        adapter_version: resume_string_field(resume_json, "adapter_version"),
+        pyramid_method: resume_string_field(resume_json, "pyramid"),
+        profile: resume_profile_field(resume_json),
+        encoding: resume_encoding_field(resume_json),
+        compose_fingerprint: resume_string_field(resume_json, "compose"),
+        input_size: resume_u64_field(resume_json, "in"),
+    }
+}
+
+/// Adapter-specific journal fragment emitted with every TMAP06 checkpoint.
+fn tmap_journal_extra(
+    encoding: slide_transform_core::plan::EncodingProfile,
+    input_size: u64,
+) -> String {
+    format!(
+        ",\"source_format\":\"{}\",\"pyramid\":\"{}\",\"compose\":\"{}\",\"in\":{}",
+        slide_transform_core::tmap::SOURCE_FORMAT,
+        slide_transform_core::tmap::PYRAMID_METHOD,
+        slide_transform_core::tmap::encode_fingerprint(
+            encoding,
+            slide_transform_core::tmap::default_compose()
+        ),
+        input_size
+    )
+}
+
 fn resume_string_field(resume_json: &str, key: &str) -> Option<String> {
     let needle = format!("\"{key}\"");
     let at = resume_json.find(&needle)? + needle.len();
@@ -1218,12 +1279,22 @@ fn resolve_encoding(is_fl: bool, requested: Option<&str>) -> CoreResult<Encoding
 
 use slide_transform_core::plan::EncodingProfile as EncodingProfileW;
 
+/// (parsed state, journalled profile, journalled encoding, journalled
+/// adapter, raw state JSON for adapter-specific journal fields).
+type JournalledResume = (
+    ResumePoint,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 fn run_convert(
     profile: Option<&str>,
     encoding: Option<&str>,
     strict_lossless: bool,
     channel_json: &str,
-    resume: Option<(ResumePoint, Option<String>, Option<String>, Option<String>)>,
+    resume: Option<JournalledResume>,
     bundle: bool,
     budget_bytes: Option<f64>,
 ) -> String {
@@ -1261,10 +1332,14 @@ fn run_convert(
         Some(c) => Some(c.source_format()),
         None => adapter_of(kind),
     };
-    let out_profile = match resolve_profile(is_fl, profile) {
+    let mut out_profile = match resolve_profile(is_fl, profile) {
         Ok(p) => p,
         Err(e) => return err_json(&e),
     };
+    // TMAP06's tool-page default is the RGB OME profile (CLI `auto` parity).
+    if kind == InputKind::Tmap && profile.unwrap_or("").is_empty() {
+        out_profile = OutputProfile::OmeBigTiffRgbSubifd;
+    }
     let enc_profile = match resolve_encoding(is_fl, encoding) {
         Ok(p) => p,
         Err(e) => return err_json(&e),
@@ -1278,13 +1353,17 @@ fn run_convert(
     // adapter that wrote it: never continue a partial output under another
     // profile or quality mode (legacy states = the pre-profile/pre-encoding
     // defaults), nor under a different source adapter (KFB state + SVS copy)
+    let mut journalled_raw: Option<String> = None;
     let resume = match resume {
         None => None,
-        Some((rp, journalled, journalled_enc, journalled_adapter)) => {
-            let committed_under = match resolve_profile(is_fl, journalled.as_deref()) {
+        Some((rp, journalled, journalled_enc, journalled_adapter, raw)) => {
+            let mut committed_under = match resolve_profile(is_fl, journalled.as_deref()) {
                 Ok(p) => p,
                 Err(e) => return err_json(&e),
             };
+            if kind == InputKind::Tmap && journalled.as_deref().unwrap_or("").is_empty() {
+                committed_under = OutputProfile::OmeBigTiffRgbSubifd;
+            }
             if committed_under != out_profile {
                 return err_json(&CoreError::validation(format!(
                     "resume: 已提交进度属于输出 profile {}，拒绝以 {} 续跑",
@@ -1316,6 +1395,7 @@ fn run_convert(
                     adapter.unwrap_or("kfb")
                 )));
             }
+            journalled_raw = raw;
             Some(rp)
         }
     };
@@ -1350,6 +1430,7 @@ fn run_convert(
         encoding: enc_profile,
         adapter,
         adapter_version: adapter_version_of(kind),
+        extra: (kind == InputKind::Tmap).then(|| tmap_journal_extra(enc_profile, src.size())),
     };
     let mut job = JobControl::new(&progress);
     if CHECKPOINT_ENABLED.load(Ordering::Relaxed) {
@@ -1433,6 +1514,31 @@ fn run_convert(
                 &src, &mut sink, &mut scratch, &plan, &job, rp,
             ),
             None => slide_transform_core::convert_raster::convert_raster_to_bigtiff(
+                &src, &mut sink, &mut scratch, &plan, &job,
+            ),
+        }
+    } else if kind == InputKind::Tmap {
+        // Review §1 parity: probe + band compose are charged against the
+        // host budget before allocating.
+        let mut plan = TransformPlan::brightfield(identity)
+            .with_policy(policy)
+            .with_encoding(enc_profile);
+        plan.profile = out_profile;
+        plan.limits.memory_budget_bytes = budget_bytes
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .map(|v| v as u64)
+            .unwrap_or(slide_transform_core::budget::SAVER_BUDGET_BYTES);
+        match resume.as_ref() {
+            Some(rp) => {
+                let ident = journalled_raw
+                    .as_deref()
+                    .map(resume_tmap_identity)
+                    .unwrap_or_default();
+                slide_transform_core::convert_tmap::convert_tmap_to_bigtiff_resume_with_identity(
+                    &src, &mut sink, &mut scratch, &plan, &job, rp, &ident,
+                )
+            }
+            None => slide_transform_core::convert_tmap::convert_tmap_to_bigtiff(
                 &src, &mut sink, &mut scratch, &plan, &job,
             ),
         }
@@ -1582,7 +1688,7 @@ fn run_convert_bundle(
     encoding: Option<&str>,
     strict_lossless: bool,
     _channel_json: &str,
-    resume: Option<(ResumePoint, Option<String>, Option<String>, Option<String>)>,
+    resume: Option<JournalledResume>,
     budget_bytes: Option<f64>,
 ) -> String {
     let fs = match HostBundle::open() {
@@ -1626,7 +1732,7 @@ fn run_convert_bundle(
     }
     let resume = match resume {
         None => None,
-        Some((rp, journalled, journalled_enc, journalled_adapter)) => {
+        Some((rp, journalled, journalled_enc, journalled_adapter, _raw)) => {
             let committed_under = match resolve_profile(false, journalled.as_deref()) {
                 Ok(p) => p,
                 Err(e) => return err_json(&e),
@@ -1691,6 +1797,7 @@ fn run_convert_bundle(
         encoding: enc_profile,
         adapter: Some(adapter),
         adapter_version: Some(adapter_version),
+        extra: None,
     };
     let mut job = JobControl::new(&progress);
     if CHECKPOINT_ENABLED.load(Ordering::Relaxed) {
@@ -1927,6 +2034,7 @@ pub fn convert_resume_profile_encoded_bundle(
                 resume_profile_field(resume_json),
                 resume_encoding_field(resume_json),
                 resume_adapter_field(resume_json),
+                Some(resume_json.to_string()),
             )),
             true,
             budget_bytes,
@@ -1983,6 +2091,7 @@ pub fn convert_resume_profile(
                 resume_profile_field(resume_json),
                 resume_encoding_field(resume_json),
                 resume_adapter_field(resume_json),
+                Some(resume_json.to_string()),
             )),
             false,
             None,
@@ -2013,6 +2122,7 @@ pub fn convert_resume_profile_encoded(
                 resume_profile_field(resume_json),
                 resume_encoding_field(resume_json),
                 resume_adapter_field(resume_json),
+                Some(resume_json.to_string()),
             )),
             false,
             None,
@@ -2036,6 +2146,7 @@ pub fn convert_resume(resume_json: &str, strict_lossless: bool, channel_json: &s
                 resume_profile_field(resume_json),
                 resume_encoding_field(resume_json),
                 resume_adapter_field(resume_json),
+                Some(resume_json.to_string()),
             )),
             false,
             None,
@@ -2082,6 +2193,44 @@ pub fn sha256_source() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tmap_magic_routes_and_journal_identity_parses() {
+        let magic = *b"TMAP06\0\0";
+        assert_eq!(input_kind(&magic), InputKind::Tmap);
+        assert_eq!(
+            adapter_of(InputKind::Tmap),
+            Some(slide_transform_core::tmap::SOURCE_FORMAT)
+        );
+        assert_eq!(
+            adapter_version_of(InputKind::Tmap),
+            Some(slide_transform_core::tmap::ADAPTER_VERSION)
+        );
+        let extra = tmap_journal_extra(EncodingProfileW::PreserveSource, 461077537);
+        let st = format!(
+            "{{\"level\":1,\"channel\":0,\"cell\":336,\"out\":12345,\"ifds\":[110880],\"profile\":\"bf-ome\",\"encoding\":\"preserve-source-v1\",\"adapter\":\"unic-tmap06-jpeg\",\"adapter_version\":\"1\"{extra}}}"
+        );
+        let id = resume_tmap_identity(&st);
+        assert_eq!(id.source_format.as_deref(), Some("unic-tmap06-jpeg"));
+        assert_eq!(
+            id.pyramid_method.as_deref(),
+            Some(slide_transform_core::tmap::PYRAMID_METHOD)
+        );
+        assert_eq!(
+            id.compose_fingerprint.as_deref(),
+            Some("tmap06-compose:q90:y422:hstd:v1")
+        );
+        assert_eq!(id.input_size, Some(461077537));
+        assert_eq!(id.profile.as_deref(), Some("bf-ome"));
+        assert_eq!(id.encoding.as_deref(), Some("preserve-source-v1"));
+        // compact journals the locked cj1 fingerprint instead
+        let extra = tmap_journal_extra(EncodingProfileW::CompactJpegV1, 7);
+        let st = format!("{{\"in\":7{extra}}}");
+        assert_eq!(
+            resume_tmap_identity(&st).compose_fingerprint.as_deref(),
+            Some(slide_transform_core::plan::COMPACT_JPEG_V1_FINGERPRINT)
+        );
+    }
 
     #[test]
     fn journalled_profile_is_read_from_checkpoint_states() {

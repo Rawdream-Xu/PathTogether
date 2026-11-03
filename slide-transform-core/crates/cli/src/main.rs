@@ -70,6 +70,9 @@ fn main() -> ExitCode {
         "gen-raster" => cmd_gen_raster(&args[1..]),
         #[cfg(feature = "synth-gen")]
         "gen-bif" => cmd_gen_bif(&args[1..]),
+        #[cfg(feature = "synth-gen")]
+        "gen-tmap" => cmd_gen_tmap(&args[1..]),
+        "tmap-render" => cmd_tmap_render(&args[1..]),
         _ => Err(CoreError::validation(format!("未知子命令 {}", args[0]))),
     };
     match result {
@@ -190,6 +193,31 @@ fn is_tiff_magic(m: &[u8; 8]) -> bool {
         u16::from_be_bytes([m[2], m[3]])
     };
     v == 42 || v == 43
+}
+
+/// TMAP container signature (any version): the probe/converter type the
+/// unsupported version, so routing only needs the 4-byte prefix.
+fn is_tmap_magic(m: &[u8; 8]) -> bool {
+    slide_transform_core::tmap::is_tmap_magic(m)
+}
+
+/// `.tmap`/`.TMAP` extension. A `.tmap` file whose content is not TMAP is a
+/// renamed file and is refused BEFORE any TIFF/vendor routing could mistake
+/// it for another format.
+fn is_tmap_path(path: &Path) -> bool {
+    path.extension()
+        .map(|e| e.to_ascii_lowercase().to_string_lossy() == "tmap")
+        .unwrap_or(false)
+}
+
+fn reject_renamed_tmap(path: &Path, magic: &[u8; 8]) -> Result<(), CoreError> {
+    if is_tmap_path(path) && !is_tmap_magic(magic) {
+        return Err(CoreError::variant(format!(
+            "扩展名 .tmap 但文件头不是 TMAP（魔数 {:02X?}）：改名的 TIFF/其他文件拒绝转换",
+            &magic[0..4]
+        )));
+    }
+    Ok(())
 }
 
 /// F3: `<path>.mrxs` routes to the MRXS bundle adapter (the same-name
@@ -827,7 +855,17 @@ fn cmd_probe(args: &[String]) -> Result<String, CoreError> {
     }
     let src = FileSource::open(Path::new(path))?;
     let magic = detect(&src)?;
+    reject_renamed_tmap(Path::new(path), &magic)?;
     let mut scratch = FileScratch::new(&scratch_under(Path::new(path)));
+    // TMAP06: probed once here and reused by the estimate below.
+    let tmap_doc = if is_tmap_magic(&magic) {
+        Some(slide_transform_core::tmap::probe_tmap_with_budget(
+            &src,
+            memory_budget,
+        )?)
+    } else {
+        None
+    };
     // F8: 普通图片（BMP/JPEG）路由——按魔数，在 TIFF/厂商嗅探之前
     let raster_doc: Option<String> = if is_raster_magic(&magic) {
         let size = src.size();
@@ -838,7 +876,9 @@ fn cmd_probe(args: &[String]) -> Result<String, CoreError> {
     } else {
         None
     };
-    let doc_json = if let Some(raster_json) = raster_doc {
+    let doc_json = if let Some(doc) = &tmap_doc {
+        slide_transform_core::tmap::probe_json(doc)
+    } else if let Some(raster_json) = raster_doc {
         raster_json
     } else if is_tiff_magic(&magic) {
         // F1/F4/F5: bounded TIFF walk + vendor dispatch (typed rejections
@@ -986,7 +1026,9 @@ fn cmd_probe(args: &[String]) -> Result<String, CoreError> {
         "null".to_string()
     };
     // disk-precheck estimate (same shape as the wasm probe's)
-    let estimate = if is_raster_magic(&magic) {
+    let estimate = if let Some(doc) = &tmap_doc {
+        slide_transform_core::tmap::estimate_tmap(doc)
+    } else if is_raster_magic(&magic) {
         let size = src.size();
         slide_transform_core::raster::estimate_raster(
             &slide_transform_core::raster::probe_raster_with_budget(&src, memory_budget)?,
@@ -1199,9 +1241,23 @@ fn cmd_convert(args: &[String]) -> Result<String, CoreError> {
     let mut max_out: Option<u64> = None;
     let mut memory_budget: Option<u64> = None;
     let mut overwrite = false;
+    let mut tmap_compose: Option<slide_transform_core::tmap::ComposeConfig> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--tmap-compose-candidate" => {
+                i += 1;
+                let id = args
+                    .get(i)
+                    .ok_or_else(|| CoreError::validation("--tmap-compose-candidate 缺值"))?;
+                tmap_compose = Some(
+                    slide_transform_core::tmap::parse_compose_candidate(id).ok_or_else(|| {
+                        CoreError::validation(format!(
+                            "未知 TMAP compose 候选 {id}（q96-422|q90-422|q85-422|q90-420）"
+                        ))
+                    })?,
+                );
+            }
             "--memory-budget" => {
                 i += 1;
                 memory_budget = Some(
@@ -1300,6 +1356,8 @@ fn cmd_convert(args: &[String]) -> Result<String, CoreError> {
     }
     let src = FileSource::open(input)?;
     let magic = detect(&src)?;
+    reject_renamed_tmap(input, &magic)?;
+    let is_tmap = is_tmap_magic(&magic);
     // F8: 普通图片（BMP/JPEG）按魔数在 TIFF/厂商嗅探之前路由
     if is_raster_magic(&magic) {
         return cmd_convert_raster(
@@ -1343,8 +1401,10 @@ fn cmd_convert(args: &[String]) -> Result<String, CoreError> {
 
     let out_profile = match profile.as_str() {
         // auto keeps the pre-profile default per input kind: KFB → classic
-        // (unattended Baidu import consumes classic), SVS/SCN → classic too
+        // (unattended Baidu import consumes classic), SVS/SCN → classic too.
+        // TMAP06 defaults to the RGB OME profile (the tool page's choice).
         "auto" if magic == KFBF_MAGIC => OutputProfile::OmeBigTiffSubifd,
+        "auto" if is_tmap => OutputProfile::OmeBigTiffRgbSubifd,
         "auto" => OutputProfile::ClassicJpegBigTiff,
         id => OutputProfile::from_id(id)
             .ok_or_else(|| CoreError::validation(format!("未知 profile {profile}")))?,
@@ -1394,9 +1454,21 @@ fn cmd_convert(args: &[String]) -> Result<String, CoreError> {
             "compact-jpeg-v1 编码仅适用于明场；荧光不支持有损重编码",
         ));
     }
-    if (is_svs || is_scn || is_gtiff || is_ndpi || is_bif) && is_fl {
+    if (is_svs || is_scn || is_gtiff || is_ndpi || is_bif || is_tmap) && is_fl {
         return Err(CoreError::variant(
-            "荧光 OME profile 不适用于明场 SVS/SCN/通用 TIFF/NDPI/BIF 输入",
+            "荧光 OME profile 不适用于明场 SVS/SCN/通用 TIFF/NDPI/BIF/TMAP06 输入",
+        ));
+    }
+    if tmap_compose.is_some() && !is_tmap {
+        return Err(CoreError::validation(
+            "--tmap-compose-candidate 仅适用于 TMAP06 输入（其他格式的编码参数不得改变）",
+        ));
+    }
+    if tmap_compose.is_some()
+        && enc_profile == slide_transform_core::plan::EncodingProfile::CompactJpegV1
+    {
+        return Err(CoreError::validation(
+            "--tmap-compose-candidate 仅影响 preserve 档；compact-jpeg-v1 参数已锁定",
         ));
     }
     let pixel_policy = match policy.as_str() {
@@ -1449,6 +1521,18 @@ fn cmd_convert(args: &[String]) -> Result<String, CoreError> {
             &plan,
             &job,
             companion.as_ref(),
+        )
+    } else if is_tmap {
+        let mut plan = TransformPlan::brightfield(identity)
+            .with_policy(pixel_policy)
+            .with_limits(limits)
+            .with_encoding(enc_profile);
+        plan.profile = out_profile;
+        if let Some(c) = tmap_compose {
+            plan = plan.with_tmap_compose(c);
+        }
+        slide_transform_core::convert_tmap::convert_tmap_to_bigtiff(
+            &src, &mut sink, &mut scratch, &plan, &job,
         )
     } else if is_scn {
         let mut plan = TransformPlan::brightfield(identity)
@@ -1716,6 +1800,120 @@ fn cmd_convert(args: &[String]) -> Result<String, CoreError> {
                 ju("output_bytes", result.validation.output_bytes),
             ]),
         ),
+    ]))
+}
+
+// --------------------------------------------------------------------------- //
+// tmap-render: decoded (pre-encode) RGB of one ROI through the SHARED
+// absolute-canvas compositor — the bit-comparison oracle for the
+// conversion's compose step.
+// --------------------------------------------------------------------------- //
+
+fn cmd_tmap_render(args: &[String]) -> Result<String, CoreError> {
+    let mut path: Option<&String> = None;
+    let mut out: Option<PathBuf> = None;
+    let mut level: u32 = 0;
+    let (mut x, mut y, mut w, mut h) = (0u32, 0u32, 0u32, 0u32);
+    let mut memory_budget = slide_transform_core::budget::SAVER_BUDGET_BYTES;
+    let mut saw_w = false;
+    let mut saw_h = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--level" => {
+                i += 1;
+                level = args.get(i).and_then(|v| v.parse().ok()).ok_or_else(|| {
+                    CoreError::validation("--level 需要非负整数")
+                })?;
+            }
+            "--x" => {
+                i += 1;
+                x = args.get(i).and_then(|v| v.parse().ok()).ok_or_else(|| {
+                    CoreError::validation("--x 需要非负整数")
+                })?;
+            }
+            "--y" => {
+                i += 1;
+                y = args.get(i).and_then(|v| v.parse().ok()).ok_or_else(|| {
+                    CoreError::validation("--y 需要非负整数")
+                })?;
+            }
+            "--w" => {
+                i += 1;
+                w = args.get(i).and_then(|v| v.parse().ok()).ok_or_else(|| {
+                    CoreError::validation("--w 需要正整数")
+                })?;
+                saw_w = true;
+            }
+            "--h" => {
+                i += 1;
+                h = args.get(i).and_then(|v| v.parse().ok()).ok_or_else(|| {
+                    CoreError::validation("--h 需要正整数")
+                })?;
+                saw_h = true;
+            }
+            "--out" => {
+                i += 1;
+                out = Some(PathBuf::from(
+                    args.get(i).ok_or_else(|| CoreError::validation("--out 缺值"))?,
+                ));
+            }
+            "--memory-budget" => {
+                i += 1;
+                memory_budget = args
+                    .get(i)
+                    .ok_or_else(|| CoreError::validation("--memory-budget 缺值"))?
+                    .parse()
+                    .map_err(|_| CoreError::validation("--memory-budget 非数值"))?;
+            }
+            other => {
+                if other.starts_with('-') && other != "-" {
+                    return Err(CoreError::validation(format!(
+                        "tmap-render 未知旗标 {other}"
+                    )));
+                }
+                if path.is_some() {
+                    return Err(CoreError::validation("tmap-render 只接受一个 <input>"));
+                }
+                path = Some(&args[i]);
+            }
+        }
+        i += 1;
+    }
+    let path = path.ok_or_else(|| CoreError::validation("tmap-render 需要 <input>"))?;
+    let out = out.ok_or_else(|| CoreError::validation("tmap-render 需要 --out <file.rgb>"))?;
+    if !saw_w || !saw_h || w == 0 || h == 0 {
+        return Err(CoreError::validation(
+            "tmap-render 需要 --w/--h（非零）与 --x/--y/--level",
+        ));
+    }
+    let src = FileSource::open(Path::new(path))?;
+    let magic = detect(&src)?;
+    reject_renamed_tmap(Path::new(path), &magic)?;
+    if !is_tmap_magic(&magic) {
+        return Err(CoreError::variant("tmap-render 只接受 TMAP06 输入"));
+    }
+    let doc = slide_transform_core::tmap::probe_tmap_with_budget(&src, memory_budget)?;
+    let rgb = slide_transform_core::tmap::compose_region(
+        &src,
+        &doc,
+        level as usize,
+        x,
+        y,
+        w,
+        h,
+    )?;
+    std::fs::write(&out, &rgb)
+        .map_err(|e| CoreError::io(format!("写 {} 失败: {e}", out.display())))?;
+    Ok(obj(&[
+        jstr("input", path),
+        jstr("out", &out.display().to_string()),
+        ju("level", level as u64),
+        ju("x", x as u64),
+        ju("y", y as u64),
+        ju("width", w as u64),
+        ju("height", h as u64),
+        ju("bytes", rgb.len() as u64),
     ]))
 }
 
@@ -2443,6 +2641,105 @@ fn cmd_gen_vms(args: &[String]) -> Result<String, CoreError> {
         jstr("entry", &format!("{}/synthetic.vms", out_dir)),
         ju("members", bundle.members().len() as u64),
         ju("bytes", bytes),
+    ]))
+}
+
+// --------------------------------------------------------------------------- //
+// synthetic TMAP06 generator（测试数据；无患者数据）
+// --------------------------------------------------------------------------- //
+
+#[cfg(feature = "synth-gen")]
+fn tmap_bad_input(name: &str) -> Option<slide_transform_core::tmap_fixture::TmapBadInput> {
+    use slide_transform_core::tmap_fixture::TmapBadInput as B;
+    Some(match name {
+        "none" => B::None,
+        "tmap07" => B::Tmap07,
+        "focus-multi" => B::FocusMulti,
+        "image-format" => B::ImageFormat,
+        "multi-file" => B::MultiFile,
+        "file-id" => B::FileId,
+        "ratio-step" => B::RatioStep,
+        "layer-num" => B::LayerNum,
+        "img-color" => B::ImgColor,
+        "empty-with-records" => B::EmptyWithRecords,
+        "duplicate-slot" => B::DuplicateSlot,
+        "duplicate-sub" => B::DuplicateSub,
+        "block-layer2" => B::BlockLayer2,
+        "negative-origin" => B::NegativeOrigin,
+        "huge-index" => B::HugeIndex,
+        "huge-shrink" => B::HugeShrink,
+        "offset-overflow" => B::OffsetOverflow,
+        "offset-in-index" => B::OffsetInIndex,
+        "zero-offset" => B::ZeroOffset,
+        "huge-length" => B::HugeLength,
+        "truncated-jpeg" => B::TruncatedJpeg,
+        "non-jpeg" => B::NonJpeg,
+        "broken-jpeg" => B::BrokenJpeg,
+        "gray" => B::GrayFirst,
+        "progressive" => B::ProgressiveFirst,
+        "non-8bit" => B::Non8Bit,
+        "small-tile" => B::SmallFirst,
+        "no-l1" => B::NoL1,
+        "no-l2" => B::NoL2,
+        "truncate-header" => B::TruncateHeader,
+        "truncate-index" => B::TruncateIndex,
+        "shrink-negative" => B::ShrinkNegative,
+        "broken-tail" => B::BrokenTail,
+        "tiff" => B::TiffRenamed,
+        _ => return None,
+    })
+}
+
+#[cfg(feature = "synth-gen")]
+fn cmd_gen_tmap(args: &[String]) -> Result<String, CoreError> {
+    let mut path = None;
+    let mut p = slide_transform_core::tmap_fixture::TmapGenParams::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--quality" => {
+                i += 1;
+                p.quality = args
+                    .get(i)
+                    .and_then(|v| v.parse().ok())
+                    .ok_or_else(|| CoreError::validation("--quality"))?;
+            }
+            "--no-tail" => p.with_tail = false,
+            "--bad" => {
+                i += 1;
+                let name = args.get(i).ok_or_else(|| CoreError::validation("--bad 缺值"))?;
+                p.bad = tmap_bad_input(name).ok_or_else(|| {
+                    CoreError::validation(format!("未知 gen-tmap --bad 变体 {name}"))
+                })?;
+            }
+            _ => {
+                if args[i].starts_with('-') && args[i] != "-" {
+                    return Err(CoreError::validation(format!("gen-tmap 未知旗标 {}", args[i])));
+                }
+                path = Some(&args[i]);
+            }
+        }
+        i += 1;
+    }
+    let path = path.ok_or_else(|| CoreError::validation("gen-tmap 需要 <out>"))?;
+    let mut sink = FileSink::create(Path::new(path))?;
+    let n = slide_transform_core::tmap_fixture::build_synthetic_tmap(&mut sink, &p)?;
+    sink.flush()?;
+    let dims = slide_transform_core::tmap_fixture::default_level_dims();
+    Ok(obj(&[
+        jstr("path", path),
+        ju("bytes", n),
+        ju("canvas_w", slide_transform_core::tmap_fixture::CANVAS_W as u64),
+        ju("canvas_h", slide_transform_core::tmap_fixture::CANVAS_H as u64),
+        ju("tile_w", slide_transform_core::tmap_fixture::TILE_W as u64),
+        ju("tile_h", slide_transform_core::tmap_fixture::TILE_H as u64),
+        jarr(
+            "level_dims",
+            &dims
+                .iter()
+                .map(|(w, h)| format!("[{w},{h}]"))
+                .collect::<Vec<_>>(),
+        ),
     ]))
 }
 

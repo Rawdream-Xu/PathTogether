@@ -171,6 +171,12 @@ pub struct TransformPlan {
     pub encoding: EncodingProfile,
     pub pixel_policy: PixelPolicy,
     pub limits: ResourceLimits,
+    /// TMAP06-only: the evaluation candidate for the preserve-mode compose.
+    /// `None` means the frozen default (`tmap::default_compose()`); compact
+    /// ignores it (its parameters are locked globally). The derived
+    /// fingerprint is journalled with every TMAP06 job and a different one
+    /// refuses the resume.
+    pub tmap_compose: Option<crate::tmap::ComposeConfig>,
 }
 
 impl TransformPlan {
@@ -184,6 +190,7 @@ impl TransformPlan {
             encoding: EncodingProfile::PreserveSource,
             pixel_policy: PixelPolicy::AllowEdgeReencode,
             limits: ResourceLimits::default(),
+            tmap_compose: None,
         }
     }
 
@@ -202,6 +209,7 @@ impl TransformPlan {
             encoding: EncodingProfile::PreserveSource,
             pixel_policy: PixelPolicy::AllowEdgeReencode,
             limits: ResourceLimits::default(),
+            tmap_compose: None,
         }
     }
 
@@ -218,6 +226,13 @@ impl TransformPlan {
 
     pub fn with_limits(mut self, limits: ResourceLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Select a TMAP06 preserve-mode compose candidate (evaluation only;
+    /// compact-jpeg-v1 continues to use its locked parameters).
+    pub fn with_tmap_compose(mut self, cfg: crate::tmap::ComposeConfig) -> Self {
+        self.tmap_compose = Some(cfg);
         self
     }
 }
