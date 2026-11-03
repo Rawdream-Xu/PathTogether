@@ -1,0 +1,17 @@
+# TMAP06 JPEG quality metrics - pinned offline environment (2026-11-03)
+#
+# Created with uv (python3.14 venv; ensurepip is unavailable on this host):
+#   /mnt/ssd2/tests/tmap06-impl-G836YG/metrics/venv
+# Python: 3.14.4
+# PIP_CACHE_DIR/UV_CACHE_DIR/TMPDIR are under the same SSD2 run directory.
+# The read-only exploration environment was not modified.
+imagecodecs==2026.10.10
+imageio==2.38.1
+lazy-loader==0.6
+networkx==3.7
+numpy==2.5.4
+packaging==26.3
+pillow==13.0.0
+scikit-image==0.26.0
+scipy==1.18.1
+tifffile==2026.10.15

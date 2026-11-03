@@ -1,0 +1,8 @@
+tmapslide==0.2.3
+Pillow==13.0.0
+numpy==2.5.4
+tifffile==2026.10.15
+imagecodecs==2026.10.10
+openslide-python==1.4.7
+openslide-bin==4.0.1.2
+zarr==3.1.6

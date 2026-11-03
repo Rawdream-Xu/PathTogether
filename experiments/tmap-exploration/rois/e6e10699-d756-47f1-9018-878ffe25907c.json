@@ -1,0 +1,954 @@
+{
+  "schema": "tmap06-quality-rois-v1",
+  "script_version": "tmap06-quality-metrics-v1",
+  "deterministic": true,
+  "seed": 20261103,
+  "sample": {
+    "name": "e6e10699-d756-47f1-9018-878ffe25907c.TMAP",
+    "bytes": 461077537,
+    "canvas": [
+      85853,
+      84459
+    ],
+    "background": 203,
+    "ratio_step": 4,
+    "layer_num": 3,
+    "block_slots": 1628,
+    "active_blocks": 1296,
+    "empty_blocks": 332,
+    "shrink_slots": 99,
+    "img_width": 2448,
+    "img_height": 2048,
+    "tile_width": 612,
+    "tile_height": 512,
+    "non_aligned_block_origins": 1232
+  },
+  "reference": {
+    "name": "e6e10699-d756-47f1-9018-878ffe25907c.ome.tif",
+    "bytes": 6140499793,
+    "layout": "ome-subifd",
+    "levels": [
+      {
+        "level": 0,
+        "width": 85853,
+        "height": 84459,
+        "tile_width": 1024,
+        "tile_height": 1024,
+        "compression": "DEFLATE",
+        "photometric": 2,
+        "planarconfig": 1,
+        "samplesperpixel": 3
+      },
+      {
+        "level": 1,
+        "width": 21464,
+        "height": 21115,
+        "tile_width": 1024,
+        "tile_height": 1024,
+        "compression": "DEFLATE",
+        "photometric": 2,
+        "planarconfig": 1,
+        "samplesperpixel": 3
+      },
+      {
+        "level": 2,
+        "width": 5366,
+        "height": 5279,
+        "tile_width": 1024,
+        "tile_height": 1024,
+        "compression": "DEFLATE",
+        "photometric": 2,
+        "planarconfig": 1,
+        "samplesperpixel": 3
+      }
+    ]
+  },
+  "selection": {
+    "seed": 20261103,
+    "randomness": "none; fixed grid and stable sorts",
+    "background": 203,
+    "background_tolerance": 12,
+    "nonbg_definition": "fraction of pixels where max(|R-bg|,|G-bg|,|B-bg|) > tolerance",
+    "luma_formula": "0.299*R + 0.587*G + 0.114*B (float64)",
+    "luma_std": "population standard deviation (numpy std, ddof=0)",
+    "texture_score": "luma_std * sqrt(max(nonbg_ratio, 1e-9))",
+    "roi_sizes": {
+      "0": 512,
+      "1": 512,
+      "2": 256
+    },
+    "category_counts": {
+      "0": {
+        "cells": 8,
+        "seam": 5,
+        "block-edge": 4,
+        "scan-edge": 3
+      },
+      "1": {
+        "cells": 2,
+        "seam": 1,
+        "block-edge": 1,
+        "scan-edge": 1
+      },
+      "2": {
+        "cells": 2,
+        "seam": 1,
+        "block-edge": 1,
+        "scan-edge": 1
+      }
+    },
+    "category_counts_actual": {
+      "L0": {
+        "cells": 8,
+        "seam": 5,
+        "block-edge": 4,
+        "scan-edge": 3
+      },
+      "L1": {
+        "cells": 2,
+        "seam": 1,
+        "block-edge": 1,
+        "scan-edge": 1
+      },
+      "L2": {
+        "cells": 2,
+        "seam": 1,
+        "block-edge": 1,
+        "scan-edge": 1
+      }
+    },
+    "min_std": {
+      "0": 8.0,
+      "1": 8.0,
+      "2": 6.0
+    },
+    "min_nonbg": {
+      "0": 0.02,
+      "1": 0.02,
+      "2": 0.02
+    },
+    "cell_min_std": {
+      "0": 12.0,
+      "1": 12.0,
+      "2": 10.0
+    },
+    "cell_min_nonbg": {
+      "0": 0.03,
+      "1": 0.03,
+      "2": 0.03
+    },
+    "l1_origin_rule": "floor(l0_origin_x / 4), floor(l0_origin_y / 4)",
+    "l2_seam_source": "level-2 ShrinkTileInfo origins, level coords = floor(l0/16)",
+    "l2_edge_source": "level-2 shrink tile trailing edge, 612x512 level pixels",
+    "block_edge_definition": "ROI crosses a block trailing edge at origin + (img_width, img_height); L1/L2 block extent uses floor(img_width/ds)",
+    "scan_edge_definition": "ROI centred on the boundary of the largest tissue/activity component in the 16x16 L2 block map",
+    "tissue_block_size_l2": 16,
+    "nms": "no rectangle intersection within a level; prefilter centre distance",
+    "diversity": {
+      "cells": "3x3 L2 grid at L0 (max 2 per bin), 2x2 at L1/L2 (max 1)",
+      "scan-edge": "one ROI per 45-degree sector around tissue centroid",
+      "note": "diversity quota is relaxed before strict texture is relaxed for cells"
+    },
+    "relaxed_fallback": {
+      "std_factor": 0.5,
+      "nonbg_factor": 0.25,
+      "floor_std": 4.0,
+      "floor_nonbg": 0.005
+    }
+  },
+  "rois": [
+    {
+      "id": "L0-cells-01",
+      "level": 0,
+      "x": 59520,
+      "y": 23424,
+      "w": 512,
+      "h": 512,
+      "category": "cells",
+      "luma_std": 82.41327086123945,
+      "nonbg_ratio": 0.7476844787597656,
+      "mean_luma": 96.08310512161255,
+      "texture_score": 71.26172543869069,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "l2-texture-grid",
+        "l2_block": [
+          233,
+          92
+        ],
+        "l2_std": 70.242645,
+        "l2_nonbg": 0.957031
+      }
+    },
+    {
+      "id": "L0-cells-02",
+      "level": 0,
+      "x": 18816,
+      "y": 29312,
+      "w": 512,
+      "h": 512,
+      "category": "cells",
+      "luma_std": 83.87547699463363,
+      "nonbg_ratio": 0.649200439453125,
+      "mean_luma": 100.07926723861695,
+      "texture_score": 67.58096760022127,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "l2-texture-grid",
+        "l2_block": [
+          74,
+          115
+        ],
+        "l2_std": 79.987938,
+        "l2_nonbg": 0.835938
+      }
+    },
+    {
+      "id": "L0-cells-03",
+      "level": 0,
+      "x": 57216,
+      "y": 33920,
+      "w": 512,
+      "h": 512,
+      "category": "cells",
+      "luma_std": 83.52486725323783,
+      "nonbg_ratio": 0.6828956604003906,
+      "mean_luma": 106.79820224761963,
+      "texture_score": 69.02286317578141,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "l2-texture-grid",
+        "l2_block": [
+          224,
+          133
+        ],
+        "l2_std": 79.755157,
+        "l2_nonbg": 0.859375
+      }
+    },
+    {
+      "id": "L0-cells-04",
+      "level": 0,
+      "x": 61056,
+      "y": 34944,
+      "w": 512,
+      "h": 512,
+      "category": "cells",
+      "luma_std": 91.4887941663384,
+      "nonbg_ratio": 0.5976486206054688,
+      "mean_luma": 103.23208514404297,
+      "texture_score": 70.72791641404896,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "l2-texture-grid",
+        "l2_block": [
+          239,
+          137
+        ],
+        "l2_std": 87.599129,
+        "l2_nonbg": 0.820312
+      }
+    },
+    {
+      "id": "L0-cells-05",
+      "level": 0,
+      "x": 52352,
+      "y": 40832,
+      "w": 512,
+      "h": 512,
+      "category": "cells",
+      "luma_std": 82.22421172973823,
+      "nonbg_ratio": 0.734527587890625,
+      "mean_luma": 97.8906757965088,
+      "texture_score": 70.46991937917063,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "l2-texture-grid",
+        "l2_block": [
+          205,
+          160
+        ],
+        "l2_std": 75.09185,
+        "l2_nonbg": 0.878906
+      }
+    },
+    {
+      "id": "L0-cells-06",
+      "level": 0,
+      "x": 19328,
+      "y": 46208,
+      "w": 512,
+      "h": 512,
+      "category": "cells",
+      "luma_std": 81.71795146418238,
+      "nonbg_ratio": 0.747039794921875,
+      "mean_luma": 93.56045670700072,
+      "texture_score": 70.63002170692333,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "l2-texture-grid",
+        "l2_block": [
+          76,
+          181
+        ],
+        "l2_std": 77.331314,
+        "l2_nonbg": 0.898438
+      }
+    },
+    {
+      "id": "L0-cells-07",
+      "level": 0,
+      "x": 55424,
+      "y": 52608,
+      "w": 512,
+      "h": 512,
+      "category": "cells",
+      "luma_std": 84.55815916677267,
+      "nonbg_ratio": 0.7243576049804688,
+      "mean_luma": 99.30275094985961,
+      "texture_score": 71.96677342333842,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "l2-texture-grid",
+        "l2_block": [
+          217,
+          206
+        ],
+        "l2_std": 82.357323,
+        "l2_nonbg": 0.835938
+      }
+    },
+    {
+      "id": "L0-cells-08",
+      "level": 0,
+      "x": 32896,
+      "y": 61568,
+      "w": 512,
+      "h": 512,
+      "category": "cells",
+      "luma_std": 88.50536685705643,
+      "nonbg_ratio": 0.7532920837402344,
+      "mean_luma": 72.87562433242798,
+      "texture_score": 76.81593273603572,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "l2-texture-grid",
+        "l2_block": [
+          129,
+          241
+        ],
+        "l2_std": 78.493996,
+        "l2_nonbg": 0.972656
+      }
+    },
+    {
+      "id": "L0-seam-01",
+      "level": 0,
+      "x": 57679,
+      "y": 28483,
+      "w": 512,
+      "h": 512,
+      "category": "seam",
+      "luma_std": 73.28853606825601,
+      "nonbg_ratio": 0.6083106994628906,
+      "mean_luma": 127.81468061447144,
+      "texture_score": 57.16086265515678,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "block-origin",
+        "block_origin_l0": [
+          57935,
+          28739
+        ],
+        "block_origin_level": [
+          57935,
+          28739
+        ],
+        "l2_std": 69.181099,
+        "l2_nonbg": 0.886719
+      }
+    },
+    {
+      "id": "L0-seam-02",
+      "level": 0,
+      "x": 25246,
+      "y": 34240,
+      "w": 512,
+      "h": 512,
+      "category": "seam",
+      "luma_std": 66.92438083196521,
+      "nonbg_ratio": 0.7383346557617188,
+      "mean_luma": 115.08285154342653,
+      "texture_score": 57.50571249781397,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "block-origin",
+        "block_origin_l0": [
+          25502,
+          34496
+        ],
+        "block_origin_level": [
+          25502,
+          34496
+        ],
+        "l2_std": 55.933044,
+        "l2_nonbg": 0.902344
+      }
+    },
+    {
+      "id": "L0-seam-03",
+      "level": 0,
+      "x": 11344,
+      "y": 34243,
+      "w": 512,
+      "h": 512,
+      "category": "seam",
+      "luma_std": 72.13355017332692,
+      "nonbg_ratio": 0.6187095642089844,
+      "mean_luma": 121.10823031234742,
+      "texture_score": 56.738875198222814,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "block-origin",
+        "block_origin_l0": [
+          11600,
+          34499
+        ],
+        "block_origin_level": [
+          11600,
+          34499
+        ],
+        "l2_std": 64.583466,
+        "l2_nonbg": 0.820312
+      }
+    },
+    {
+      "id": "L0-seam-04",
+      "level": 0,
+      "x": 50698,
+      "y": 51486,
+      "w": 512,
+      "h": 512,
+      "category": "seam",
+      "luma_std": 79.43786067195181,
+      "nonbg_ratio": 0.5537338256835938,
+      "mean_luma": 131.29079656982424,
+      "texture_score": 59.11232845100546,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "block-origin",
+        "block_origin_l0": [
+          50954,
+          51742
+        ],
+        "block_origin_level": [
+          50954,
+          51742
+        ],
+        "l2_std": 75.221756,
+        "l2_nonbg": 0.886719
+      }
+    },
+    {
+      "id": "L0-seam-05",
+      "level": 0,
+      "x": 32172,
+      "y": 62990,
+      "w": 512,
+      "h": 512,
+      "category": "seam",
+      "luma_std": 82.10681542663364,
+      "nonbg_ratio": 0.7686538696289062,
+      "mean_luma": 84.65325639343261,
+      "texture_score": 71.98543227831051,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "block-origin",
+        "block_origin_l0": [
+          32428,
+          63246
+        ],
+        "block_origin_level": [
+          32428,
+          63246
+        ],
+        "l2_std": 79.091476,
+        "l2_nonbg": 0.753906
+      }
+    },
+    {
+      "id": "L0-block-edge-01",
+      "level": 0,
+      "x": 12564,
+      "y": 34377,
+      "w": 512,
+      "h": 512,
+      "category": "block-edge",
+      "luma_std": 86.82613300688776,
+      "nonbg_ratio": 0.766937255859375,
+      "mean_luma": 85.42693068695068,
+      "texture_score": 76.03794599362546,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "block-trailing-edge",
+        "block_origin_l0": [
+          11596,
+          32585
+        ],
+        "edge": "bottom",
+        "edge_point_l0": [
+          12820,
+          34633
+        ],
+        "l2_std": 57.073544,
+        "l2_nonbg": 0.988281
+      }
+    },
+    {
+      "id": "L0-block-edge-02",
+      "level": 0,
+      "x": 50845,
+      "y": 39085,
+      "w": 512,
+      "h": 512,
+      "category": "block-edge",
+      "luma_std": 69.66519986886422,
+      "nonbg_ratio": 0.7810516357421875,
+      "mean_luma": 116.95961645889282,
+      "texture_score": 61.56810129836394,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "block-trailing-edge",
+        "block_origin_l0": [
+          48653,
+          38317
+        ],
+        "edge": "right",
+        "edge_point_l0": [
+          51101,
+          39341
+        ],
+        "l2_std": 69.619904,
+        "l2_nonbg": 0.96875
+      }
+    },
+    {
+      "id": "L0-block-edge-03",
+      "level": 0,
+      "x": 43886,
+      "y": 44840,
+      "w": 512,
+      "h": 512,
+      "category": "block-edge",
+      "luma_std": 84.1316984387951,
+      "nonbg_ratio": 0.776947021484375,
+      "mean_luma": 81.49876457214356,
+      "texture_score": 74.15754765749664,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "block-trailing-edge",
+        "block_origin_l0": [
+          41694,
+          44072
+        ],
+        "edge": "right",
+        "edge_point_l0": [
+          44142,
+          45096
+        ],
+        "l2_std": 51.77882,
+        "l2_nonbg": 1.0
+      }
+    },
+    {
+      "id": "L0-block-edge-04",
+      "level": 0,
+      "x": 41565,
+      "y": 50591,
+      "w": 512,
+      "h": 512,
+      "category": "block-edge",
+      "luma_std": 67.80398382215273,
+      "nonbg_ratio": 0.7476158142089844,
+      "mean_luma": 131.15083600234988,
+      "texture_score": 58.62656529265981,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "block-trailing-edge",
+        "block_origin_l0": [
+          39373,
+          49823
+        ],
+        "edge": "right",
+        "edge_point_l0": [
+          41821,
+          50847
+        ],
+        "l2_std": 66.571152,
+        "l2_nonbg": 0.960938
+      }
+    },
+    {
+      "id": "L0-scan-edge-01",
+      "level": 0,
+      "x": 6272,
+      "y": 38272,
+      "w": 512,
+      "h": 512,
+      "category": "scan-edge",
+      "luma_std": 45.21145214557515,
+      "nonbg_ratio": 0.28009796142578125,
+      "mean_luma": 177.45416852951053,
+      "texture_score": 23.9278363830152,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "tissue-boundary-block",
+        "boundary_block": [
+          25,
+          150
+        ],
+        "l2_std": 56.503487,
+        "l2_nonbg": 0.75
+      }
+    },
+    {
+      "id": "L0-scan-edge-02",
+      "level": 0,
+      "x": 69504,
+      "y": 67712,
+      "w": 512,
+      "h": 512,
+      "category": "scan-edge",
+      "luma_std": 81.62711775232879,
+      "nonbg_ratio": 0.5003013610839844,
+      "mean_luma": 135.5872187614441,
+      "texture_score": 57.73648015826781,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "tissue-boundary-block",
+        "boundary_block": [
+          272,
+          265
+        ],
+        "l2_std": 79.450623,
+        "l2_nonbg": 0.660156
+      }
+    },
+    {
+      "id": "L0-scan-edge-03",
+      "level": 0,
+      "x": 17280,
+      "y": 70272,
+      "w": 512,
+      "h": 512,
+      "category": "scan-edge",
+      "luma_std": 45.967554855140676,
+      "nonbg_ratio": 0.19180679321289062,
+      "mean_luma": 184.46540384292604,
+      "texture_score": 20.131836528879393,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "tissue-boundary-block",
+        "boundary_block": [
+          68,
+          275
+        ],
+        "l2_std": 61.187916,
+        "l2_nonbg": 0.402344
+      }
+    },
+    {
+      "id": "L1-cells-01",
+      "level": 1,
+      "x": 12896,
+      "y": 10016,
+      "w": 512,
+      "h": 512,
+      "category": "cells",
+      "luma_std": 76.37262884434759,
+      "nonbg_ratio": 0.4344520568847656,
+      "mean_luma": 144.1324361038208,
+      "texture_score": 50.339473468963156,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "l2-texture-grid",
+        "l2_block": [
+          205,
+          160
+        ],
+        "l2_std": 75.09185,
+        "l2_nonbg": 0.878906
+      }
+    },
+    {
+      "id": "L1-cells-02",
+      "level": 1,
+      "x": 10976,
+      "y": 14368,
+      "w": 512,
+      "h": 512,
+      "category": "cells",
+      "luma_std": 70.57450601645276,
+      "nonbg_ratio": 0.3527107238769531,
+      "mean_luma": 156.20122859573365,
+      "texture_score": 41.913813740923075,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "l2-texture-grid",
+        "l2_block": [
+          175,
+          228
+        ],
+        "l2_std": 75.260696,
+        "l2_nonbg": 0.875
+      }
+    },
+    {
+      "id": "L1-seam-01",
+      "level": 1,
+      "x": 7851,
+      "y": 15555,
+      "w": 512,
+      "h": 512,
+      "category": "seam",
+      "luma_std": 80.62396449199304,
+      "nonbg_ratio": 0.434722900390625,
+      "mean_luma": 141.71492240524293,
+      "texture_score": 53.1582174126663,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "block-origin",
+        "block_origin_l0": [
+          32428,
+          63246
+        ],
+        "block_origin_level": [
+          8107,
+          15811
+        ],
+        "l2_std": 79.091476,
+        "l2_nonbg": 0.753906
+      }
+    },
+    {
+      "id": "L1-block-edge-01",
+      "level": 1,
+      "x": 2949,
+      "y": 8402,
+      "w": 512,
+      "h": 512,
+      "category": "block-edge",
+      "luma_std": 82.16041181193403,
+      "nonbg_ratio": 0.37078857421875,
+      "mean_luma": 145.44740437698366,
+      "texture_score": 50.029455807088546,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "block-trailing-edge",
+        "block_origin_l0": [
+          11596,
+          32585
+        ],
+        "edge": "bottom",
+        "edge_point_l0": [
+          12820,
+          34633
+        ],
+        "l2_std": 57.073544,
+        "l2_nonbg": 0.988281
+      }
+    },
+    {
+      "id": "L1-scan-edge-01",
+      "level": 1,
+      "x": 17184,
+      "y": 16736,
+      "w": 512,
+      "h": 512,
+      "category": "scan-edge",
+      "luma_std": 30.734212790486243,
+      "nonbg_ratio": 0.06900787353515625,
+      "mean_luma": 193.09567461395267,
+      "texture_score": 8.073677845365095,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "tissue-boundary-block",
+        "boundary_block": [
+          272,
+          265
+        ],
+        "l2_std": 79.450623,
+        "l2_nonbg": 0.660156
+      }
+    },
+    {
+      "id": "L2-cells-01",
+      "level": 2,
+      "x": 664,
+      "y": 2040,
+      "w": 256,
+      "h": 256,
+      "category": "cells",
+      "luma_std": 56.14296775744158,
+      "nonbg_ratio": 0.24261474609375,
+      "mean_luma": 176.1916664733887,
+      "texture_score": 27.653745576198858,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "l2-texture-grid",
+        "l2_block": [
+          49,
+          135
+        ],
+        "l2_std": 81.959877,
+        "l2_nonbg": 0.949219
+      }
+    },
+    {
+      "id": "L2-cells-02",
+      "level": 2,
+      "x": 1944,
+      "y": 3736,
+      "w": 256,
+      "h": 256,
+      "category": "cells",
+      "luma_std": 74.64772030918824,
+      "nonbg_ratio": 0.38690185546875,
+      "mean_luma": 155.27207743835447,
+      "texture_score": 46.431953458889794,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "l2-texture-grid",
+        "l2_block": [
+          129,
+          241
+        ],
+        "l2_std": 78.493996,
+        "l2_nonbg": 0.972656
+      }
+    },
+    {
+      "id": "L2-seam-01",
+      "level": 2,
+      "x": 2320,
+      "y": 3968,
+      "w": 256,
+      "h": 256,
+      "category": "seam",
+      "luma_std": 48.164230417343255,
+      "nonbg_ratio": 0.2552337646484375,
+      "mean_luma": 181.2505115966797,
+      "texture_score": 24.33288975848812,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "shrink-tile-origin",
+        "shrink_origin_l0": [
+          39168,
+          65536
+        ],
+        "shrink_origin_level": [
+          2448,
+          4096
+        ],
+        "l2_std": 24.450495,
+        "l2_nonbg": 1.0
+      }
+    },
+    {
+      "id": "L2-block-edge-01",
+      "level": 2,
+      "x": 3238,
+      "y": 2432,
+      "w": 256,
+      "h": 256,
+      "category": "block-edge",
+      "luma_std": 57.25898647964754,
+      "nonbg_ratio": 0.313995361328125,
+      "mean_luma": 172.40696789550785,
+      "texture_score": 32.08523855217655,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "shrink-tile-trailing-edge",
+        "shrink_origin_l0": [
+          48960,
+          32768
+        ],
+        "edge": "bottom",
+        "edge_point_l0": [
+          53856,
+          40960
+        ],
+        "l2_std": 37.264618,
+        "l2_nonbg": 0.273438
+      }
+    },
+    {
+      "id": "L2-scan-edge-01",
+      "level": 2,
+      "x": 4680,
+      "y": 3576,
+      "w": 256,
+      "h": 256,
+      "category": "scan-edge",
+      "luma_std": 24.513483661913043,
+      "nonbg_ratio": 0.1006927490234375,
+      "mean_luma": 194.3771045074463,
+      "texture_score": 7.778648246992645,
+      "texture_pass": true,
+      "relaxed": false,
+      "selection": {
+        "method": "tissue-boundary-block",
+        "boundary_block": [
+          300,
+          231
+        ],
+        "l2_std": 46.008652,
+        "l2_nonbg": 0.335938
+      }
+    }
+  ],
+  "counts": {
+    "total": 30,
+    "by_level": {
+      "0": 20,
+      "1": 5,
+      "2": 5
+    },
+    "by_category": {
+      "cells": 12,
+      "seam": 7,
+      "block-edge": 6,
+      "scan-edge": 5
+    },
+    "relaxed": 0
+  }
+}
