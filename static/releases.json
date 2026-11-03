@@ -3,6 +3,27 @@
   "version_scheme": "YYYY.MM.DD product release. Do not use PathTogether package.json 0.1.0 (test package) as the product version.",
   "releases": [
     {
+      "version": "2026.11.03",
+      "date": "2026-11-03",
+      "published": true,
+      "components": {
+        "histopilot": "0.4.9",
+        "pathtogether": "suite-20261103-tmap06"
+      },
+      "items": {
+        "zh": [
+          "切片转换工具新增 TMAP06 单文件明场支持，已验证两张公开样片；可以保存为三层 JPEG OME-TIFF 或经典 TIFF，并经工作台上传到项目。TMAP07、多文件和多焦面变体暂不支持。",
+          "TMAP06 的重叠图像块按全图坐标拼接，提供默认高质量和压缩体积两档；两档都会重新编码 JPEG，不能视为无损转换。",
+          "TMAP06 头部的像素尺寸尚未核验，转换产物保留为未标定状态，测量使用像素单位；图像名称或普通说明中提到 TMAP 不会清空其他切片的有效标定。"
+        ],
+        "en": [
+          "The slide converter now supports single-file brightfield TMAP06, verified with two public samples. Save a three-level JPEG OME-TIFF or classic TIFF, then upload it to a project from the workbench. TMAP07, multi-file and multi-focus variants are not supported yet.",
+          "Overlapping TMAP06 image blocks are placed at absolute canvas coordinates. Both the default high-quality and compact options re-encode JPEG tiles; neither is lossless.",
+          "TMAP06 header pixel sizes are unverified, so converted files stay uncalibrated and measurements use pixels. Mentioning TMAP in an image name or ordinary description no longer clears another slide’s valid calibration."
+        ]
+      }
+    },
+    {
       "version": "2026.11.02",
       "date": "2026-11-02",
       "published": true,
