@@ -3,6 +3,29 @@
   "version_scheme": "YYYY.MM.DD product release. Do not use PathTogether package.json 0.1.0 (test package) as the product version.",
   "releases": [
     {
+      "version": "2026.11.05",
+      "date": "2026-11-05",
+      "published": true,
+      "components": {
+        "histopilot": "0.4.10",
+        "pathtogether": "suite-20261105-credit-wallet"
+      },
+      "items": {
+        "zh": [
+          "AI 余额单位改为 Credit：1 元 = 100 Credit，原有剩余额度已自动换算，无需任何操作。",
+          "存储容量调整：新注册用户为 10 GB，此前注册的用户继续保留 20 GB；容量用完时请联系管理员扩容。",
+          "账户页面新增存储用量展示，可随时查看已用空间。",
+          "AI 读片助手更节省上下文，同样的余额可以完成更多轮分析。"
+        ],
+        "en": [
+          "AI balances are now denominated in Credits: ¥1 = 100 Credits. Your existing remaining allowance has been converted automatically — no action needed.",
+          "Storage quota update: new accounts start at 10 GB, while earlier accounts keep 20 GB. Contact the administrator if you run out of space.",
+          "The account page now shows your storage usage so you can check it anytime.",
+          "The AI reading assistant now uses context more economically, so the same balance goes further."
+        ]
+      }
+    },
+    {
       "version": "2026.11.04",
       "date": "2026-11-04",
       "published": true,
