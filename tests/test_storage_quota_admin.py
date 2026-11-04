@@ -3,7 +3,7 @@
 
 覆盖：
   - 应用默认值 UPLOAD_USER_QUOTA_BYTES = 10 GiB；
-  - 迁移 0090：存量普通用户统一保留 20 GiB（无行者预建），已有行与自定义值
+  - 迁移 0091：存量普通用户统一保留 20 GiB（无行者预建），已有行与自定义值
     不动；新用户 10 GiB；重跑幂等；used > quota 时 reserve 正常拒绝
     （不崩溃、不下溢）；
   - admin API：GET/PUT/restore-default 的 owner 门控、参数边界、行惰性创建、
@@ -93,7 +93,7 @@ def _quota(user_id):
 
 def _run_migration():
     sql = (pg_store.migrations_dir()
-           / "0090_upload_user_quota_10g.sql").read_text(encoding="utf-8")
+           / "0091_upload_user_quota_10g.sql").read_text(encoding="utf-8")
     _sql(sql)
 
 
@@ -108,7 +108,7 @@ def test_default_quota_is_10_gib():
     assert row["quota_bytes"] == NEW_DEFAULT
 
 
-def test_migration_0090_grandfathers_existing_users_at_20_gib():
+def test_migration_0091_grandfathers_existing_users_at_20_gib():
     owner, old = _make_users()
     custom = user_store.create_user("custom@x.com", "userpass1234567")
     no_row = user_store.create_user("norow@x.com", "userpass1234567")
