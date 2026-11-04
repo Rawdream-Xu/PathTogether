@@ -3,8 +3,8 @@
 
 覆盖：
   - 应用默认值 UPLOAD_USER_QUOTA_BYTES = 10 GiB；
-  - 迁移 0090：只把仍等于旧默认 20 GiB 的配额行收敛到 10 GiB，自定义值
-    与 used/reserved 不动；重跑幂等；used > quota 时 reserve 正常拒绝
+  - 迁移 0090：存量普通用户统一保留 20 GiB（无行者预建），已有行与自定义值
+    不动；新用户 10 GiB；重跑幂等；used > quota 时 reserve 正常拒绝
     （不崩溃、不下溢）；
   - admin API：GET/PUT/restore-default 的 owner 门控、参数边界、行惰性创建、
     used/reserved 保留、审计（upload.user_quota_update）；
@@ -108,31 +108,37 @@ def test_default_quota_is_10_gib():
     assert row["quota_bytes"] == NEW_DEFAULT
 
 
-def test_migration_0090_converges_only_old_default_and_is_idempotent():
-    _, old = _make_users()
+def test_migration_0090_grandfathers_existing_users_at_20_gib():
+    owner, old = _make_users()
     custom = user_store.create_user("custom@x.com", "userpass1234567")
-    untouched = user_store.create_user("untouched@x.com", "userpass1234567")
-    # 旧默认行：已用 12 GiB（> 新默认 10 GiB）+ 1 GiB 预占
+    no_row = user_store.create_user("norow@x.com", "userpass1234567")
+    # 旧默认行：已用 12 GiB + 1 GiB 预占
     _insert_quota(old["user_id"], OLD_DEFAULT, used=12 * GiB, reserved=GiB)
     # 管理员手工值：保持原样
     _insert_quota(custom["user_id"], 5 * GiB, used=2 * GiB)
-    # 另一条旧默认行
-    _insert_quota(untouched["user_id"], OLD_DEFAULT)
+    # no_row：迁移前注册、尚未上传，没有配额行
 
     _run_migration()
 
-    # 已用超过 10 GiB 的旧默认行保留 20 GiB（产品决定：不在迁移中卡住重度用户）
+    # 存量用户统一 20 GiB：已有行不动，无行用户预建 20 GiB；owner 不建行
     assert _quota(old["user_id"]) == {
         "quota_bytes": OLD_DEFAULT, "used_bytes": 12 * GiB,
         "reserved_bytes": GiB}
     assert _quota(custom["user_id"]) == {
         "quota_bytes": 5 * GiB, "used_bytes": 2 * GiB, "reserved_bytes": 0}
-    assert _quota(untouched["user_id"])["quota_bytes"] == NEW_DEFAULT
+    assert _quota(no_row["user_id"]) == {
+        "quota_bytes": OLD_DEFAULT, "used_bytes": 0, "reserved_bytes": 0}
+    assert _quota(owner["user_id"]) is None
 
     # 幂等重跑：值不变、不报错
     _run_migration()
     assert _quota(old["user_id"])["quota_bytes"] == OLD_DEFAULT
     assert _quota(custom["user_id"])["quota_bytes"] == 5 * GiB
+    assert _quota(no_row["user_id"])["quota_bytes"] == OLD_DEFAULT
+
+    # 迁移之后注册的新用户按应用默认 10 GiB 惰性建行
+    newcomer = user_store.create_user("newcomer@x.com", "userpass1234567")
+    assert upload_guard.get_quota_row(newcomer["user_id"])["quota_bytes"] == NEW_DEFAULT
 
 
 def test_reserve_refuses_when_used_already_exceeds_quota():
