@@ -447,7 +447,9 @@ describe("AdminBridge host — §8.4 method→permission mapping (drift guard)",
 			//（billing:read 只读）；「研究删除」一级页退役，新增 users.research（抽屉
 			//「研究数据」只读，复用 users:read），researchDeletionJobs.list/retry 保留兼容。
 			// 35 → 38
-			expect(Object.keys(table)).toHaveLength(38);
+			// 2026-11-04：新增 storageQuota.get/set/restoreDefault（单用户存储
+			// 容量，读 users:read、写 users:write）——38 → 41
+			expect(Object.keys(table)).toHaveLength(41);
 			expect(table["admin.formatRequests.list"]).toBe("admin:users:read");
 			expect(table["admin.formatRequests.get"]).toBe("admin:users:read");
 			expect(table["admin.formatRequests.patch"]).toBe("admin:users:write");
@@ -496,6 +498,10 @@ describe("AdminBridge host — §8.4 method→permission mapping (drift guard)",
 			// wave 2 新增 user 一次性总额度 CAS 写（users:write）
 			expect(table["admin.spend.userTotalLimit.set"]).toBe("admin:users:write");
 			expect(table["admin.spend.userTotalLimit.restoreDefault"]).toBe("admin:users:write");
+			// 2026-11-04：单用户存储容量（读 users:read，写 users:write）
+			expect(table["admin.users.storageQuota.get"]).toBe("admin:users:read");
+			expect(table["admin.users.storageQuota.set"]).toBe("admin:users:write");
+			expect(table["admin.users.storageQuota.restoreDefault"]).toBe("admin:users:write");
 			// wave 2 已删方法：不在表内 → dispatch 门按既有语义回 unknown_method
 			//（旧 REST 兼容端点的 410 由服务端负责，桥层不再出现这些名字）
 			expect(table["admin.turnBudgets.get"]).toBeUndefined();
@@ -1518,6 +1524,68 @@ describe("AdminBridge host — PR5 write methods (§9 Admin API v1 writes)", () 
 		expect((responses(posted, "r3")[0].env.error as { code: string }).code)
 			.toBe("invalid_params");
 		expect(calls).toHaveLength(2);
+	});
+
+	it("storageQuota get/set/restore map to /users/<id>/storage-quota with byte body", async () => {
+		const calls: Array<{ url: string; method?: string; body?: unknown }> = [];
+		const { handle, posted, contentWindow } = makeWriteHost(async (url, o) => {
+			calls.push({
+				url, method: (o as { method?: string } | undefined)?.method,
+				body: o && (o as { body?: string }).body
+					? JSON.parse(String((o as { body?: string }).body)) : undefined,
+			});
+			return { status: 200, ok: true, body: { quota_bytes: 10 * 1024 ** 3 } };
+		}, ["admin:users:read", "admin:users:write"]);
+		handle._handleIframeLoad();
+		const nonce = nonce0(posted);
+		handle._handleWindowMessage({
+			source: contentWindow,
+			data: requestEnv(nonce, "r1", "admin.users.storageQuota.get", {
+				user_id: "usr_3",
+			}),
+		});
+		handle._handleWindowMessage({
+			source: contentWindow,
+			data: requestEnv(nonce, "r2", "admin.users.storageQuota.set", {
+				user_id: "usr_3", quota_bytes: 5 * 1024 ** 3,
+			}),
+		});
+		handle._handleWindowMessage({
+			source: contentWindow,
+			data: requestEnv(nonce, "r3", "admin.users.storageQuota.restoreDefault", {
+				user_id: "usr_3",
+			}),
+		});
+		await ticks();
+		expect(calls[0].url).toBe("/api/admin/v1/users/usr_3/storage-quota");
+		expect(calls[0].method).toBeUndefined(); // GET 不带 method
+		expect(calls[1]).toEqual({
+			url: "/api/admin/v1/users/usr_3/storage-quota", method: "PUT",
+			body: { quota_bytes: 5 * 1024 ** 3 },
+		});
+		expect(calls[2]).toEqual({
+			url: "/api/admin/v1/users/usr_3/storage-quota/restore-default",
+			method: "POST", body: {},
+		});
+		// 非法 user_id / 越界字节数在桥层被 schema/pathId 拦截（后端零调用）
+		handle._handleWindowMessage({
+			source: contentWindow,
+			data: requestEnv(nonce, "r4", "admin.users.storageQuota.set", {
+				user_id: "usr/../admin", quota_bytes: 1,
+			}),
+		});
+		handle._handleWindowMessage({
+			source: contentWindow,
+			data: requestEnv(nonce, "r5", "admin.users.storageQuota.set", {
+				user_id: "usr_3", quota_bytes: 1024 ** 4 + 1,
+			}),
+		});
+		await ticks();
+		expect((responses(posted, "r4")[0].env.error as { code: string }).code)
+			.toBe("invalid_params");
+		expect((responses(posted, "r5")[0].env.error as { code: string }).code)
+			.toBe("invalid_params");
+		expect(calls).toHaveLength(3);
 	});
 
 	it("rejects schema-invalid write params (required / types / enums / nonZero)", async () => {

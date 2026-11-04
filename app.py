@@ -6299,6 +6299,59 @@ def api_account_balance():
     return resp
 
 
+@app.route("/api/account/storage", methods=["GET"])
+def api_account_storage():
+    """只读自助存储用量（2026-11-04；账户弹层「存储」行 / 超限文案取数）。
+
+    subject 只取 current_identity()（预览态 = effective subject；与
+    /api/account/balance 同口径），不接受 user_id 参数。role=user 返回其
+    实际配额与用量（配额行不存在时返回 env 默认值，**不建行**）；owner /
+    本地免登录 / 非 PG 后端 → quota_applies=false（owner 不受存储配额限制）。
+    字节数为整数（< 2^53，JS 安全）；Cache-Control: no-store。
+    """
+    guard = _require_own_active_account_or_none()
+    if guard is not None:
+        return guard
+    ident = current_identity()
+    uid = str(ident.get("user_id") or "")
+    role = ident.get("role") or user_store.ROLE_USER
+    quota_applies = (role == user_store.ROLE_USER and bool(uid)
+                     and upload_guard.quota_features_available())
+    default_quota = int(upload_guard.UPLOAD_USER_QUOTA_BYTES)
+    if not quota_applies:
+        resp = jsonify(
+            subject={"user_id": uid or None, "role": role},
+            quota_applies=False,
+            quota_bytes=None,
+            used_bytes=None,
+            reserved_bytes=None,
+            remaining_bytes=None,
+            default_quota_bytes=default_quota,
+        )
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    try:
+        row = upload_guard.peek_quota_row(uid)
+    except Exception:
+        app.logger.exception("account storage 读取失败")
+        return jsonify(error="存储用量读取暂时不可用，请稍后重试",
+                       code="storage_unavailable"), 503
+    quota = int(row["quota_bytes"]) if row else default_quota
+    used = int(row["used_bytes"]) if row else 0
+    reserved = int(row["reserved_bytes"]) if row else 0
+    resp = jsonify(
+        subject={"user_id": uid, "role": role},
+        quota_applies=True,
+        quota_bytes=quota,
+        used_bytes=used,
+        reserved_bytes=reserved,
+        remaining_bytes=max(0, quota - used - reserved),
+        default_quota_bytes=default_quota,
+    )
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 def _require_own_active_account_or_none():
     """登录态 + 账号可用校验（本人账户 API 共用）；返回错误响应或 None。
 
@@ -12080,6 +12133,123 @@ def admin_v1_users_account_kind(user_id):
     return jsonify(user_id=user_id, account_kind=after, changed=bool(changed))
 
 
+@app.route("/api/admin/v1/users/<user_id>/storage-quota", methods=["GET"])
+def admin_v1_users_storage_quota_get(user_id):
+    """读取单用户存储配额（2026-11-04；admin:users:read）。
+
+    响应：quota_bytes / used_bytes / reserved_bytes / remaining_bytes /
+    quota_applies / default_quota_bytes / 硬边界。配额行不存在时按当前 env
+    默认惰性创建（与首次上传预占同语义），因此返回的 quota_bytes 恒为具体
+    数值。owner 不适用存储配额 → 400（与总额度端点的 owner 互斥形态一致）。
+    """
+    auth = _require_owner_admin_v1()
+    if auth:
+        return auth
+    if "/" in user_id:
+        return _admin_v1_error(400, "invalid_request", "user_id 非法")
+    target = user_store.get_user(user_id)
+    if target is None:
+        return _admin_v1_error(404, "user_not_found", "用户不存在")
+    if target.get("role") != user_store.ROLE_USER:
+        return _admin_v1_error(
+            400, "invalid_request",
+            "存储配额仅适用于 role=user（owner 不受存储配额限制）")
+    try:
+        row = upload_guard.get_quota_row(user_id)
+    except Exception:
+        app.logger.exception("admin v1 storage quota 读取失败")
+        return _admin_v1_error(500, "internal", "存储配额读取失败")
+    return jsonify(_admin_v1_storage_quota_out(row))
+
+
+@app.route("/api/admin/v1/users/<user_id>/storage-quota", methods=["PUT"])
+def admin_v1_users_storage_quota_set(user_id):
+    """设置单用户存储配额（绝对值，字节；admin:users:write）。
+
+    body: ``{quota_bytes: <int>}``，取值
+    ``[upload_guard.UPLOAD_USER_QUOTA_MIN_BYTES,
+    upload_guard.UPLOAD_USER_QUOTA_MAX_BYTES]``。只改配额上限：
+    used/reserved 不清零；调低到低于已用时既有文件保留，后续新增上传被
+    配额判定拒绝。写入与审计（upload.user_quota_update）同一事务。
+    """
+    auth = _require_owner_admin_v1()
+    if auth:
+        return auth
+    if "/" in user_id:
+        return _admin_v1_error(400, "invalid_request", "user_id 非法")
+    target = user_store.get_user(user_id)
+    if target is None:
+        return _admin_v1_error(404, "user_not_found", "用户不存在")
+    if target.get("role") != user_store.ROLE_USER:
+        return _admin_v1_error(
+            400, "invalid_request",
+            "存储配额仅适用于 role=user（owner 不受存储配额限制）")
+    body = request.get_json(silent=True) or {}
+    quota = body.get("quota_bytes")
+    if isinstance(quota, bool) or not isinstance(quota, int):
+        return _admin_v1_error(400, "invalid_request",
+                               "缺少 quota_bytes（整数，单位字节）")
+    try:
+        row = upload_guard.set_user_quota(
+            user_id, quota,
+            actor_user_id=actor_identity().get("user_id"),
+            updated_by=current_identity().get("user_id"))
+    except ValueError as exc:
+        return _admin_v1_error(400, "invalid_request", str(exc))
+    except Exception:
+        app.logger.exception("admin v1 storage quota 设置失败")
+        return _admin_v1_error(500, "internal", "存储配额设置失败")
+    return jsonify(_admin_v1_storage_quota_out(row))
+
+
+@app.route("/api/admin/v1/users/<user_id>/storage-quota/restore-default",
+           methods=["POST"])
+def admin_v1_users_storage_quota_restore(user_id):
+    """恢复单用户存储配额为当前 env 默认（10 GiB；admin:users:write）。
+
+    与设置同款权限/事务/审计；used/reserved 不动。
+    """
+    auth = _require_owner_admin_v1()
+    if auth:
+        return auth
+    if "/" in user_id:
+        return _admin_v1_error(400, "invalid_request", "user_id 非法")
+    target = user_store.get_user(user_id)
+    if target is None:
+        return _admin_v1_error(404, "user_not_found", "用户不存在")
+    if target.get("role") != user_store.ROLE_USER:
+        return _admin_v1_error(
+            400, "invalid_request",
+            "存储配额仅适用于 role=user（owner 不受存储配额限制）")
+    try:
+        row = upload_guard.restore_user_quota_default(
+            user_id,
+            actor_user_id=actor_identity().get("user_id"),
+            updated_by=current_identity().get("user_id"))
+    except Exception:
+        app.logger.exception("admin v1 storage quota 恢复默认失败")
+        return _admin_v1_error(500, "internal", "存储配额恢复默认失败")
+    return jsonify(_admin_v1_storage_quota_out(row))
+
+
+def _admin_v1_storage_quota_out(row):
+    """存储配额响应出口（字节一律 int；remaining 不会为负）。"""
+    quota = int(row["quota_bytes"])
+    used = int(row["used_bytes"])
+    reserved = int(row["reserved_bytes"])
+    return {
+        "user_id": row["user_id"],
+        "quota_applies": True,
+        "quota_bytes": quota,
+        "used_bytes": used,
+        "reserved_bytes": reserved,
+        "remaining_bytes": max(0, quota - used - reserved),
+        "default_quota_bytes": int(upload_guard.UPLOAD_USER_QUOTA_BYTES),
+        "min_quota_bytes": int(upload_guard.UPLOAD_USER_QUOTA_MIN_BYTES),
+        "max_quota_bytes": int(upload_guard.UPLOAD_USER_QUOTA_MAX_BYTES),
+    }
+
+
 @app.route("/api/admin/v1/users/<user_id>/password-reset", methods=["POST"])
 def admin_v1_users_password_reset(user_id):
     """重置普通用户密码（镜像旧 3877：owner → 409；hash 与 auth_version+1 同事务）。"""
@@ -14671,6 +14841,38 @@ _INGESTION_STAGE = {
 }
 
 
+#: 用户可见的配额超限失败码（2026-11-04）：随终态响应附带该用户的实际
+#: 配额/用量，前端可显示「存储空间已满（上限 X GB）」而不是裸机器码。
+#:   - local_quota_infeasible：摄取准入时本地配额不足（不接触 COS）；
+#:   - zip_quota_exceeded：ZIP 展开总量超过预占配额；
+#:   - upload_quota_exceeded / quota_exceeded：插件 v1 / 百度导入通道的
+#:     配额拒绝（主站前端不直接消费，映射保留防御性兜底）。
+_INGESTION_QUOTA_FAIL_CODES = frozenset({
+    "local_quota_infeasible", "zip_quota_exceeded",
+    "upload_quota_exceeded", "quota_exceeded",
+})
+
+
+def _attach_ingestion_quota(body, job):
+    """配额类终态附加 quota_bytes/used_bytes/reserved_bytes（只读不建行）。"""
+    uid = job.get("owner_user_id") or ""
+    if not uid or (job.get("owner_role") or "") != user_store.ROLE_USER:
+        return
+    if not upload_guard.quota_features_available():
+        return
+    try:
+        row = upload_guard.peek_quota_row(uid)
+    except Exception:
+        app.logger.exception("ingestion quota 读取失败：%s", uid)
+        return
+    quota = int(row["quota_bytes"]) if row \
+        else int(upload_guard.UPLOAD_USER_QUOTA_BYTES)
+    body["quota_bytes"] = quota
+    body["used_bytes"] = int(row["used_bytes"]) if row else 0
+    body["reserved_bytes"] = int(row["reserved_bytes"]) if row else 0
+    body["default_quota_bytes"] = int(upload_guard.UPLOAD_USER_QUOTA_BYTES)
+
+
 def _ingestion_state_body(job, *, queue_position=None):
     """任务状态 JSON（阶段文案映射合同 §5；不含任何秘密/签名 URL）。
 
@@ -14733,6 +14935,8 @@ def _ingestion_state_body(job, *, queue_position=None):
         body["slide_id"] = ref["slide_id"]
     if queue_position is not None:
         body["queue_position"] = queue_position
+    if job.get("fail_code") in _INGESTION_QUOTA_FAIL_CODES:
+        _attach_ingestion_quota(body, job)
     return body
 
 
@@ -16683,6 +16887,26 @@ def _plugin_error(status: int, code: str, message: str, retryable=None, details=
     resp = jsonify(error=err)
     resp.status_code = status
     return resp
+
+
+def _plugin_quota_error_details(user_id):
+    """插件 v1 配额拒绝的 details（实际配额/已用/预占；读不到返回 None）。
+
+    外部插件 UI 可据 details 显示具体上限；主站前端不消费本通道。
+    """
+    if not user_id:
+        return None
+    try:
+        row = upload_guard.peek_quota_row(str(user_id))
+    except Exception:
+        app.logger.exception("plugin quota details 读取失败：%s", user_id)
+        return None
+    if row is None:
+        return {"quota_bytes": int(upload_guard.UPLOAD_USER_QUOTA_BYTES),
+                "used_bytes": 0, "reserved_bytes": 0}
+    return {"quota_bytes": int(row["quota_bytes"]),
+            "used_bytes": int(row["used_bytes"]),
+            "reserved_bytes": int(row["reserved_bytes"])}
 
 
 def _plugin_rate_limited_response(message, retry_after, details=None):
@@ -23199,7 +23423,9 @@ def plugin_v1_imports_begin():
     except producer_import_store.ProducerImportError as exc:
         return _pi_error(exc)
     except upload_guard.QuotaExceeded:
-        return _plugin_error(413, "upload_quota_exceeded", "用户存储配额不足")
+        return _plugin_error(413, "upload_quota_exceeded", "用户存储配额不足",
+                             details=_plugin_quota_error_details(
+                                 claims.get("sub")))
     except (upload_guard.InflightLimitExceeded, upload_guard.RateLimitExceeded):
         return _plugin_error(429, "rate_limited", "在途/频次超限，请稍后重试",
                              retryable=True)
@@ -23533,7 +23759,9 @@ def plugin_v1_imports_scratch(import_id):
     except producer_import_store.ProducerImportError as exc:
         return _pi_error(exc)
     except upload_guard.QuotaExceeded:
-        return _plugin_error(413, "upload_quota_exceeded", "用户存储配额不足")
+        return _plugin_error(413, "upload_quota_exceeded", "用户存储配额不足",
+                             details=_plugin_quota_error_details(
+                                 claims.get("sub")))
     return jsonify(scratch_confirmed_bytes=int(
         imp.get("scratch_confirmed_bytes") or 0))
 
@@ -23566,7 +23794,9 @@ def plugin_v1_imports_topup(import_id):
     except producer_import_store.ProducerImportError as exc:
         return _pi_error(exc)
     except upload_guard.QuotaExceeded:
-        return _plugin_error(413, "upload_quota_exceeded", "用户存储配额不足")
+        return _plugin_error(413, "upload_quota_exceeded", "用户存储配额不足",
+                             details=_plugin_quota_error_details(
+                                 claims.get("sub")))
     return jsonify(declared_size=int(imp["declared_size"]),
                    confirmed_offset=int(imp["confirmed_offset"]))
 

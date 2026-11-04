@@ -360,6 +360,9 @@ def test_schema_migrations_recorded(conn):
         # audit_events / upload_tasks / ingestion_jobs / ai_usage_events
         # 集合式回填（GREATEST，全空保持 NULL，可重跑）。
         "0089_user_last_active.sql",
+        # 普通用户默认存储配额 20 GiB → 10 GiB（仅收敛仍等于旧默认
+        # 21474836480 的 upload_user_quotas 行；自定义值/已用量不动）。
+        "0090_upload_user_quota_10g.sql",
     ]
 
 

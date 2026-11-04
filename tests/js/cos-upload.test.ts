@@ -834,6 +834,31 @@ describe("刷新恢复：只读进度行与终态清理", () => {
 		}
 	});
 
+	// 2026-11-04：配额终态 toast 用服务端附带 quota_bytes 显示实际上限；
+	// 行阶段显示短句「存储空间已满」（不是整段说明）。
+	it("恢复行配额终态：toast 带实际上限，行阶段为短句", async () => {
+		vi.useFakeTimers();
+		const fetchImpl = vi.fn((url: string) => {
+			if (url === "/api/ingestions/inj_q") {
+				return Promise.resolve(resp({
+					stage: "terminal", fail_code: "local_quota_infeasible",
+					quota_bytes: 10 * 1024 ** 3,
+				}));
+			}
+			return Promise.resolve(resp({}));
+		}) as unknown as typeof fetch;
+		const h = loadApp(fetchImpl, { mode: "official", capabilities: { cos_upload: cosCaps() } });
+		h.storage.setItem("pt.cos.jobs", JSON.stringify([
+			{ job_id: "inj_q", filename: "a.svs", size: 30, confirmed: [] },
+		]));
+		h.up.restoreCosJobs();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(h.toastMessages.some((m) => m.includes("upload.cos.err.quota:10 GB")))
+			.toBe(true);
+		const row = h.container.appendChildren[0];
+		expect(String(row.children[2].textContent)).toContain("存储空间已满");
+	});
+
 	// 未知码保留机器码原文（不猜测语义，排障不丢信息）
 	it("恢复行终态未知 fail_code：回落到通用「上传失败」并保留机器码", async () => {
 		vi.useFakeTimers();
@@ -930,6 +955,9 @@ describe("i18n：upload.cos.* 键（zh/en）与 stage 映射", () => {
 		"upload.cos.err.client_gone", "upload.cos.err.client_idle_timeout",
 		"upload.cos.err.validation", "upload.cos.err.raster_mismatch",
 		"upload.cos.err.magic",
+		// 存储配额超限（2026-11-04）：带实际上限 / 不带数字的通用版本
+		"upload.cos.stage.quota_full", "upload.cos.err.quota",
+		"upload.cos.err.quota.generic",
 	];
 
 	function loadI18n() {
@@ -969,8 +997,17 @@ describe("i18n：upload.cos.* 键（zh/en）与 stage 映射", () => {
 		}
 		i18n.setLang("zh");
 		expect(i18n.t("upload.cos.queue", { n: 3 })).toBe("第 3 位");
+		// 2026-11-04：存储配额文案（上限数值来自该用户实际配额）
+		expect(i18n.t("upload.cos.err.quota", { quota: "10 GB" }))
+			.toBe("存储空间已满（上限 10 GB）。如需更多容量，请联系管理员。");
+		expect(i18n.t("upload.cos.err.quota.generic"))
+			.toBe("存储空间已满。如需更多容量，请联系管理员。");
 		i18n.setLang("en");
 		expect(i18n.t("upload.cos.queue", { n: 3 })).toBe("position 3");
+		expect(i18n.t("upload.cos.err.quota", { quota: "10 GB" }))
+			.toBe("Storage is full (limit 10 GB). Contact an administrator if you need more space.");
+		expect(i18n.t("upload.cos.err.quota.generic"))
+			.toBe("Storage is full. Contact an administrator if you need more space.");
 	});
 
 	it("app.js：stage → 文案键映射；_EXTRA_I18N 兜底表同步全部键", () => {
@@ -1011,6 +1048,32 @@ describe("upload-liveness：终态机器码 → 可读文案", () => {
 			fail_detail: "not-in-whitelist" }))
 			.toBe("文件校验失败：内容不是有效的切片文件");
 		expect(msg(0, { code: "some_unknown_code" })).toBe("some_unknown_code");
+	});
+});
+
+describe("存储配额超限：实际上限文案（2026-11-04）", () => {
+	it("三类配额码 → 带实际上限；缺数值 → 不带数字的通用文案", () => {
+		const h = loadApp();
+		const up = h.up as unknown as {
+			cosErrorMessage: (s: number, d: unknown) => string;
+			storageGbText: (b: unknown) => string | null;
+		};
+		const expectedKey = "upload.cos.err.quota";
+		for (const code of ["local_quota_infeasible", "zip_quota_exceeded",
+			"upload_quota_exceeded", "quota_exceeded"]) {
+			// harness 的 HP_I18N 将带参文案渲染为 key:value——断言走对键且
+			// 上限按实际字节格式化为 10 GB；真实中英文文案由下方 i18n 断言。
+			expect(up.cosErrorMessage(0, { code, quota_bytes: 10 * 1024 ** 3 }),
+				code).toBe(expectedKey + ":10 GB");
+			expect(up.cosErrorMessage(0, { code }), code + " (no number)")
+				.toBe("存储空间已满。如需更多容量，请联系管理员。");
+		}
+		// 自定义上限 / 用量一位小数
+		expect(up.storageGbText(3 * 1024 ** 3)).toBe("3 GB");
+		expect(up.storageGbText(Math.round(1.5 * 1024 ** 3))).toBe("1.5 GB");
+		expect(up.storageGbText(null)).toBeNull();
+		// 终态行阶段文案为短句（不是整段错误说明）
+		expect(h.up.cosStageKey("uploading")).toBe("upload.cos.stage.uploading");
 	});
 });
 

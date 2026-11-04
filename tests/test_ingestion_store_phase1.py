@@ -143,6 +143,20 @@ def test_pool_quota_infeasible_terminates_job():
     assert cos_pool_store.get_pool_state()["reserved_bytes"] == 0
 
 
+def test_local_quota_infeasible_state_body_carries_actual_quota():
+    """2026-11-04：配额终态带上该用户实际配额/用量，前端显示具体上限。"""
+    import app as app_mod
+    _mk_user("u1", quota=400_000)
+    job = _mkjob(owner="u1", role="user", size=500_000, key="Q2")
+    out = _admit(job["job_id"])
+    assert out["outcome"] == "terminal"
+    body = app_mod._ingestion_state_body(out["job"])
+    assert body["fail_code"] == "local_quota_infeasible"
+    assert body["quota_bytes"] == 400_000
+    assert body["used_bytes"] == 0
+    assert body["reserved_bytes"] == 0
+
+
 def test_concurrent_admissions_cannot_exceed_admission_limit():
     """Phase 1 完成定义：并发事务不可能让 reserved 超过 900_000。"""
     jobs = [_mkjob(owner="o%d" % i, size=500_000, key="C%d" % i)

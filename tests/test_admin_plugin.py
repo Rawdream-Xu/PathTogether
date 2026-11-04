@@ -984,7 +984,11 @@ def test_admin_manifest_plugin_version_bumped_with_hashes():
     #（last_active_at，排序 last_active_desc；台账 value 旧值仅服务端兼容），
     # 详情抽屉仍显示「最近登录」；0.4.19 bundle 已在 homePC 以不可变版本目录
     # 暂存，必须换新版本号。hashes/pin 同步。
-    assert data["pluginVersion"] == "0.4.20"  # hashes/pin 同步
+    # 2026-11-04 0.4.21（普通用户存储配额 10 GiB + 管理员单独调整）：用户
+    # 详情抽屉新增「存储容量」查看/修改区（admin.users.storageQuota.get/
+    # set/restoreDefault，读 users:read、写 users:write，不扩权限域），
+    # hashes/pin 同步。
+    assert data["pluginVersion"] == "0.4.21"  # hashes/pin 同步
     assert "admin:settings:read" in data["adminPermissions"]
     assert "admin:settings:write" in data["adminPermissions"]
     assert "admin:slides:read" in data["adminPermissions"]

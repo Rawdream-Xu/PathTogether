@@ -162,6 +162,8 @@ interface PluginClient {
 	fmtNano: (v: unknown) => string;
 	fmtCny: (v: unknown) => string;
 	fmtTs: (epoch: unknown) => string;
+	gbToBytes: (text: unknown) => number | null;
+	bytesToGbText: (bytes: unknown) => string;
 	handshakeState: () => { ready: boolean; grantedCount: number };
 }
 
@@ -4320,4 +4322,39 @@ describe("2026-10-21 费用面板与原始调用分页（release review）", () 
 		expect(payload.model).toBe("wanted-model");   // 第 2 页不丢模型筛选
 		expect(payload.status).toBe("unpriced");      // 第 2 页不丢状态筛选
 	}, 10000);
+});
+
+describe("storage quota UI (2026-11-04)", () => {
+	it("GB ↔ byte conversion is exact and bounded (0–1024 GB)", () => {
+		const { client } = loadPluginUi("");
+		expect(client).toBeTruthy();
+		expect(client!.gbToBytes("10")).toBe(10 * 1024 ** 3);
+		expect(client!.gbToBytes("1.5")).toBe(1.5 * 1024 ** 3);
+		expect(client!.gbToBytes("0.1")).toBe(Math.round(0.1 * 1024 ** 3));
+		expect(client!.gbToBytes("0")).toBe(0);
+		expect(client!.gbToBytes("1024")).toBe(1024 ** 4);
+		// 非法形状 / 越界 → null（不发请求）
+		expect(client!.gbToBytes("")).toBeNull();
+		expect(client!.gbToBytes("abc")).toBeNull();
+		expect(client!.gbToBytes("-1")).toBeNull();
+		expect(client!.gbToBytes("1.234")).toBeNull();
+		expect(client!.gbToBytes("1024.01")).toBeNull();
+		expect(client!.bytesToGbText(10 * 1024 ** 3)).toBe("10 GB");
+		expect(client!.bytesToGbText(1.5 * 1024 ** 3)).toBe("1.5 GB");
+		expect(client!.bytesToGbText(null)).toBe("—");
+	});
+
+	it("user drawer renders storage editor only for role=user; bridge payload uses bytes", () => {
+		// 源码级锁定入口与调用：普通用户抽屉追加 renderStorageQuotaEditor，
+		// owner 不渲染；三个桥方法名与字节入参。
+		expect(src).toContain("function renderStorageQuotaEditor(u)");
+		expect(src).toContain('if (u.role === "user")');
+		expect(src).toContain("renderStorageQuotaEditor(u)");
+		expect(src).toContain('request("admin.users.storageQuota.get"');
+		expect(src).toContain('request("admin.users.storageQuota.set"');
+		expect(src).toContain('request("admin.users.storageQuota.restoreDefault"');
+		expect(src).toContain("quota_bytes: bytes");
+		// 不再有月额度覆盖等退役入口
+		expect(src).not.toContain("setSpendOverride");
+	});
 });

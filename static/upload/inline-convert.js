@@ -166,6 +166,12 @@
     // 新建 ingestion——行停可重试的失败态，重试会重新读记录复核归属。
     if (code === "owner_read_failed") return "upload.inline.err.ownerRead";
     if (code === "upload_too_large") return "upload.cos.err.too_large";
+    // 存储配额超限（2026-11-04）：面板只拿得到机器码，走不带数字的通用文案
+    // （工作台普通上传分支由 app.js cosErrorMessage 用实际 quota_bytes 渲染）。
+    if (code === "local_quota_infeasible" || code === "zip_quota_exceeded" ||
+        code === "upload_quota_exceeded" || code === "quota_exceeded") {
+      return "upload.cos.err.quota.generic";
+    }
     if (code === "cos_pool_below_product_limit") return "upload.cos.err.pool_config";
     if (code === "validation_failed") {
       return detail === "raster_format_mismatch"

@@ -165,6 +165,12 @@
     // 替代已删除的 users.setSpendOverride（月额度覆盖语义）。
     "admin.spend.userTotalLimit.set": "admin:users:write",
     "admin.spend.userTotalLimit.restoreDefault": "admin:users:write",
+    // 2026-11-04：单用户存储容量（配额）读/写。读复用 users:read；设置与
+    // 恢复默认复用 users:write（服务端 owner + CSRF 复核，桥层门只是纵深
+    // 防御）。额度语义为字节绝对值，改配额不清零已用/预占。
+    "admin.users.storageQuota.get": "admin:users:read",
+    "admin.users.storageQuota.set": "admin:users:write",
+    "admin.users.storageQuota.restoreDefault": "admin:users:write",
     // PR5 修订（UI parity 恢复旧侧栏功能面）：身份预览（§10.2 用户行操作）
     // 走 admin:users:write（服务端 /api/admin/preview/start 是写 session 的
     // owner-only 操作）；插件管理（列表/健康/启停/凭证轮换）用独立的
@@ -454,6 +460,25 @@
         expected_version: { type: "integer", min: 1 },
       },
       required: ["user_id", "expected_version"],
+      additionalProperties: false,
+    },
+    // 2026-11-04：单用户存储容量（字节；服务端硬边界 0..1 TiB 二次校验）。
+    "admin.users.storageQuota.get": {
+      properties: { user_id: _userIdSpec },
+      required: ["user_id"],
+      additionalProperties: false,
+    },
+    "admin.users.storageQuota.set": {
+      properties: {
+        user_id: _userIdSpec,
+        quota_bytes: { type: "integer", min: 0, max: 1099511627776 },
+      },
+      required: ["user_id", "quota_bytes"],
+      additionalProperties: false,
+    },
+    "admin.users.storageQuota.restoreDefault": {
+      properties: { user_id: _userIdSpec },
+      required: ["user_id"],
       additionalProperties: false,
     },
 
@@ -1281,6 +1306,30 @@
       return jsonWrite(url, "POST", {
         expected_version: payload.expected_version,
       })(ctx);
+    },
+
+    // ---- 2026-11-04：单用户存储容量（配额）----
+    // get：GET .../storage-quota（只读，行不存在时服务端按默认惰性建行）；
+    // set：PUT 同路径 body {quota_bytes}（字节绝对值，不清零已用/预占）；
+    // restoreDefault：POST .../storage-quota/restore-default（当前 env 默认）。
+    "admin.users.storageQuota.get": function (ctx, payload) {
+      var url = "/api/admin/v1/users/" +
+          pathId(payload.user_id, "user_id") + "/storage-quota";
+      return jsonGet(url)(ctx);
+    },
+
+    "admin.users.storageQuota.set": function (ctx, payload) {
+      var url = "/api/admin/v1/users/" +
+          pathId(payload.user_id, "user_id") + "/storage-quota";
+      return jsonWrite(url, "PUT", {
+        quota_bytes: payload.quota_bytes,
+      })(ctx);
+    },
+
+    "admin.users.storageQuota.restoreDefault": function (ctx, payload) {
+      var url = "/api/admin/v1/users/" +
+          pathId(payload.user_id, "user_id") + "/storage-quota/restore-default";
+      return jsonWrite(url, "POST", {})(ctx);
     },
 
     // ---- 2026-09-14（W2）：格式支持申请工单（format-requests）----

@@ -530,6 +530,11 @@
       "acct.balance.reason.db": "数据库暂不可用",
       "acct.balance.reason.auth": "登录状态已失效",
       "acct.balance.reason.http": "服务返回 {status}",
+      // 存储用量（2026-11-04）：账户弹层一行「存储：已用 x.x GB / 10 GB」。
+      "acct.storage.title": "存储",
+      "acct.storage.usage": "存储：已用 {used} / {quota}",
+      "acct.storage.loading": "存储用量加载中…",
+      "acct.storage.unavailable": "存储用量暂不可用",
       "acct.balance.reason.network": "网络异常",
 
       // ---- 插件管理（owner；Stage 4-3） ----
@@ -1215,6 +1220,11 @@
       "upload.cos.err.validation": "文件校验失败：内容不是有效的切片文件",
       "upload.cos.err.raster_mismatch": "文件内容与扩展名不符（例如 PNG/WebP 被存成了 .jpg）：请用正确格式重新保存或改名后再上传",
       "upload.cos.err.magic": "文件内容与扩展名不符（检测到 {type}）：请用正确格式重新保存后再上传",
+      // 存储配额超限（2026-11-04）：上限数值取该用户实际配额；拿不到数值时
+      // 使用不带数字的通用版本（login.forgot 同款「联系管理员」措辞）。
+      "upload.cos.stage.quota_full": "存储空间已满",
+      "upload.cos.err.quota": "存储空间已满（上限 {quota}）。如需更多容量，请联系管理员。",
+      "upload.cos.err.quota.generic": "存储空间已满。如需更多容量，请联系管理员。",
       // ---- 上传面板内转换（设计 docs/upload-inline-convert-design-20261015.md）----
       "upload.inline.stage.queued": "正在准备上传文件",
       "upload.step.prepare": "正在准备上传文件",
@@ -2402,6 +2412,11 @@
       "acct.balance.reason.db": "database unavailable",
       "acct.balance.reason.auth": "session expired",
       "acct.balance.reason.http": "service returned {status}",
+      // Storage usage (2026-11-04): one line in the account popover.
+      "acct.storage.title": "Storage",
+      "acct.storage.usage": "Storage: {used} / {quota} used",
+      "acct.storage.loading": "Loading storage usage…",
+      "acct.storage.unavailable": "Storage usage unavailable",
       "acct.balance.reason.network": "network error",
 
       // ---- 插件管理（owner；Stage 4-3） ----
@@ -3091,6 +3106,11 @@
       "upload.cos.err.validation": "Validation failed: the content is not a valid slide file",
       "upload.cos.err.raster_mismatch": "File content does not match its extension (e.g. a PNG/WebP saved as .jpg); re-save or rename it correctly and upload again",
       "upload.cos.err.magic": "File content does not match its extension (detected {type}); re-save it in the correct format and upload again",
+      // Storage quota exceeded (2026-11-04): {quota} is the user's actual
+      // quota; the generic variant is used when the number is unavailable.
+      "upload.cos.stage.quota_full": "Storage full",
+      "upload.cos.err.quota": "Storage is full (limit {quota}). Contact an administrator if you need more space.",
+      "upload.cos.err.quota.generic": "Storage is full. Contact an administrator if you need more space.",
       // ---- In-panel conversion on the workbench upload panel ----
       "upload.inline.stage.queued": "Preparing upload",
       "upload.step.prepare": "Preparing upload",

@@ -79,6 +79,11 @@
     "upload.cos.sent_all": { zh: "数据已发送，等待确认", en: "All data sent, awaiting confirmation" },
     "upload.cos.retrying": { zh: "正在重试", en: "Retrying" },
     "upload.cos.err.plan": { zh: "上传计划与文件大小不一致，已停止；请重新上传", en: "Upload plan does not match the file size; stopped — please re-upload" },
+    // 存储配额超限（2026-11-04；i18n.js 为主源，此处兜底）：{quota} 取该
+    // 用户实际配额；拿不到数值走 generic（不带数字）。
+    "upload.cos.stage.quota_full": { zh: "存储空间已满", en: "Storage full" },
+    "upload.cos.err.quota": { zh: "存储空间已满（上限 {quota}）。如需更多容量，请联系管理员。", en: "Storage is full (limit {quota}). Contact an administrator if you need more space." },
+    "upload.cos.err.quota.generic": { zh: "存储空间已满。如需更多容量，请联系管理员。", en: "Storage is full. Contact an administrator if you need more space." },
     // 2026-10-20 用户决定：独立转换器只做本地转换与保存；工作台上传不再
     // 跳转/弹窗交接——需要转换的文件在面板不可用时行内说明 + 重试/支持。
     "upload.kfb.unavailable": { zh: "该文件需要先转换后上传：本机转换暂不可用，可重试或申请支持该格式", en: "This file must be converted before upload: local conversion is unavailable right now — retry or request format support" },
@@ -1740,6 +1745,7 @@
     acctPopScope: $("acct-pop-scope"),
     acctPopRemaining: $("acct-pop-remaining"),
     acctPopDetail: $("acct-pop-detail"),
+    acctPopStorage: $("acct-pop-storage"),
     acctSettingsBtn: $("acct-settings-btn"),
   };
 
@@ -10876,8 +10882,35 @@
                err.data.error === "account_mismatch"));
   }
 
+  /// 存储容量文本（2026-11-04）：字节 → 「10 GB」「1.5 GB」（一位小数）。
+  /// 配额与用量都按 1024^3 计（与后端字节口径一致）；非法/缺失返回 null，
+  /// 调用方走不带数字的通用文案。
+  function storageGbText(bytes) {
+    if (bytes === null || bytes === undefined || bytes === "") return null;
+    var n = Number(bytes);
+    if (!isFinite(n) || n < 0) return null;
+    var gib = 1024 * 1024 * 1024;
+    var tenths = Math.round(n * 10 / gib);
+    return (tenths % 10 === 0 ? String(tenths / 10)
+                              : (tenths / 10).toFixed(1)) + " GB";
+  }
+
+  // 所有能到达用户的存储配额超限码（主站 COS 通道 + 插件 v1/百度导入的
+  // 防御性兜底；服务端在终态响应中附带实际 quota_bytes）。
+  var COS_QUOTA_CODES = {
+    local_quota_infeasible: 1,
+    zip_quota_exceeded: 1,
+    upload_quota_exceeded: 1,
+    quota_exceeded: 1,
+  };
+
   function cosErrorMessage(status, data) {
     var code = (data && (data.code || data.error)) || "";
+    if (COS_QUOTA_CODES[code]) {
+      var quota = storageGbText(data && data.quota_bytes);
+      return quota ? tt("upload.cos.err.quota", { quota: quota })
+                   : tt("upload.cos.err.quota.generic");
+    }
     if (code === "upload_too_large") return tt("upload.cos.err.too_large");
     // 跨账号核对拒绝（P1 cross-account）：任务未创建，明确指出登录身份变化
     if (code === "account_mismatch") {
@@ -10922,6 +10955,7 @@
   // 存在——刷新恢复恰是「用户离开后重新进来」的事故场景，正是最需要它）。
   // 未知码返回 null（调用方保留原码或通用文案，不猜测语义）。
   function cosFailStageKey(code, detail) {
+    if (COS_QUOTA_CODES[code]) return "upload.cos.stage.quota_full";
     if (code === "client_gone") return "upload.cos.err.client_gone";
     if (code === "client_idle_timeout") return "upload.cos.err.client_idle_timeout";
     if (code === "validation_failed") {
@@ -11259,6 +11293,8 @@
           msg = cosErrorMessage(0, {
             code: (err.data && err.data.fail_code) || "",
             fail_detail: err.data && err.data.fail_detail,
+            // 2026-11-04：配额类终态带实际上限（服务端已附 quota_bytes）
+            quota_bytes: err.data && err.data.quota_bytes,
           });
         } else if (err && err.network) {
           // 网络层失败：任务与已确认分块保留，重选同名文件可续传（§5）
@@ -11395,6 +11431,8 @@
             // 行移除，原因不能只留在行里。
             var failMsg = cosErrorMessage(0, {
               code: b.fail_code || "", fail_detail: b.fail_detail,
+              // 2026-11-04：刷新恢复的配额终态同样显示实际上限
+              quota_bytes: b.quota_bytes,
             });
             r1.setStage(cosFailStageKey(b.fail_code, b.fail_detail) ||
                         "upload.stage.failed");
@@ -12460,6 +12498,8 @@
     cosStageKey: cosStageKey,
     // upload-liveness：稳定机器码/fail_detail → 可读文案（测试驱动面）
     cosErrorMessage: cosErrorMessage,
+    // 存储配额：字节 → GB 文本（测试驱动面）
+    storageGbText: storageGbText,
     initCosUploadUi: initCosUploadUi,
     restoreCosJobs: restoreCosJobs,
     // R1 一键转换并上传（工作台入口的驱动面）；转换器交接已移除（2026-10-20）
@@ -14258,6 +14298,36 @@
     }
   }
 
+  // 存储用量（2026-11-04）：与余额同一 popover 打开时拉取；只读自助接口
+  // （/api/account/storage，不接受 user_id）。owner / 非 user → 隐藏此行。
+  function loadAccountStorage() {
+    var el = els.acctPopStorage;
+    if (!el) return;
+    el.hidden = false;
+    el.textContent = t("acct.storage.loading");
+    apiFetch("/api/account/storage").then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (body) {
+        return { status: r.status, body: body };
+      });
+    }).then(function (res) {
+      var data = res.body || {};
+      if (res.status !== 200 || !data.quota_applies) {
+        el.hidden = true;
+        el.textContent = "";
+        return;
+      }
+      var used = storageGbText(data.used_bytes);
+      var quota = storageGbText(data.quota_bytes);
+      if (used === null || quota === null) {
+        el.textContent = t("acct.storage.unavailable");
+        return;
+      }
+      el.textContent = t("acct.storage.usage", { used: used, quota: quota });
+    }).catch(function () {
+      el.textContent = t("acct.storage.unavailable");
+    });
+  }
+
   function loadAccountBalance() {
     if (els.acctPopRemaining) els.acctPopRemaining.textContent = t("acct.balance.loading");
     if (els.acctPopDetail) els.acctPopDetail.textContent = "";
@@ -14298,7 +14368,7 @@
 
   function initToolbarPops() {
     acctPopCtl = bindToolbarPop(els.acctBtn, els.acctPop, {
-      onOpen: function () { loadAccountBalance(); },
+      onOpen: function () { loadAccountBalance(); loadAccountStorage(); },
     });
     // 顶栏搜索浮层（§5.4）：打开时创建输入框并聚焦；Esc/外点关闭后焦点还按钮
     searchPopCtl = bindToolbarPop(els.tbSearchBtn, els.tbSearchPop, {
