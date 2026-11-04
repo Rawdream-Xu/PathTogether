@@ -356,6 +356,18 @@ class SettlePayloadRequiredError(BillingError):
     code = "settle_payload_required"
 
 
+class BillingCreditWalletError(BillingError):
+    """legacy 账务写入口拒绝已迁移 credits 的账户（spec §5.5）。
+
+    账户切到 ``billing_backend='credits'`` 后，legacy 余额/总额度口径不再
+    维护：人工调账、caps 更新与直写 ledger 一律拒绝（409 稳定码
+    ``credit_wallet_migrated``），调用方改走 Credit 管理入口。
+    """
+
+    code = "credit_wallet_migrated"
+    http_status = 409
+
+
 def _spend():
     """惰性 import spend_store（其顶层 import billing_store，避免环）。
 
@@ -364,6 +376,12 @@ def _spend():
     """
     import spend_store
     return spend_store
+
+
+def _credit():
+    """惰性 import credit_store（credit_store 顶层 import 本模块，避免环）。"""
+    import credit_store
+    return credit_store
 
 
 def _spend_target_for(subject_type) -> str:
@@ -916,8 +934,8 @@ def _apply_simulated_usage_debit(cur, event, *, subject_type, user_id, status,
         cur.execute(
             "INSERT INTO billing_ledger_entries "
             "(entry_id, account_id, event_id, kind, amount_nano_cny, "
-            " idempotency_key, reason, actor_user_id, metadata) "
-            "VALUES (%s,%s,%s,'usage_debit',%s,%s,%s,NULL,%s) "
+            " idempotency_key, reason, actor_user_id, metadata, ledger_scope) "
+            "VALUES (%s,%s,%s,'usage_debit',%s,%s,%s,NULL,%s,'legacy') "
             "ON CONFLICT (idempotency_key) DO NOTHING "
             "RETURNING entry_id, amount_nano_cny",
             (entry_id, acct["account_id"], event_id, -int(charge),
@@ -1007,8 +1025,8 @@ def _apply_real_usage_debit_tx(cur, event, *, subject_type, user_id, status,
     cur.execute(
         "INSERT INTO billing_ledger_entries "
         "(entry_id, account_id, event_id, kind, amount_nano_cny, "
-        " idempotency_key, reason, actor_user_id, metadata) "
-        "VALUES (%s,%s,%s,'usage_debit',%s,%s,%s,NULL,%s) "
+        " idempotency_key, reason, actor_user_id, metadata, ledger_scope) "
+        "VALUES (%s,%s,%s,'usage_debit',%s,%s,%s,NULL,%s,'legacy') "
         "ON CONFLICT (idempotency_key) DO NOTHING "
         "RETURNING entry_id, amount_nano_cny",
         (entry_id, acct["account_id"], event_id, -int(charge),
@@ -1073,6 +1091,14 @@ def _project_window_spent_tx(cur, *, subject_type, subject_id, occurred,
                 _LOG.warning("[billing-window] 总额度行缺失，spent 投影跳过"
                              " subject_id=%s", subject_id)
                 return None
+            if _credit_total_allowance_frozen(cur, arow["allowance_id"]):
+                # 用户已迁移 credits：总额度被 0088 触发器冻结（spec §5.4
+                # legacy 守卫），跳过更新并记指标，不阻断计量。
+                _hold_metric(
+                    "legacy_allowance_update_skipped_credit_wallet_total",
+                    allowance_id=arow["allowance_id"],
+                    reason="window_projection")
+                return None
             return spend.total_allowance_add_spent_tx(
                 cur, arow["allowance_id"], int(charge))
         window = spend._get_or_create_window_tx(
@@ -1085,8 +1111,281 @@ def _project_window_spent_tx(cur, *, subject_type, subject_id, occurred,
         return None
 
 
+#: 待核对原因（spec §5.4）
+RECONCILIATION_INSUFFICIENT_BALANCE = "insufficient_balance"
+RECONCILIATION_USAGE_AFTER_RELEASE = "usage_after_release"
+#: 无 hold（没有调用前授权）但 priced/有用量证据：保留成本证据，不扣钱包
+#: （原方案 §6.3：只有授权成功的调用才走已授权结算；P1-3）。
+RECONCILIATION_MISSING_AUTHORIZATION = "missing_authorization"
+#: 已迁移账户、无可信服务端运行证据且客户端 occurred_at 早于迁移边界：
+#: 不能只按客户端时间归 legacy，也不能按新 Credit 消费扣费（原方案 §9.2）。
+RECONCILIATION_MIGRATION_BOUNDARY_UNVERIFIED = "migration_boundary_unverified"
+#: 无 hold 事件的观测指标名（reason 区分两类待办与无证据 unpriced）。
+CREDIT_USAGE_WITHOUT_HOLD_METRIC = "credit_usage_without_hold_total"
+RESOLUTION_LATE_USAGE_SETTLED = "late_usage_settled"
+RESOLUTION_CLIENT_RELEASE_AFTER_EXPIRY = "client_release_after_expiry"
+
+
+def _input_has_usage_evidence(event):
+    """输入事件五字段任一非空（spec §5.4「有用量证据」）。"""
+    return any(event.get(key) is not None for key in TOKEN_FIELDS)
+
+
+def _row_has_usage_evidence(row):
+    """已入库事件五字段任一非空；算术不符时 token 列被置 NULL，改查
+    ``raw_usage.reported_tokens_v1``（原始上报值仍在）。"""
+    if any(row.get(key) is not None for key in TOKEN_FIELDS):
+        return True
+    raw = row.get("raw_usage") or {}
+    if isinstance(raw, dict):
+        reported = raw.get("reported_tokens_v1")
+        if isinstance(reported, dict):
+            return any(reported.get(key) is not None for key in TOKEN_FIELDS)
+    return False
+
+
+def _fetch_hold_locked(cur, hold_id):
+    cur.execute("SELECT " + _HOLD_SEL +
+                " FROM billing_holds WHERE hold_id=%s FOR UPDATE", (hold_id,))
+    return cur.fetchone()
+
+
+def _create_synthetic_credit_hold_tx(cur, acct, event, *, installation_id,
+                                     now, reason, charge=None):
+    """无 hold 的 Credit 事件补建**待核对**占位 hold（spec §5.4；P1-3）。
+
+    旧客户端 / 关闭 hold 的客户端只投 usage-events，或调用前授权失败：事件
+    priced 或带用量证据时必须保留成本证据，但**不得**在事后扣可用余额——
+    没有调用前授权的事件不是「原已授权调用」（原方案 §6.3）。因此这里直接
+    以 ``pending_reconciliation`` 插入零预占 hold：不分配批次、不改账户余额/
+    预占/批次，由管理员经 ``credit_store.resolve_pending_hold`` 处置。
+
+    ``reason`` 为 :data:`RECONCILIATION_MISSING_AUTHORIZATION` 或
+    :data:`RECONCILIATION_MIGRATION_BOUNDARY_UNVERIFIED`；``charge`` 仅
+    priced 事件有值（记入 ``actual_nano_cny`` 供核对，不产生扣费）。
+    """
+    hold_id = _HOLD_ID_PREFIX + secrets.token_hex(12)
+    metadata = {"synthetic": True, "request_hash": None,
+                "provider": event["provider"],
+                "missing_authorization": True}
+    mode = _spend()._enforcement_mode_tx(cur)
+    cur.execute(
+        "INSERT INTO billing_holds "
+        "(hold_id, call_id, account_id, subject_type, subject_id, "
+        " installation_id, session_id, model, estimated_nano_cny, "
+        " balance_nano_cny, would_deny, status, expires_at, metadata, "
+        " reserved_nano_cny, enforcement_mode, denial_reason, "
+        " billing_backend, reconciliation_reason, reconciliation_at, "
+        " event_id, actual_nano_cny) "
+        "VALUES (%s,%s,%s,'user',%s,%s,%s,%s,NULL,NULL,false,"
+        "'pending_reconciliation',%s,%s,0,%s,NULL,'credits',%s,%s,%s,%s) "
+        "RETURNING " + _HOLD_SEL,
+        (hold_id, event["call_id"], acct["account_id"], event["subject_id"],
+         installation_id, event["session_id"], event["model"], now,
+         psycopg.types.json.Jsonb(metadata), mode, reason, now,
+         event["event_id"],
+         int(charge) if charge is not None else None))
+    hold = _hold_out(cur.fetchone())
+    _credit_hold_settle_audit_tx(
+        cur, hold, settlement="pending_reconciliation", now=now,
+        installation_id=installation_id)
+    _hold_metric(CREDIT_USAGE_WITHOUT_HOLD_METRIC, reason=reason,
+                 call_id_suffix=hold["call_id"][-8:],
+                 has_usage_evidence=_row_or_input_has_usage_evidence(event),
+                 billing_backend="credits")
+    return hold
+
+
+def _row_or_input_has_usage_evidence(event):
+    """事件 dict（输入或已入库行）是否带用量证据（两种形态统一判定）。"""
+    if "status" in event or "raw_usage" in event:
+        return _row_has_usage_evidence(event)
+    return _input_has_usage_evidence(event)
+
+
+def _credit_hold_settle_audit_tx(cur, hold, *, settlement, now,
+                                 installation_id):
+    """Credits hold 结算/终局 audit（spec §5.4「hold 结果写回」）。"""
+    share_store_pg.record_audit_tx(
+        cur, HOLD_SETTLE_AUDIT_ACTION,
+        actor_user_id=None, actor_role="plugin",
+        target_type="billing_hold", target_id=hold["hold_id"],
+        detail={"call_id_suffix": hold["call_id"][-8:],
+                "status": hold["status"],
+                "event_id": hold.get("event_id"),
+                "billing_backend": "credits",
+                "credit_settlement": settlement,
+                "actual_nano_cny": hold.get("actual_nano_cny"),
+                "credit_shortfall_units": hold.get("credit_shortfall_units"),
+                "reconciliation_reason": hold.get("reconciliation_reason"),
+                "installation_id": installation_id},
+        ts=now.timestamp())
+
+
+def _finalize_credit_hold_settled_tx(cur, hold, *, event_id, charge_units,
+                                     now):
+    """hold → settled（pending(无事件) 的迟到合法用量记 late_usage_settled）。"""
+    was_pending = hold["status"] == "pending_reconciliation"
+    cur.execute(
+        "UPDATE billing_holds SET status='settled', event_id=%s, "
+        "settled_at=%s, actual_nano_cny=%s, "
+        "resolution=CASE WHEN %s THEN %s ELSE resolution END, "
+        "resolved_at=CASE WHEN %s THEN %s ELSE resolved_at END "
+        "WHERE hold_id=%s AND status IN ('open','pending_reconciliation') "
+        "RETURNING " + _HOLD_SEL,
+        (event_id, now, int(charge_units), was_pending,
+         RESOLUTION_LATE_USAGE_SETTLED, was_pending, now, hold["hold_id"]))
+    row = cur.fetchone()
+    if row is None:
+        raise HoldNotOpenError("hold 已被并发终局化", hold_id=hold["hold_id"])
+    return _hold_out(row)
+
+
+def _mark_credit_hold_pending_tx(cur, hold, *, event_id, reason, now,
+                                 shortfall_units=None, actual_nano_cny=None):
+    """hold → pending_reconciliation（保留预占；spec §5.4）。"""
+    cur.execute(
+        "UPDATE billing_holds SET status='pending_reconciliation', "
+        "reconciliation_reason=%s, reconciliation_at=%s, event_id=%s, "
+        "credit_shortfall_units=%s, actual_nano_cny=%s "
+        "WHERE hold_id=%s AND status IN ('open','pending_reconciliation') "
+        "RETURNING " + _HOLD_SEL,
+        (reason, now, event_id, shortfall_units, actual_nano_cny,
+         hold["hold_id"]))
+    row = cur.fetchone()
+    if row is None:
+        raise HoldNotOpenError("hold 已被并发终局化", hold_id=hold["hold_id"])
+    return _hold_out(row)
+
+
+def _apply_credit_hold_settlement_tx(cur, *, acct, hold, event_id, status,
+                                     charge, unpriced_reason,
+                                     has_usage_evidence, source, now):
+    """把一条用量/结算事件的资金结果落到 Credit hold（spec §5.4）。
+
+    ``source`` = ``"usage"``（/usage-events）或 ``"settle"``（held settle）。
+    返回 ``(settlement, updated_hold)``：settlement ∈
+    ``settled|pending_reconciliation|released|None``；``updated_hold`` 为
+    被修改后的 hold 行（无副作用时 None）。
+    """
+    credit = _credit()
+    hold_status = hold["status"]
+
+    if hold_status == "released":
+        # release 后迟到用量：不扣费，只留非阻塞待办标记。
+        cur.execute(
+            "UPDATE billing_holds SET reconciliation_reason=%s, "
+            "reconciliation_at=%s WHERE hold_id=%s AND status='released' "
+            "RETURNING " + _HOLD_SEL,
+            (RECONCILIATION_USAGE_AFTER_RELEASE, now, hold["hold_id"]))
+        return "released", _hold_out(cur.fetchone())
+
+    if hold_status == "settled" or hold.get("event_id"):
+        # 已终局（或 pending 已绑定事件，settle 状态机只允许同事件重放）。
+        return None, None
+
+    if status == "priced":
+        settlement = credit.settle_hold_charge_tx(
+            cur, acct, hold, charge_units=int(charge or 0),
+            event_id=event_id,
+            metadata={"billing_backend": "credits", "source": source})
+        if settlement["outcome"] == "settled":
+            updated = _finalize_credit_hold_settled_tx(
+                cur, hold, event_id=event_id,
+                charge_units=int(charge or 0), now=now)
+            return "settled", updated
+        updated = _mark_credit_hold_pending_tx(
+            cur, hold, event_id=event_id,
+            reason=RECONCILIATION_INSUFFICIENT_BALANCE, now=now,
+            shortfall_units=int(settlement["shortfall_units"]),
+            actual_nano_cny=int(charge or 0))
+        return "pending_reconciliation", updated
+
+    # unpriced：有用量证据（真实发生但无法计价）或 settle 终态声明 → 待核对；
+    # /usage-events 的无证据事件只作证据入库，不改 hold（随后的 release 或
+    # 到期扫描决定终局），保证 outbox 与 settle release 先后顺序无关。
+    if not has_usage_evidence and source == "usage":
+        return None, None
+    reason = "unpriced_usage:%s" % (unpriced_reason or UNPRICED_NO_FINAL_USAGE)
+    updated = _mark_credit_hold_pending_tx(
+        cur, hold, event_id=event_id, reason=reason, now=now)
+    return "pending_reconciliation", updated
+
+
+def _legacy_duplicate_result(row, mode):
+    """legacy 路由的重复事件结果（终态无副作用）。"""
+    out = _duplicate_result(row)
+    out.update(subject_type=row["subject_type"],
+               subject_id=row["subject_id"], user_id=row["user_id"],
+               charge=(int(row["charge_nano_cny"])
+                       if row["charge_nano_cny"] is not None else None),
+               charge_price_book_id=row["charge_price_book_id"],
+               enforcement_mode=mode, window_projection=None,
+               billing_backend="legacy", credit_settlement=None,
+               hold_status=None, hold_id=None)
+    return out
+
+
+def _credit_duplicate_result_tx(cur, row, *, acct, hold, source, now,
+                                installation_id,
+                                migration_unverified=False):
+    """credits 路由的重复事件：终态无副作用；open/pending(无事件) 恢复结算。
+
+    ``hold is None``（旧客户端/授权失败）时与首次投递同规则：priced 或带
+    用量证据只补建 ``pending_reconciliation`` 待办（不扣费，P1-3），无证据
+    unpriced 仅返回事件状态。
+    """
+    out = _duplicate_result(row)
+    out.update(subject_type=row["subject_type"],
+               subject_id=row["subject_id"], user_id=row["user_id"],
+               charge=(int(row["charge_nano_cny"])
+                       if row["charge_nano_cny"] is not None else None),
+               charge_price_book_id=row["charge_price_book_id"],
+               enforcement_mode=None, window_projection=None,
+               billing_backend="credits")
+
+    if hold is None:
+        if row["status"] == "priced" or _row_has_usage_evidence(row):
+            hold = _create_synthetic_credit_hold_tx(
+                cur, acct, row, installation_id=installation_id, now=now,
+                reason=(RECONCILIATION_MIGRATION_BOUNDARY_UNVERIFIED
+                        if migration_unverified
+                        else RECONCILIATION_MISSING_AUTHORIZATION),
+                charge=(int(row["charge_nano_cny"])
+                        if row["status"] == "priced"
+                        and row["charge_nano_cny"] is not None else None))
+        else:
+            out.update(credit_settlement=None, hold_status=None, hold_id=None)
+            return out
+
+    if hold["status"] in ("settled", "released") or hold.get("event_id"):
+        # 已终局：原样返回，无任何副作用。
+        settlement = hold["status"]
+        out.update(credit_settlement=settlement, hold_status=hold["status"],
+                   hold_id=hold["hold_id"])
+        return out
+
+    settlement, updated = _apply_credit_hold_settlement_tx(
+        cur, acct=acct, hold=hold, event_id=row["event_id"],
+        status=row["status"],
+        charge=(int(row["charge_nano_cny"])
+                if row["charge_nano_cny"] is not None else None),
+        unpriced_reason=row["unpriced_reason"],
+        has_usage_evidence=_row_has_usage_evidence(row),
+        source=source, now=now)
+    if updated is not None:
+        _credit_hold_settle_audit_tx(
+            cur, updated, settlement=settlement, now=now,
+            installation_id=installation_id)
+    out.update(credit_settlement=settlement,
+               hold_status=(updated or hold)["status"],
+               hold_id=(updated or hold)["hold_id"])
+    return out
+
+
 def _ingest_usage_event_tx(cur, event, *, installation_id, plugin_id,
-                           received, age_days, enforcement_mode=None):
+                           received, age_days, enforcement_mode=None,
+                           credit_ctx=None):
     """ingest 事务内核（§7.5 全部步骤；/usage-events 与 hold settle 共用）。
 
     ``received`` = received_at（调用方注入，测试可固定）；``enforcement_mode``
@@ -1095,19 +1394,57 @@ def _ingest_usage_event_tx(cur, event, *, installation_id, plugin_id,
     user/owner）→ 真实 debit（无 SAVEPOINT，失败整体回滚）；否则 → PR6 模拟
     软扣费（best-effort，语义不变）。两套 debit 幂等键同为 ``usage:<event_id>``。
 
+    Credit（spec §5.4）：``credit_ctx`` 非空 = settle 路径（调用方已持账户锁
+    与 hold 锁）；为空时在 dedup **之前**用 :func:`_credit_route_tx`（主体用
+    body assertion）决定路由，credits → 先锁账户、再 FOR UPDATE 锁 hold，
+    之后才读/写事件行（与 settle 同锁序，避免唯一索引等待成环）。credits
+    路由不调用 legacy debit / 窗口投影，资金结果由
+    :func:`_apply_credit_hold_settlement_tx` 落 hold 与批次。
+
     返回内部结果 dict：``{event_id, duplicate, status, priced, row,
     subject_type, subject_id, user_id, charge, charge_price_book_id,
-    enforcement_mode, window_projection}``（settle 需要 charge/主体上下文；
-    公共出口 :func:`ingest_usage_event` 只暴露前五个 + enforcement_mode，
-    行为与批次 C 之前一致）。duplicate 命中时无任何副作用（不重复计价/
-    扣费/投影）。
+    enforcement_mode, window_projection, billing_backend, credit_settlement,
+    hold_status, hold_id}``（settle 需要 charge/主体上下文；公共出口
+    :func:`ingest_usage_event` 只暴露事件字段 + billing_backend/
+    credit_settlement）。
     """
     payload_hash = canonical_payload_hash(event)
     occurred = billing_pricing.parse_rfc3339(event["occurred_at"])
     enqueued = billing_pricing.parse_rfc3339(event["enqueued_at"])
     spend = _spend()
+    credit = _credit()
     mode = (enforcement_mode if enforcement_mode is not None
             else spend._enforcement_mode_tx(cur))
+
+    # -- 步骤 2a：Credit 路由 + 账户/hold 锁（必须在事件读写之前；spec §5.4） --
+    acct = None
+    credit_hold = None
+    route = None
+    route_backend = "legacy"
+    late_legacy = False
+    migration_unverified = False
+    migration_evidence_at = None
+    if credit_ctx is not None:
+        route_backend = "credits"
+        acct = credit_ctx.get("acct")
+        credit_hold = credit_ctx.get("hold")
+    else:
+        route = _credit_route_tx(
+            cur, call_id=event.get("call_id"),
+            subject_type=event.get("subject_type"),
+            subject_id=event.get("subject_id"), occurred_at=occurred,
+            request_id=event.get("request_id"),
+            session_id=event.get("session_id"))
+        route_backend = route["billing_backend"]
+        late_legacy = bool(route["late_legacy"])
+        migration_unverified = bool(route.get("migration_unverified"))
+        migration_evidence_at = route.get("migration_evidence_at")
+        if route_backend == "credits":
+            acct = credit.lock_account_tx(cur, route["account_id"])
+            # 无锁探测（_credit_route_tx）之后必须锁后重读：并发投递同一
+            # 无 hold 事件时，后者要看到前者已建好的 pending hold（P1-3）。
+            credit_hold = _fetch_hold_locked_by_call(
+                cur, event["call_id"])
 
     raw_usage = dict(event.get("raw_usage") or {})
     # -- 步骤 2：dedup（先比对，重放幂等返回原行，不重复计价/扣费/投影） --
@@ -1117,15 +1454,27 @@ def _ingest_usage_event_tx(cur, event, *, installation_id, plugin_id,
             raise UsageEventConflictError(
                 "同 event_id 重放的 payload 与原记录不一致",
                 event_id=event["event_id"])
-        out = _duplicate_result(existing)
-        out.update(subject_type=existing["subject_type"],
-                   subject_id=existing["subject_id"],
-                   user_id=existing["user_id"],
-                   charge=(int(existing["charge_nano_cny"])
-                           if existing["charge_nano_cny"] is not None
-                           else None),
-                   charge_price_book_id=existing["charge_price_book_id"],
-                   enforcement_mode=mode, window_projection=None)
+        if route_backend == "credits":
+            if credit_ctx is None and _event_received_before_migration(
+                    existing, route):
+                # 迁移前已入库（已计入迁移 spent）的事件重放：只做幂等确认，
+                # 不建待办、不扣费（原方案 §9.2）。
+                _hold_metric(
+                    "credit_migration_already_accounted_total",
+                    event_id=existing["event_id"])
+                return _legacy_duplicate_result(existing, mode)
+            out = _credit_duplicate_result_tx(
+                cur, existing, acct=acct, hold=credit_hold,
+                source=("settle" if credit_ctx is not None else "usage"),
+                now=received, installation_id=installation_id,
+                migration_unverified=migration_unverified)
+            out["enforcement_mode"] = mode
+            return out
+        out = _legacy_duplicate_result(existing, mode)
+        out.update(hold_status=(credit_hold["status"]
+                                if credit_hold is not None else None),
+                   hold_id=(credit_hold["hold_id"]
+                            if credit_hold is not None else None))
         return out
     cur.execute(
         "SELECT event_id FROM ai_usage_events WHERE call_id=%s",
@@ -1226,43 +1575,107 @@ def _ingest_usage_event_tx(cur, event, *, installation_id, plugin_id,
         cur.execute("ROLLBACK TO SAVEPOINT sp_usage_insert")
         again = _fetch_event_locked(cur, event["event_id"])
         if again is not None and again["payload_hash"] == payload_hash:
-            out = _duplicate_result(again)
-            out.update(subject_type=again["subject_type"],
-                       subject_id=again["subject_id"],
-                       user_id=again["user_id"],
-                       charge=(int(again["charge_nano_cny"])
-                               if again["charge_nano_cny"] is not None
-                               else None),
-                       charge_price_book_id=again["charge_price_book_id"],
-                       enforcement_mode=mode, window_projection=None)
-            return out
+            if route_backend == "credits":
+                if credit_hold is None:
+                    # 竞态：对方在同一 call 上先建了 pending hold。
+                    credit_hold = _fetch_hold_locked_by_call(
+                        cur, event["call_id"])
+                if credit_ctx is None and _event_received_before_migration(
+                        again, route):
+                    _hold_metric(
+                        "credit_migration_already_accounted_total",
+                        event_id=again["event_id"])
+                    return _legacy_duplicate_result(again, mode)
+                out = _credit_duplicate_result_tx(
+                    cur, again, acct=acct, hold=credit_hold,
+                    source=("settle" if credit_ctx is not None else "usage"),
+                    now=received, installation_id=installation_id,
+                    migration_unverified=migration_unverified)
+                out["enforcement_mode"] = mode
+                return out
+            return _legacy_duplicate_result(again, mode)
         raise UsageEventConflictError(
             "并发投递冲突：event_id/call_id 已被其他 payload 占用",
             event_id=event["event_id"]) from exc
 
-    # -- 步骤 5：debit（§3.4.4）。hard（mode × 主体）→ 真实 debit 强一致
-    # （无 SAVEPOINT，失败整体回滚，§3.4.9）；shadow → PR6 模拟软扣费
-    # （best-effort，SAVEPOINT 内，语义不变）。demo 永不 debit。 --
-    hard_debit = spend.mode_is_hard(mode, subject_type)
-    debit_detail = (_apply_real_usage_debit_tx(
-        cur, event, subject_type=subject_type, user_id=user_id,
-        status=status, charge=charge,
-        charge_price_book_id=(charge_book or {}).get("price_book_id")
-        if charge_book else None,
-        stored_tokens=stored_tokens)
-        if hard_debit else _apply_simulated_usage_debit(
+    # -- 步骤 5：debit。credits 路由 → Credit 批次结算（不写 legacy ledger、
+    # 不做窗口投影）；legacy 路由 → 原 hard/sim debit + 窗口 spent。迁移后
+    # 迟到的 legacy 事件照常 legacy 扣费但**跳过**窗口投影（spec §5.4）。 --
+    debit_detail = {}
+    window_projection = None
+    credit_settlement = None
+    credit_hold_out = credit_hold
+    missing_authorization = False
+    if route_backend == "credits":
+        if subject_type != "user":
+            raise UsageSubjectConflictError(
+                "Credit 账户事件的权威主体必须为 user",
+                resolved=(subject_type, subject_id))
+        created_missing_authorization_hold = False
+        if credit_hold is None:
+            if status == "priced" or _input_has_usage_evidence(event):
+                # 无调用前授权（旧客户端 / 关闭 hold 的客户端 / 授权失败）：
+                # 只保留成本证据与待办，**禁止**事后扣可用余额（P1-3）。
+                credit_hold = _create_synthetic_credit_hold_tx(
+                    cur, acct, event, installation_id=installation_id,
+                    now=received,
+                    reason=(RECONCILIATION_MIGRATION_BOUNDARY_UNVERIFIED
+                            if migration_unverified
+                            else RECONCILIATION_MISSING_AUTHORIZATION),
+                    charge=(charge if status == "priced" else None))
+                credit_hold_out = credit_hold
+                credit_settlement = "pending_reconciliation"
+                missing_authorization = True
+                created_missing_authorization_hold = True
+            else:
+                # 无证据 unpriced：只作证据入库，不建 hold、不扣费；审计与指标
+                # 标记「无授权」，供事后核对。
+                missing_authorization = True
+                _hold_metric(
+                    CREDIT_USAGE_WITHOUT_HOLD_METRIC,
+                    reason="unpriced_without_evidence",
+                    event_id=event["event_id"],
+                    has_usage_evidence=False,
+                    billing_backend="credits")
+        if credit_hold is not None and not created_missing_authorization_hold:
+            credit_settlement, updated = _apply_credit_hold_settlement_tx(
+                cur, acct=acct, hold=credit_hold, event_id=event["event_id"],
+                status=status, charge=charge, unpriced_reason=reason,
+                has_usage_evidence=_input_has_usage_evidence(event),
+                source=("settle" if credit_ctx is not None else "usage"),
+                now=received)
+            if updated is not None:
+                credit_hold_out = updated
+                _credit_hold_settle_audit_tx(
+                    cur, updated, settlement=credit_settlement, now=received,
+                    installation_id=installation_id)
+    else:
+        hard_debit = spend.mode_is_hard(mode, subject_type)
+        debit_detail = (_apply_real_usage_debit_tx(
             cur, event, subject_type=subject_type, user_id=user_id,
             status=status, charge=charge,
             charge_price_book_id=(charge_book or {}).get("price_book_id")
             if charge_book else None,
-            stored_tokens=stored_tokens))
-
-    # -- 步骤 5b：窗口 spent 投影（§3.2/§3.4.5，批次 C）：同一事件只投一次
-    # （本内核 dedup 守卫）——settle 先入、outbox 后到 → duplicate 不再投影；
-    # 反之亦然。策略缺失只观测不阻断。 --
-    window_projection = _project_window_spent_tx(
-        cur, subject_type=subject_type, subject_id=subject_id,
-        occurred=occurred, charge=charge)
+            stored_tokens=stored_tokens)
+            if hard_debit else _apply_simulated_usage_debit(
+                cur, event, subject_type=subject_type, user_id=user_id,
+                status=status, charge=charge,
+                charge_price_book_id=(charge_book or {}).get("price_book_id")
+                if charge_book else None,
+                stored_tokens=stored_tokens))
+        if late_legacy:
+            # 迁移后迟到的 legacy 事件：真实成本照记，但不进已冻结的窗口/
+            # 总额度投影（spec §5.4 legacy 守卫）。
+            _hold_metric(
+                "legacy_usage_event_after_credit_migration_total",
+                event_id=event["event_id"])
+        else:
+            # -- 步骤 5b：窗口 spent 投影（§3.2/§3.4.5）：同一事件只投一次
+            # （本内核 dedup 守卫）——settle 先入、outbox 后到 → duplicate
+            # 不再投影；反之亦然。策略缺失只观测不阻断。 --
+            window_projection = _project_window_spent_tx(
+                cur, subject_type=subject_type, subject_id=subject_id,
+                occurred=occurred, charge=charge)
 
     # -- 步骤 6：同事务无敏感信息 audit（§7.5 单事务语义：audit
     # 失败必须随事务回滚——吞掉失败会让事务带毒、commit 变
@@ -1279,6 +1692,17 @@ def _ingest_usage_event_tx(cur, event, *, installation_id, plugin_id,
         "plugin_id": plugin_id,
     }
     audit_detail.update(debit_detail)
+    if route_backend == "credits":
+        audit_detail["billing_backend"] = "credits"
+        audit_detail["credit_settlement"] = credit_settlement
+        audit_detail["credit_hold_id"] = (
+            credit_hold_out["hold_id"] if credit_hold_out is not None else None)
+        if missing_authorization:
+            audit_detail["credit_missing_authorization"] = True
+        if migration_unverified:
+            audit_detail["migration_boundary_unverified"] = True
+    if late_legacy:
+        audit_detail["migration_late_legacy"] = True
     if window_projection is not None:
         # Batch B：投影目标可为窗口（window_id）或总额度行（allowance_id）；
         # audit 统一记 target_id/target_kind，窗口形态保留 window_id 键兼容
@@ -1315,6 +1739,14 @@ def _ingest_usage_event_tx(cur, event, *, installation_id, plugin_id,
         if charge_book else None,
         "enforcement_mode": mode,
         "window_projection": window_projection,
+        "billing_backend": route_backend,
+        "credit_settlement": credit_settlement,
+        "hold_status": (credit_hold_out["status"]
+                        if credit_hold_out is not None else None),
+        "hold_id": (credit_hold_out["hold_id"]
+                    if credit_hold_out is not None else None),
+        "migration_unverified": migration_unverified,
+        "migration_evidence_at": migration_evidence_at,
     }
 
 
@@ -1355,6 +1787,8 @@ def ingest_usage_event(event, *, installation_id, plugin_id="histopilot",
             "priced": result["priced"],
             "row": result["row"],
             "enforcement_mode": result["enforcement_mode"],
+            "billing_backend": result.get("billing_backend", "legacy"),
+            "credit_settlement": result.get("credit_settlement"),
         }
     finally:
         conn.close()
@@ -1410,7 +1844,9 @@ _HOLD_SEL = (
     "session_id, model, estimated_nano_cny, balance_nano_cny, would_deny, "
     "status, event_id, created_at, settled_at, expires_at, metadata, "
     "spend_window_id, spend_total_allowance_id, reserved_nano_cny, "
-    "actual_nano_cny, enforcement_mode, denial_reason"
+    "actual_nano_cny, enforcement_mode, denial_reason, billing_backend, "
+    "reconciliation_reason, reconciliation_at, credit_shortfall_units, "
+    "resolved_at, resolved_by, resolution"
 )
 
 #: authorize/settle 事务内惰性回收的过期计数指标（单行 JSON 日志，仿
@@ -1565,7 +2001,7 @@ def hold_request_hash(body) -> str:
 def _hold_out(row) -> dict:
     out = dict(row)
     for key in ("estimated_nano_cny", "balance_nano_cny", "reserved_nano_cny",
-                "actual_nano_cny"):
+                "actual_nano_cny", "credit_shortfall_units"):
         if out.get(key) is not None:
             out[key] = int(out[key])
     return out
@@ -1589,11 +2025,16 @@ def _expire_stale_holds_tx(cur, now):
       SAVEPOINT 之外，业务拒绝不连带回滚回收（幂等，与批次 B 纪律一致）；
     - 回收后迟到的合法 usage event 仍由 settle 的 expired 分支记实际消费
       （§3.4.7：真实成本不因 hold 过期被丢弃，且不二次归还 reserved）。
+    - spec §5: Credit hold 不参与本扫描（到期由 credit_store 扫描器标记
+      待核对，**不释放预占**）；总额度行属于 credits 用户的 legacy hold
+      归还一律跳过（0088 触发器冻结 limit/spent/reserved），记指标
+      ``legacy_allowance_update_skipped_credit_wallet_total``。
     """
     cur.execute(
         "SELECT hold_id, spend_window_id, spend_total_allowance_id, "
         "reserved_nano_cny "
         "FROM billing_holds WHERE status='open' AND expires_at < %s "
+        "AND billing_backend='legacy' "
         "ORDER BY hold_id FOR UPDATE", (now,))
     stale = cur.fetchall()
     if not stale:
@@ -1610,9 +2051,27 @@ def _expire_stale_holds_tx(cur, now):
         if row["spend_window_id"] is not None:
             spend.window_release_tx(cur, row["spend_window_id"], reserved)
         elif row["spend_total_allowance_id"] is not None:
+            if _credit_total_allowance_frozen(
+                    cur, row["spend_total_allowance_id"]):
+                _hold_metric(
+                    "legacy_allowance_update_skipped_credit_wallet_total",
+                    allowance_id=row["spend_total_allowance_id"])
+                continue
             spend.total_allowance_release_tx(
                 cur, row["spend_total_allowance_id"], reserved)
     return len(stale)
+
+
+def _credit_total_allowance_frozen(cur, allowance_id):
+    """总额度行属于 credits 用户（0088 触发器冻结其 limit/spent/reserved）。"""
+    if allowance_id is None:
+        return False
+    cur.execute(
+        "SELECT 1 FROM ai_spend_total_allowances a "
+        "JOIN billing_accounts b ON b.user_id = a.subject_id "
+        "WHERE a.allowance_id=%s AND b.billing_backend='credits'",
+        (allowance_id,))
+    return cur.fetchone() is not None
 
 
 def _open_holds_sum(cur, account_id, now):
@@ -1636,7 +2095,138 @@ def _fetch_hold_locked_by_call(cur, call_id):
     return cur.fetchone()
 
 
-def authorize_hold(body, *, installation_id, plugin_id="histopilot", now=None):
+def _fetch_hold_by_call(cur, call_id):
+    """无锁按 call_id 读 hold（spec §5.1 路由/幂等快速路径）。"""
+    cur.execute("SELECT " + _HOLD_SEL +
+                " FROM billing_holds WHERE call_id=%s", (call_id,))
+    return cur.fetchone()
+
+
+def _migration_evidence_tx(cur, *, request_id, subject_type, subject_id,
+                           session_id=None):
+    """可信服务端运行开始时间（原方案 §9.2）→ ``(datetime|None, source)``。
+
+    优先 ``ai_run_bindings.created_at``（金额时代 run→主体权威绑定，0027；
+    request_id 与主体都必须一致；绑定已有 session 时还必须等于事件
+    session——同一 request_id 被其他 session 复用时不能充当迁移证据）；
+    回退 ``ai_budget_reservations.reserved_at``（pre-F 历史行，同 request_id、
+    同主体）。两者都是服务端时间，不能用客户端 ``occurred_at`` 代替迁移
+    边界判断。
+    """
+    if not request_id or not subject_type or not subject_id:
+        return None, None
+    cur.execute(
+        "SELECT created_at, histopilot_session_id FROM ai_run_bindings "
+        "WHERE request_id=%s AND subject_type=%s AND subject_id=%s",
+        (request_id, subject_type, subject_id))
+    row = cur.fetchone()
+    if row is not None and row["created_at"] is not None:
+        bound_session = row["histopilot_session_id"]
+        if bound_session is None or bound_session == session_id:
+            return row["created_at"], "run_binding"
+    cur.execute(
+        "SELECT reserved_at FROM ai_budget_reservations "
+        "WHERE request_id=%s AND subject_type=%s AND subject_id=%s",
+        (request_id, subject_type, subject_id))
+    row = cur.fetchone()
+    if row is not None and row["reserved_at"] is not None:
+        return row["reserved_at"], "budget_reservation"
+    return None, None
+
+
+def _event_received_before_migration(row, route):
+    """事件行是否在迁移前已入库（= 已计入迁移 spent，重放只做幂等确认）。
+
+    ``row["received_at"]`` 是 epoch 秒（``_EVENT_SEL``）；``route`` 为
+    :func:`_credit_route_tx` 结果（仅 credits 路由调用）。
+    """
+    migrated_at = (route or {}).get("migrated_at")
+    received = row.get("received_at")
+    if migrated_at is None or received is None:
+        return False
+    return float(received) < migrated_at.timestamp()
+
+
+def _credit_route_tx(cur, *, call_id, subject_type, subject_id,
+                     occurred_at=None, request_id=None, session_id=None):
+    """无锁判定一次调用/事件应走 legacy 还是 Credit 账务（spec §5.1/原方案 §9.2）。
+
+    优先级：已有 hold（call_id 唯一）以 ``hold.billing_backend`` 为准；
+    否则 ``subject_type='user'`` 且账户 ``billing_backend='credits'``：
+      - ``credit_migrated_at`` 为空（注册即 credits）→ credits；
+      - 已迁移且 ``occurred_at`` 非空（ingest 路径）→ 取**可信服务端运行
+        起始时间**（``ai_run_bindings.created_at``，回退
+        ``ai_budget_reservations.reserved_at``，均要求 request_id 与主体
+        一致；绑定已有 session 时还要求与事件 session 一致，否则不算证据）：
+          * 早于迁移时刻 → legacy + late_legacy（真正迁移前的运行）；
+          * 不早于迁移时刻 → credits（与客户端 occurred_at 无关）；
+          * 无证据 → credits；若客户端 occurred_at 早于迁移时刻，标记
+            ``migration_unverified``，由 ingest 建
+            ``migration_boundary_unverified`` 待办（两边都不扣）。
+      - authorize 路径（``occurred_at is None``）行为不变。
+
+    返回 ``{billing_backend, account_id, hold_exists, hold,
+    account_is_credits, account_migrated, migrated_at, late_legacy,
+    migration_unverified, migration_evidence_at, migration_evidence_source}``。
+    ``late_legacy`` = True 表示「账户已迁移 but 本次按 legacy 处理」：legacy
+    hold 迟到，或可信证据表明运行开始于迁移前。调用方据此跳过窗口投影并在
+    audit 标注 ``migration_late_legacy``。
+    """
+    hold = _fetch_hold_by_call(cur, call_id) if call_id else None
+    account = None
+    if subject_type == "user" and subject_id:
+        account = _credit().get_account_by_user_tx(cur, subject_id)
+    account_is_credits = bool(
+        account is not None
+        and account["billing_backend"] == _credit().BACKEND_CREDITS)
+    migrated_at = account.get("credit_migrated_at") if account else None
+
+    backend = "legacy"
+    late_legacy = False
+    migration_unverified = False
+    evidence_at = None
+    evidence_source = None
+    if hold is not None:
+        backend = hold["billing_backend"] or "legacy"
+        if backend == "legacy" and account_is_credits:
+            # legacy hold 迟到：账户迁移前授权、迁移后才结算/投递。
+            late_legacy = True
+    elif account_is_credits:
+        if migrated_at is None:
+            backend = "credits"
+        else:
+            evidence_at, evidence_source = _migration_evidence_tx(
+                cur, request_id=request_id, subject_type=subject_type,
+                subject_id=subject_id, session_id=session_id)
+            if evidence_at is not None:
+                if evidence_at < migrated_at:
+                    backend = "legacy"
+                    late_legacy = True
+                else:
+                    backend = "credits"
+            else:
+                backend = "credits"
+                if occurred_at is not None and occurred_at < migrated_at:
+                    migration_unverified = True
+
+    return {
+        "billing_backend": backend,
+        "account_id": (account["account_id"] if account is not None
+                       else (hold["account_id"] if hold is not None else None)),
+        "hold_exists": hold is not None,
+        "hold": hold,
+        "account_is_credits": account_is_credits,
+        "account_migrated": migrated_at is not None,
+        "migrated_at": migrated_at,
+        "late_legacy": late_legacy,
+        "migration_unverified": migration_unverified,
+        "migration_evidence_at": evidence_at,
+        "migration_evidence_source": evidence_source,
+    }
+
+
+def authorize_hold(body, *, installation_id, plugin_id="histopilot", now=None,
+                   client_capabilities=frozenset()):
     """预授权一次 model call（§3.3 授权事务八步 + §7.3 模式分流，批次 C）。
 
     模式行为（``spend_enforcement_mode`` **授权时刻快照**写入 hold 行，混合
@@ -1699,13 +2289,22 @@ def authorize_hold(body, *, installation_id, plugin_id="histopilot", now=None):
                     result = _authorize_hold_tx(
                         cur, body, installation_id=installation_id,
                         plugin_id=plugin_id, now=now,
-                        request_hash=request_hash, ttl=ttl)
+                        request_hash=request_hash, ttl=ttl,
+                        client_capabilities=client_capabilities)
                 except (BillingError, spend.SpendError) as exc:
                     cur.execute("ROLLBACK TO SAVEPOINT sp_hold_business")
                     business_error = exc
+                    credit_errors = (
+                        _credit().CreditInsufficientError,
+                        _credit().WalletRestrictedError,
+                        _credit().CreditPricingUnavailableError,
+                        _credit().CreditClientUpgradeRequiredError,
+                    )
                     if isinstance(exc, (HoldPricingUnavailableError,
-                                         spend.SpendError)):
-                        # hard 拒绝观测 audit（§3.3 稳定码；不含敏感字段）
+                                         spend.SpendError) + credit_errors):
+                        # hard 拒绝观测 audit（§3.3 稳定码；不含敏感字段）。
+                        # Credit 四类拒绝与金额硬拒绝同位置落 denied audit
+                        # + ai_spend_denial_events（spec §5.2）。
                         share_store_pg.record_audit_tx(
                             cur, HOLD_AUTHORIZE_AUDIT_ACTION,
                             actor_user_id=None, actor_role="plugin",
@@ -1731,9 +2330,7 @@ def authorize_hold(body, *, installation_id, plugin_id="histopilot", now=None):
                             cur, call_id=body["call_id"],
                             subject_type=body["subject_type"],
                             subject_id=body["subject_id"], reason=exc.code,
-                            estimated_nano_cny=(
-                                exc.context.get("estimated_nano")
-                                if isinstance(exc, spend.SpendError) else None),
+                            estimated_nano_cny=_denial_estimate_nano(exc),
                             occurred_at=now)
         if business_error is not None:
             raise business_error
@@ -1767,11 +2364,172 @@ def _record_denial_event_tx(cur, *, call_id, subject_type, subject_id, reason,
          occurred_at))
 
 
+def _denial_estimate_nano(exc):
+    """拒绝事件的估算额：spend 的 ``estimated_nano`` 或 Credit 的
+    ``estimated_nano`` / ``requested_units``（spec §5.2；无估算 → None）。"""
+    for key in ("estimated_nano", "requested_units"):
+        value = exc.context.get(key)
+        if value is not None:
+            return int(value)
+    return None
+
+
+def _authorize_credit_hold_tx(cur, body, *, account_id, subject_type, subject_id,
+                              installation_id, plugin_id, now, request_hash,
+                              ttl, client_capabilities):
+    """Credit 钱包 authorize 分支（spec §5.2；永远强制，与模式无关）。
+
+    顺序：客户端能力 → 账户锁 → 重查 call_id（并发同 call 串行于账户锁）
+    → 账户限制 → 最坏价估算（与 legacy 同口径）→ 可用检查 → INSERT hold
+    （SAVEPOINT 吸收同 call_id 唯一冲突）→ 批次预占 → audit。
+    """
+    credit = _credit()
+    if "credit_wallet_v1" not in client_capabilities:
+        raise credit.CreditClientUpgradeRequiredError(
+            "Credit 钱包客户端需支持 credit_wallet_v1",
+            required_capability="credit_wallet_v1")
+    acct = credit.lock_account_tx(cur, account_id)
+
+    existing = _fetch_hold_locked_by_call(cur, body["call_id"])
+    if existing is not None:
+        if existing["billing_backend"] != "credits":
+            raise HoldConflictError(
+                "同 call_id 已被 legacy hold 占用", call_id=body["call_id"])
+        stored_hash = (existing["metadata"] or {}).get("request_hash")
+        if stored_hash != request_hash:
+            raise HoldConflictError(
+                "同 call_id 重放的 hold 请求与原记录不一致",
+                call_id=body["call_id"])
+        out = _hold_out(existing)
+        out["duplicate"] = True
+        out["billing_backend"] = "credits"
+        out["credit_available_units"] = credit.available_units(acct)
+        out["open_holds_nano_cny"] = int(acct["credit_reserved_units"])
+        return out
+
+    restriction = credit.account_restriction_tx(cur, acct)
+    if restriction:
+        raise credit.WalletRestrictedError(
+            "Credit 钱包受限，禁止新的付费调用", reason=restriction,
+            account_id=account_id)
+
+    # 最坏价估算：与 legacy 完全相同（customer_charge book at now；
+    # output 分量按 estimate_output_token_cap 封顶）。
+    charge_book = billing_pricing.find_active_rate(
+        cur, "customer_charge", body["provider"], body["model"], now)
+    if charge_book is None:
+        raise credit.CreditPricingUnavailableError(
+            "无 active customer_charge 价目（Credit 钱包 fail-closed）",
+            provider=body["provider"], model=body["model"])
+    cap = estimate_output_token_cap()
+    est_out = body["max_output_tokens"] if cap <= 0 else min(
+        body["max_output_tokens"], cap)
+    estimated = billing_pricing.price_tokens_nano(
+        0, body["estimated_input_tokens"], est_out, charge_book)
+
+    available = credit.available_units(acct)
+    if available < estimated:
+        raise credit.CreditInsufficientError(
+            "Credit 可用余额不足以覆盖本次调用估算",
+            account_id=account_id, available_units=available,
+            requested_units=estimated, estimated_nano=estimated)
+
+    mode = _spend()._enforcement_mode_tx(cur)
+    hold_id = _HOLD_ID_PREFIX + secrets.token_hex(12)
+    metadata = {
+        "request_hash": request_hash,
+        "provider": body["provider"],
+        "charge_price_book_id": charge_book["price_book_id"],
+        "ttl_seconds": ttl,
+        "allocation_policy": credit.ALLOCATION_POLICY,
+    }
+    duplicate = False
+    cur.execute("SAVEPOINT sp_hold_insert")
+    try:
+        cur.execute(
+            "INSERT INTO billing_holds "
+            "(hold_id, call_id, account_id, subject_type, subject_id, "
+            " installation_id, session_id, model, estimated_nano_cny, "
+            " balance_nano_cny, would_deny, status, expires_at, metadata, "
+            " reserved_nano_cny, enforcement_mode, denial_reason, "
+            " billing_backend) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,false,'open',%s,%s,%s,%s,"
+            "NULL,'credits') RETURNING " + _HOLD_SEL,
+            (hold_id, body["call_id"], account_id, subject_type, subject_id,
+             installation_id, body["session_id"], body["model"], estimated,
+             available - estimated, now + timedelta(seconds=ttl),
+             psycopg.types.json.Jsonb(metadata), estimated, mode))
+        inserted = cur.fetchone()
+        credit.allocate_hold_tx(cur, acct, hold_id, estimated)
+    except psycopg.errors.UniqueViolation as exc:
+        name = (getattr(getattr(exc, "diag", None), "constraint_name", "")
+                or "")
+        if name not in ("billing_holds_pkey", "billing_holds_call_id_key"):
+            raise
+        cur.execute("ROLLBACK TO SAVEPOINT sp_hold_insert")
+        again = _fetch_hold_locked_by_call(cur, body["call_id"])
+        if again is None or again["billing_backend"] != "credits" \
+                or (again["metadata"] or {}).get("request_hash") != request_hash:
+            raise HoldConflictError(
+                "并发 authorize 冲突：call_id 已被其他载荷占用",
+                call_id=body["call_id"]) from exc
+        inserted = again
+        duplicate = True
+    else:
+        cur.execute("RELEASE SAVEPOINT sp_hold_insert")
+
+    row = _hold_out(inserted)
+    row["duplicate"] = duplicate
+    row["billing_backend"] = "credits"
+    row["credit_available_units"] = credit.available_units(acct)
+    row["open_holds_nano_cny"] = int(acct["credit_reserved_units"])
+    if not duplicate:
+        share_store_pg.record_audit_tx(
+            cur, HOLD_AUTHORIZE_AUDIT_ACTION,
+            actor_user_id=None, actor_role="plugin",
+            target_type="billing_hold", target_id=row["hold_id"],
+            detail={"call_id_suffix": row["call_id"][-8:],
+                    "subject_type": subject_type,
+                    "model": body["model"],
+                    "provider": body["provider"],
+                    "estimated_nano_cny": estimated,
+                    "billing_backend": "credits",
+                    "balance_nano_cny": row["balance_nano_cny"],
+                    "open_holds_nano_cny": row["open_holds_nano_cny"],
+                    "would_deny": False,
+                    "status": row["status"],
+                    "enforcement_mode": mode,
+                    "allocation_policy": credit.ALLOCATION_POLICY,
+                    "installation_id": installation_id,
+                    "plugin_id": plugin_id},
+            ts=now.timestamp())
+    return row
+
+
 def _authorize_hold_tx(cur, body, *, installation_id, plugin_id, now,
-                       request_hash, ttl):
+                       request_hash, ttl, client_capabilities=frozenset()):
     """authorize 的事务段（§3.3 步骤 3-8；回收已做完）。"""
     spend = _spend()
-    # -- 步骤 3：dedup（重放幂等返回原行，不重新解析/重算/重预占） --
+    # -- 步骤 3：dedup（重放幂等返回原行，不重新解析/重算/重预占）。
+    #    Credit hold 走无锁快速路径（spec §5.2）：校验 hash 后直接返回，
+    #    不加账户/hold 锁；legacy 保持原 FOR UPDATE 语义。 --
+    probe = _fetch_hold_by_call(cur, body["call_id"])
+    if probe is not None and probe["billing_backend"] == "credits":
+        stored_hash = (probe["metadata"] or {}).get("request_hash")
+        if stored_hash != request_hash:
+            raise HoldConflictError(
+                "同 call_id 重放的 hold 请求与原记录不一致",
+                call_id=body["call_id"])
+        row = _hold_out(probe)
+        row["duplicate"] = True
+        row["billing_backend"] = "credits"
+        credit = _credit()
+        acct = credit.get_account_by_user_tx(cur, row["subject_id"])
+        row["credit_available_units"] = (
+            credit.available_units(acct) if acct is not None else None)
+        row["open_holds_nano_cny"] = (
+            int(acct["credit_reserved_units"]) if acct is not None else None)
+        return row
     existing = _fetch_hold_locked_by_call(cur, body["call_id"])
     if existing is not None:
         stored_hash = (existing["metadata"] or {}).get("request_hash")
@@ -1781,6 +2539,8 @@ def _authorize_hold_tx(cur, body, *, installation_id, plugin_id, now,
                 call_id=body["call_id"])
         row = _hold_out(existing)
         row["duplicate"] = True
+        row["billing_backend"] = existing["billing_backend"] or "legacy"
+        row["credit_available_units"] = None
         row["open_holds_nano_cny"] = _open_holds_sum(
             cur, row.get("account_id"), now)
         return row
@@ -1796,6 +2556,19 @@ def _authorize_hold_tx(cur, body, *, installation_id, plugin_id, now,
          "subject_id": body["subject_id"],
          "user_id": body.get("user_id")},
         installation_id)
+
+    # -- 步骤 4a：Credit 路由（spec §5.2）：role=user 且账户 credits →
+    #    独立分支；永远强制，与 spend_enforcement_mode 无关。 --
+    if subject_type == "user":
+        account = _credit().get_account_by_user_tx(cur, subject_id)
+        if account is not None \
+                and account["billing_backend"] == _credit().BACKEND_CREDITS:
+            return _authorize_credit_hold_tx(
+                cur, body, account_id=account["account_id"],
+                subject_type=subject_type, subject_id=subject_id,
+                installation_id=installation_id, plugin_id=plugin_id,
+                now=now, request_hash=request_hash, ttl=ttl,
+                client_capabilities=client_capabilities)
 
     # -- 步骤 4b：enforcement 模式（授权时刻快照，§7.3；registered 下 demo
     #    仍观测，all 才硬闸 demo） --
@@ -1870,7 +2643,8 @@ def _authorize_hold_tx(cur, body, *, installation_id, plugin_id, now,
         if account_id is not None:
             cur.execute(
                 "SELECT COALESCE(SUM(amount_nano_cny), 0)::bigint AS bal "
-                "FROM billing_ledger_entries WHERE account_id=%s",
+                "FROM billing_ledger_entries "
+                "WHERE account_id=%s AND ledger_scope='legacy'",
                 (account_id,))
             balance = int(cur.fetchone()["bal"])
         open_sum = _open_holds_sum(cur, account_id, now)
@@ -1971,6 +2745,8 @@ def _authorize_hold_tx(cur, body, *, installation_id, plugin_id, now,
 
     row = _hold_out(inserted)
     row["duplicate"] = duplicate
+    row["billing_backend"] = row.get("billing_backend") or "legacy"
+    row["credit_available_units"] = None
     row["open_holds_nano_cny"] = _open_holds_sum(cur, row.get("account_id"),
                                                  now)
     if not duplicate:
@@ -2065,6 +2841,17 @@ def settle_hold(hold_id, body, *, installation_id, plugin_id="histopilot",
 def _settle_hold_tx(cur, hold_id, payload, *, installation_id, plugin_id, now):
     """settle 的事务段（回收已做完；状态机见 :func:`settle_hold`）。"""
     payload_kind, payload = payload
+    # 无锁快读决定账务后端（spec §5.3）；不存在/跨 installation 统一 404。
+    cur.execute("SELECT " + _HOLD_SEL +
+                " FROM billing_holds WHERE hold_id=%s", (hold_id,))
+    probe = cur.fetchone()
+    if probe is None or probe["installation_id"] != installation_id:
+        raise HoldNotFoundError("hold 不存在或不可访问", hold_id=hold_id)
+    if probe["billing_backend"] == "credits":
+        return _settle_credit_hold_tx(
+            cur, probe, (payload_kind, payload),
+            installation_id=installation_id, plugin_id=plugin_id, now=now)
+
     cur.execute("SELECT " + _HOLD_SEL +
                 " FROM billing_holds WHERE hold_id=%s FOR UPDATE", (hold_id,))
     row = cur.fetchone()
@@ -2120,6 +2907,151 @@ def _settle_hold_tx(cur, hold_id, payload, *, installation_id, plugin_id, now):
         hold_id=hold_id, status=row["status"])
 
 
+def _credit_settle_result(row, *, settlement, duplicate=False,
+                          usage_duplicate=False):
+    """Credit settle 出口行 → wire 语义（spec §5.3/§5.4）。"""
+    out = _hold_out(row)
+    out["duplicate"] = duplicate
+    out["usage_duplicate"] = usage_duplicate
+    out["billing_backend"] = "credits"
+    out["credit_settlement"] = settlement
+    out["hold_status"] = row["status"]
+    out["hold_id"] = row["hold_id"]
+    return out
+
+
+def _credit_release_hold_tx(cur, acct, row, *, resolution, installation_id,
+                            now):
+    """Credit hold release（open，或 pending(无事件) 的客户端释放）。"""
+    credit = _credit()
+    credit.release_hold_tx(cur, acct, row)
+    cur.execute(
+        "UPDATE billing_holds SET status='released', settled_at=%s, "
+        "resolution=COALESCE(%s, resolution), "
+        "resolved_at=CASE WHEN %s::text IS NULL THEN resolved_at ELSE %s END "
+        "WHERE hold_id=%s AND status IN ('open','pending_reconciliation') "
+        "RETURNING " + _HOLD_SEL,
+        (now, resolution, resolution, now, row["hold_id"]))
+    updated = cur.fetchone()
+    if updated is None:
+        raise HoldNotOpenError("hold 已被并发终局化", hold_id=row["hold_id"])
+    updated = _hold_out(updated)
+    _credit_hold_settle_audit_tx(
+        cur, updated, settlement="released", now=now,
+        installation_id=installation_id)
+    return _credit_settle_result(updated, settlement="released")
+
+
+def _credit_settle_with_usage_tx(cur, acct, row, event, *, installation_id,
+                                 plugin_id, now):
+    """Credit hold + 完整 usage_event → 共用 ingest 内核（已持账户/hold 锁）。"""
+    errors = validate_usage_event_body(event)
+    if errors:
+        raise InvalidUsageEventError(errors)
+    if event.get("call_id") != row["call_id"]:
+        raise HoldConflictError(
+            "settle 事件的 call_id 与 hold 不一致（不可改绑）",
+            hold_id=row["hold_id"], call_id=row["call_id"])
+    ingested = _ingest_usage_event_tx(
+        cur, event, installation_id=installation_id, plugin_id=plugin_id,
+        received=now, age_days=occurred_at_max_age_days(),
+        enforcement_mode=row["enforcement_mode"] or "shadow",
+        credit_ctx={"acct": acct, "hold": row})
+    updated = _fetch_hold_locked(cur, row["hold_id"])
+    if updated is None:
+        raise HoldNotFoundError("hold 不存在", hold_id=row["hold_id"])
+    return _credit_settle_result(
+        updated, settlement=ingested.get("credit_settlement"),
+        usage_duplicate=bool(ingested.get("duplicate")))
+
+
+def _settle_credit_hold_tx(cur, probe, payload, *, installation_id, plugin_id,
+                           now):
+    """Credit settle 状态机（spec §5.3，锁序 account → hold → lots）。
+
+    | hold 状态 | body | 处理 |
+    |---|---|---|
+    | open | release | release → released |
+    | open | {event_id} | SettlePayloadRequiredError |
+    | open / pending(无事件) | usage_event | ingest → settled/pending |
+    | pending(无事件) | release | 释放 → released（client_release_after_expiry）|
+    | pending(有事件) | 同 event | 幂等 pending duplicate |
+    | pending(有事件) | 其他 | HoldConflictError |
+    | settled | 同 event | duplicate；否则 conflict |
+    | released | release | duplicate；usage_event → HoldNotOpenError |
+    """
+    credit = _credit()
+    payload_kind, payload = payload
+    account_id = probe["account_id"]
+    if account_id is None:
+        raise credit.CreditStateConflictError(
+            "credits hold 缺少账户", hold_id=probe["hold_id"])
+    acct = credit.lock_account_tx(cur, account_id)
+    row = _fetch_hold_locked(cur, probe["hold_id"])
+    if row is None or row["installation_id"] != installation_id:
+        raise HoldNotFoundError("hold 不存在或不可访问",
+                                hold_id=probe["hold_id"])
+    status = row["status"]
+    claimed = _payload_event_id(payload_kind, payload)
+
+    if status == "open":
+        if payload_kind == "release":
+            return _credit_release_hold_tx(
+                cur, acct, row, resolution=None,
+                installation_id=installation_id, now=now)
+        if payload_kind == "legacy":
+            raise SettlePayloadRequiredError(
+                "Credit 钱包 settle 必须携带完整 usage_event",
+                hold_id=row["hold_id"])
+        return _credit_settle_with_usage_tx(
+            cur, acct, row, payload, installation_id=installation_id,
+            plugin_id=plugin_id, now=now)
+
+    if status == "pending_reconciliation":
+        if payload_kind == "release":
+            if row["event_id"]:
+                raise HoldConflictError(
+                    "hold 已绑定事件，不能按 release 处置",
+                    hold_id=row["hold_id"], event_id=row["event_id"])
+            return _credit_release_hold_tx(
+                cur, acct, row,
+                resolution=RESOLUTION_CLIENT_RELEASE_AFTER_EXPIRY,
+                installation_id=installation_id, now=now)
+        if row["event_id"]:
+            if claimed == row["event_id"]:
+                # 终态：同 event 重放只返回 pending（不重试结算）。
+                return _credit_settle_result(
+                    row, settlement="pending_reconciliation", duplicate=True)
+            raise HoldConflictError(
+                "hold 已绑定其他事件", hold_id=row["hold_id"],
+                event_id=row["event_id"])
+        if payload_kind == "legacy":
+            raise SettlePayloadRequiredError(
+                "Credit 钱包 settle 必须携带完整 usage_event",
+                hold_id=row["hold_id"])
+        return _credit_settle_with_usage_tx(
+            cur, acct, row, payload, installation_id=installation_id,
+            plugin_id=plugin_id, now=now)
+
+    if status == "settled":
+        if claimed is not None and row["event_id"] == claimed:
+            return _credit_settle_result(
+                row, settlement="settled", duplicate=True)
+        raise HoldConflictError(
+            "hold 已结算，不能再次结算或改绑 event", hold_id=row["hold_id"])
+
+    if status == "released":
+        if payload_kind == "release":
+            return _credit_settle_result(
+                row, settlement="released", duplicate=True)
+        raise HoldNotOpenError(
+            "hold 已 released，不可结算", hold_id=row["hold_id"],
+            status="released")
+
+    raise HoldNotOpenError(
+        "hold 已 %s，不可结算" % status, hold_id=row["hold_id"], status=status)
+
+
 def _payload_event_id(payload_kind, payload):
     """settle payload → 其声称的 event_id（release 无）。"""
     if payload_kind == "legacy":
@@ -2142,6 +3074,12 @@ def _release_hold_reserved_tx(cur, row):
         _spend().window_release_tx(cur, row["spend_window_id"], reserved)
         return reserved
     if row["spend_total_allowance_id"] is not None:
+        if _credit_total_allowance_frozen(cur, row["spend_total_allowance_id"]):
+            _hold_metric(
+                "legacy_allowance_update_skipped_credit_wallet_total",
+                allowance_id=row["spend_total_allowance_id"],
+                reason="hold_release")
+            return None
         _spend().total_allowance_release_tx(
             cur, row["spend_total_allowance_id"], reserved)
         return reserved
@@ -2518,10 +3456,22 @@ def append_ledger_entry(account_id, kind, amount_nano_cny, idempotency_key, *,
         with pg_store.transaction(conn) as c:
             with c.cursor() as cur:
                 cur.execute(
+                    "SELECT billing_backend FROM billing_accounts "
+                    "WHERE account_id=%s", (account_id,))
+                backend = cur.fetchone()
+                if backend is None:
+                    raise BillingAccountNotFoundError(
+                        "账户不存在", account_id=account_id)
+                if backend["billing_backend"] == "credits":
+                    raise BillingCreditWalletError(
+                        "已迁移 Credit 钱包的账户不接受 legacy ledger 直写",
+                        account_id=account_id)
+                cur.execute(
                     "INSERT INTO billing_ledger_entries "
                     "(entry_id, account_id, event_id, kind, amount_nano_cny, "
-                    " idempotency_key, reason, actor_user_id, metadata) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                    " idempotency_key, reason, actor_user_id, metadata, "
+                    " ledger_scope) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'legacy') "
                     "ON CONFLICT (idempotency_key) DO NOTHING "
                     "RETURNING entry_id, account_id, event_id, kind, "
                     "amount_nano_cny, idempotency_key, reason, actor_user_id, "
@@ -2552,14 +3502,19 @@ def append_ledger_entry(account_id, kind, amount_nano_cny, idempotency_key, *,
 
 
 def account_balance_nano(account_id):
-    """权威可用余额 = 该账户 ledger 有符号金额合计（无账户 → None）。"""
+    """权威 legacy 可用余额 = 该账户 legacy scope 流水有符号合计（无账户 → None）。
+
+    账户切到 credits 后余额以 ``credit_balance_units`` 为准；本函数只服务
+    legacy 口径（spec §5.5），credits_v1 流水绝不混入。
+    """
     conn = _connect()
     try:
         with pg_store.transaction(conn) as c:
             with c.cursor() as cur:
                 cur.execute(
                     "SELECT COALESCE(SUM(amount_nano_cny), 0)::bigint AS bal "
-                    "FROM billing_ledger_entries WHERE account_id=%s",
+                    "FROM billing_ledger_entries "
+                    "WHERE account_id=%s AND ledger_scope='legacy'",
                     (account_id,))
                 bal = int(cur.fetchone()["bal"])
                 cur.execute(
@@ -2631,13 +3586,18 @@ def update_account_caps(user_id, soft_cap_nano, hard_cap_nano, expected_version,
         with pg_store.transaction(conn) as c:
             with c.cursor() as cur:
                 cur.execute(
-                    "SELECT account_id FROM billing_accounts WHERE user_id=%s",
+                    "SELECT account_id, billing_backend FROM billing_accounts "
+                    "WHERE user_id=%s",
                     (user_id,))
                 row = cur.fetchone()
                 if row is None:
                     raise BillingAccountNotFoundError(
                         "该用户尚未开户（caps 更新不隐式开户）", user_id=user_id)
                 account_id = row["account_id"]
+                if row["billing_backend"] == "credits":
+                    raise BillingCreditWalletError(
+                        "已迁移 Credit 钱包的账户不再维护 legacy caps",
+                        user_id=user_id, account_id=account_id)
                 cur.execute(
                     "UPDATE billing_accounts SET soft_spend_cap_nano=%s, "
                     "hard_spend_cap_nano=%s, version=version+1, updated_at=now() "
@@ -2653,7 +3613,8 @@ def update_account_caps(user_id, soft_cap_nano, hard_cap_nano, expected_version,
                 account = dict(cur.fetchone())
                 cur.execute(
                     "SELECT COALESCE(SUM(amount_nano_cny), 0)::bigint AS bal "
-                    "FROM billing_ledger_entries WHERE account_id=%s",
+                    "FROM billing_ledger_entries "
+                    "WHERE account_id=%s AND ledger_scope='legacy'",
                     (account_id,))
                 balance = int(cur.fetchone()["bal"])
                 detail = dict(audit_detail or {})
@@ -2724,8 +3685,8 @@ def apply_billing_adjustment(user_id, kind, amount_nano_cny, reason,
         with pg_store.transaction(conn) as c:
             with c.cursor() as cur:
                 cur.execute(
-                    "SELECT account_id FROM billing_accounts WHERE user_id=%s",
-                    (user_id,))
+                    "SELECT account_id, billing_backend FROM billing_accounts "
+                    "WHERE user_id=%s", (user_id,))
                 row = cur.fetchone()
                 if row is None:
                     if kind not in ("grant", "topup"):
@@ -2759,14 +3720,19 @@ def apply_billing_adjustment(user_id, kind, amount_nano_cny, reason,
                     account_id = opened["account_id"]
                 else:
                     account_id = row["account_id"]
+                    if row["billing_backend"] == "credits":
+                        raise BillingCreditWalletError(
+                            "已迁移 Credit 钱包的账户不接受 legacy 人工调账",
+                            user_id=user_id, account_id=account_id)
 
                 entry_id = _LEDGER_ENTRY_ID_PREFIX + secrets.token_hex(12)
                 # ON CONFLICT DO NOTHING 不置 aborted，可直接重读原行判重放
                 cur.execute(
                     "INSERT INTO billing_ledger_entries "
                     "(entry_id, account_id, event_id, kind, amount_nano_cny, "
-                    " idempotency_key, reason, actor_user_id, metadata) "
-                    "VALUES (%s,%s,NULL,%s,%s,%s,%s,%s,%s) "
+                    " idempotency_key, reason, actor_user_id, metadata, "
+                    " ledger_scope) "
+                    "VALUES (%s,%s,NULL,%s,%s,%s,%s,%s,%s,'legacy') "
                     "ON CONFLICT (idempotency_key) DO NOTHING "
                     "RETURNING " + _entry_sel(),
                     (entry_id, account_id, kind, int(amount_nano_cny),
@@ -2798,7 +3764,8 @@ def apply_billing_adjustment(user_id, kind, amount_nano_cny, reason,
 
                 cur.execute(
                     "SELECT COALESCE(SUM(amount_nano_cny), 0)::bigint AS bal "
-                    "FROM billing_ledger_entries WHERE account_id=%s",
+                    "FROM billing_ledger_entries "
+                    "WHERE account_id=%s AND ledger_scope='legacy'",
                     (account_id,))
                 balance = int(cur.fetchone()["bal"])
                 cur.execute("SELECT " + _ACCOUNT_SEL +
@@ -2979,7 +3946,7 @@ def admin_usage_events_page(*, cursor=None, limit=50, model=None, user_id=None,
     return {"items": rows, "next_cursor": next_cursor}
 
 
-def admin_ledger_page(*, cursor=None, limit=50, user_ids=None):
+def admin_ledger_page(*, cursor=None, limit=50, user_ids=None, scope=None):
     """admin ledger 只读分页（不可变账本，最新在前；§10.4 只读表）。
 
     keyset 游标：(created_at epoch, entry_id) 降序。含 ``metadata``（PR6 起
@@ -2991,9 +3958,17 @@ def admin_ledger_page(*, cursor=None, limit=50, user_ids=None):
     2026-10-20（review 一.1）：``account_id → billing_accounts.user_id`` 左
     连接带出账务主键 user_id（台账行本身没有邮箱；身份由 app 层批投影），
     ``user_ids``（邮箱搜索先在 app 层解析成 user_id 集合）按主体过滤。
+
+    spec §5.5：items 带 ``ledger_scope``；``scope``（``legacy`` /
+    ``credits_v1``）过滤账务范围（None = 全部）。
     """
     limit = max(1, min(int(limit or 50), 200))
     where, params = [], []
+    if scope is not None:
+        if scope not in ("legacy", "credits_v1"):
+            raise ValueError("scope 需为 legacy/credits_v1")
+        where.append("l.ledger_scope = %s")
+        params.append(scope)
     if cursor is not None:
         try:
             created, entry_id = cursor
@@ -3020,7 +3995,7 @@ def admin_ledger_page(*, cursor=None, limit=50, user_ids=None):
                 cur.execute(
                     "SELECT l.entry_id, l.account_id, a.user_id, l.event_id, "
                     "l.kind, l.amount_nano_cny, l.idempotency_key, l.reason, "
-                    "l.actor_user_id, l.metadata, "
+                    "l.actor_user_id, l.metadata, l.ledger_scope, "
                     "extract(epoch from l.created_at)::float8 AS created_at "
                     "FROM billing_ledger_entries l "
                     "LEFT JOIN billing_accounts a "
@@ -3982,11 +4957,16 @@ def admin_overview_usage_stats(period_start=None, today_start=None):
 
 
 def admin_account_summaries(user_ids):
-    """一批用户的账户+余额+caps 摘要（余额 = ledger 有符号合计）。
+    """一批用户的账户+余额+caps 摘要（legacy 余额 = legacy scope 流水合计）。
 
     未开户用户不在返回 dict 中（调用方按 ``account: null`` 语义渲染，不伪造
     0 余额账户）。返回 ``{user_id: {account_id, status, currency, version,
-    soft_spend_cap_nano, hard_spend_cap_nano, balance_nano}}``。
+    soft_spend_cap_nano, hard_spend_cap_nano, balance_nano,
+    billing_backend, legacy_ledger_sum_nano, credit_balance_units,
+    credit_reserved_units, credit_refund_pending_units, credit_available_units,
+    credit_restricted_reason}}``（spec §5.5：``balance_nano`` 保留旧键，值
+    与 ``legacy_ledger_sum_nano`` 相同；credits 账户的 legacy 合计是迁移前
+    历史流水加迁移后迟到的 legacy usage_debit，不代表可用余额）。
     """
     ids = [str(u) for u in (user_ids or []) if u]
     if not ids:
@@ -3998,29 +4978,71 @@ def admin_account_summaries(user_ids):
                 cur.execute(
                     "SELECT a.user_id, a.account_id, a.currency, a.status, "
                     "a.version, a.soft_spend_cap_nano, a.hard_spend_cap_nano, "
-                    "COALESCE(SUM(l.amount_nano_cny),0)::bigint AS balance "
+                    "a.billing_backend, a.credit_balance_units, "
+                    "a.credit_reserved_units, a.credit_refund_pending_units, "
+                    "a.credit_frozen_reason, "
+                    "COALESCE(SUM(l.amount_nano_cny) "
+                    "         FILTER (WHERE l.ledger_scope='legacy'), 0)::bigint "
+                    "  AS balance "
                     "FROM billing_accounts a "
                     "LEFT JOIN billing_ledger_entries l "
                     " ON l.account_id = a.account_id "
                     "WHERE a.user_id = ANY(%s) "
                     "GROUP BY a.user_id, a.account_id, a.currency, a.status, "
-                    " a.version, a.soft_spend_cap_nano, a.hard_spend_cap_nano",
+                    " a.version, a.soft_spend_cap_nano, a.hard_spend_cap_nano, "
+                    " a.billing_backend, a.credit_balance_units, "
+                    " a.credit_reserved_units, a.credit_refund_pending_units, "
+                    " a.credit_frozen_reason",
                     (ids,))
                 rows = [dict(r) for r in cur.fetchall()]
+                out = {}
+                credit = _credit()
+                for row in rows:
+                    balance = int(row["balance"])
+                    credits = row["billing_backend"] == "credits"
+                    restricted_reason = None
+                    if credits:
+                        account = {
+                            "account_id": row["account_id"],
+                            "status": row["status"],
+                            "billing_backend": row["billing_backend"],
+                            "credit_balance_units": int(
+                                row["credit_balance_units"]),
+                            "credit_reserved_units": int(
+                                row["credit_reserved_units"]),
+                            "credit_refund_pending_units": int(
+                                row["credit_refund_pending_units"]),
+                            "credit_frozen_reason":
+                                row["credit_frozen_reason"],
+                        }
+                        restricted_reason = credit.account_restriction_tx(
+                            cur, account)
+                    out[row["user_id"]] = {
+                        "account_id": row["account_id"],
+                        "currency": row["currency"],
+                        "status": row["status"],
+                        "version": int(row["version"]),
+                        "soft_spend_cap_nano": row["soft_spend_cap_nano"],
+                        "hard_spend_cap_nano": row["hard_spend_cap_nano"],
+                        "billing_backend": row["billing_backend"],
+                        # 旧键保留（与 legacy_ledger_sum_nano 同值）
+                        "balance_nano": balance,
+                        "legacy_ledger_sum_nano": balance,
+                        "credit_balance_units": int(
+                            row["credit_balance_units"]),
+                        "credit_reserved_units": int(
+                            row["credit_reserved_units"]),
+                        "credit_refund_pending_units": int(
+                            row["credit_refund_pending_units"]),
+                        "credit_available_units": max(
+                            0, int(row["credit_balance_units"])
+                            - int(row["credit_reserved_units"])
+                            - int(row["credit_refund_pending_units"])),
+                        "credit_restricted_reason": restricted_reason,
+                    }
+        return out
     finally:
         conn.close()
-    out = {}
-    for row in rows:
-        out[row["user_id"]] = {
-            "account_id": row["account_id"],
-            "currency": row["currency"],
-            "status": row["status"],
-            "version": int(row["version"]),
-            "soft_spend_cap_nano": row["soft_spend_cap_nano"],
-            "hard_spend_cap_nano": row["hard_spend_cap_nano"],
-            "balance_nano": int(row["balance"]),
-        }
-    return out
 
 
 def admin_last_ai_call_by_user():

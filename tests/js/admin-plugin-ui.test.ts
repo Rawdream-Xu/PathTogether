@@ -162,6 +162,9 @@ interface PluginClient {
 	fmtNano: (v: unknown) => string;
 	fmtCny: (v: unknown) => string;
 	fmtTs: (epoch: unknown) => string;
+	creditUnitsText: (units: unknown) => string | null;
+	yuanTextToFen: (text: unknown) => string | null | undefined;
+	newIdempotencyKey: () => string;
 	handshakeState: () => { ready: boolean; grantedCount: number };
 }
 
@@ -2424,8 +2427,11 @@ describe("wave 2 — 费用页（Demo 统计 + 页内标签 §4.6）", () => {
 		// Home：回到 usage
 		bus.els["adm-tab-ledger"]._fire("keydown", { key: "Home", preventDefault() {} });
 		expect(bus.els["adm-tab-usage"].getAttribute("aria-selected")).toBe("true");
-		// End：跳到 unpriced
+		// End：跳到最后一个标签（2026-10-27 起第 4 个标签 = Credit 待办）
 		bus.els["adm-tab-usage"]._fire("keydown", { key: "End", preventDefault() {} });
+		expect(bus.els["adm-tab-credit"].getAttribute("aria-selected")).toBe("true");
+		// ArrowLeft：回到计费异常（原末位标签仍可键盘到达）
+		bus.els["adm-tab-credit"]._fire("keydown", { key: "ArrowLeft", preventDefault() {} });
 		expect(bus.els["adm-tab-unpriced"].getAttribute("aria-selected")).toBe("true");
 	});
 });
@@ -4320,4 +4326,58 @@ describe("2026-10-21 费用面板与原始调用分页（release review）", () 
 		expect(payload.model).toBe("wanted-model");   // 第 2 页不丢模型筛选
 		expect(payload.status).toBe("unpriced");      // 第 2 页不丢状态筛选
 	}, 10000);
+});
+
+describe("pathtogether-admin plugin UI — Credit 钱包（2026-10-27 spec §9）", () => {
+	it("creditUnitsText：units → Credits 4 位小数截断；不足 0.0001 明确提示", () => {
+		const { client } = loadPluginUi("");
+		expect(client!.creditUnitsText("10000000")).toBe("1.0000");
+		expect(client!.creditUnitsText("12345678")).toBe("1.2345"); // 1.2345678 截断
+		expect(client!.creditUnitsText("999")).toBe("小于 0.0001");
+		expect(client!.creditUnitsText("0")).toBe("0.0000");
+		expect(client!.creditUnitsText("250000000")).toBe("25.0000");
+		expect(client!.creditUnitsText("-10000000")).toBe("-1.0000");
+		expect(client!.creditUnitsText(null)).toBeNull();
+		expect(client!.creditUnitsText("abc")).toBeNull();
+	});
+
+	it("yuanTextToFen：元 → 分整数（拒绝浮点/超 2 位小数；空=全额）", () => {
+		const { client } = loadPluginUi("");
+		expect(client!.yuanTextToFen("6")).toBe("600");
+		expect(client!.yuanTextToFen("6.5")).toBe("650");
+		expect(client!.yuanTextToFen("0")).toBe("0");
+		expect(client!.yuanTextToFen("")).toBeNull();
+		expect(client!.yuanTextToFen("6.555")).toBeUndefined();
+		expect(client!.yuanTextToFen(".5")).toBeUndefined();
+		expect(client!.yuanTextToFen("abc")).toBeUndefined();
+	});
+
+	it("newIdempotencyKey：1–128 位 [A-Za-z0-9_-]（宿主 schema 同源）", () => {
+		const { client } = loadPluginUi("");
+		for (let i = 0; i < 5; i += 1) {
+			const key = client!.newIdempotencyKey();
+			expect(key).toMatch(/^[A-Za-z0-9_-]{1,128}$/);
+		}
+	});
+
+	it("HTML：费用页含 Credit 待办标签与对账/待办容器", () => {
+		expect(htmlSrc).toContain('id="adm-tab-credit"');
+		expect(htmlSrc).toContain('id="adm-credit-section"');
+		expect(htmlSrc).toContain('id="adm-credit-reconcile-status"');
+		expect(htmlSrc).toContain('id="adm-credit-pending-holds-tbody"');
+		expect(htmlSrc).toContain('id="adm-credit-anomalous-orders-tbody"');
+		expect(htmlSrc).toContain('id="adm-credit-problem-refunds-tbody"');
+		expect(htmlSrc).toContain('id="adm-credit-frozen-accounts-tbody"');
+	});
+
+	it("main.js：Credit 写动作携带 idempotency_key；余额列显示 Credit 可用", () => {
+		expect(src).toContain("admin.credits.grant");
+		expect(src).toContain("admin.credits.refund.create");
+		expect(src).toContain("admin.credits.hold.resolve");
+		expect(src).toContain("admin.credits.unfreeze");
+		expect(src).toContain("idempotency_key");
+		expect(src).toContain("Credit 可用");
+		// 旧人工调账/总额度写入口仍不复活
+		expect(src).not.toContain("admin.billing.adjust");
+	});
 });

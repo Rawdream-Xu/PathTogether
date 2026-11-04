@@ -156,6 +156,20 @@
     // 不触碰任何用户数据，与 get 同级（admin:billing:read）；服务端有独立
     // 节流 + owner/CSRF 复核。
     "admin.billing.providerBalance.refresh": "admin:billing:read",
+    // 2026-10-27 Credit 钱包管理（spec §9）：读复用 admin:billing:read；
+    // 写动作（赠送/退款/待核对处置/解冻）收敛到独立的 admin:credits:write，
+    // 不恢复已退役的 admin.billing.adjust。服务端 owner + CSRF 独立复核。
+    "admin.credits.user.get": "admin:billing:read",
+    "admin.credits.pending.list": "admin:billing:read",
+    "admin.credits.orders.list": "admin:billing:read",
+    "admin.credits.reconcile.get": "admin:billing:read",
+    "admin.credits.grant": "admin:credits:write",
+    "admin.credits.refund.create": "admin:credits:write",
+    "admin.credits.refund.query": "admin:credits:write",
+    "admin.credits.refund.cancel": "admin:credits:write",
+    "admin.credits.refund.retry": "admin:credits:write",
+    "admin.credits.hold.resolve": "admin:credits:write",
+    "admin.credits.unfreeze": "admin:credits:write",
     "admin.audit.list": "admin:audit:read",
     // Batch D1/D2 新增只读聚合：Demo 周窗口消耗统计与匿名站点访问统计。
     // 两者都归 admin:overview:read——不为只读站长/统计卡再扩权限域。
@@ -217,6 +231,11 @@
   var _cursorSpec = { type: "string", maxLength: 512, nullable: true };
   var _limitSpec = { type: "integer", min: 1, max: 200 };
   var _userIdSpec = { type: "string", minLength: 1, maxLength: 128 };
+  // 2026-10-27 Credit 管理写方法：幂等键由插件生成、宿主原样转成
+  // Idempotency-Key 头（服务端 1–128 位字母/数字/_/-）。
+  var _idempotencyKeySpec = {
+    type: "string", pattern: "^[A-Za-z0-9_-]{1,128}$",
+  };
   // W2：格式申请工单 id（pathId 防路径拼接，与 user_id/invite_id 同规格）
   var _requestIdSpec = { type: "string", minLength: 1, maxLength: 128 };
   // 2026-10-08（§6）：slide_id 形态 = slide_store 生成器 "sld_" +
@@ -330,6 +349,110 @@
     },
     "admin.billing.providerBalance.refresh": {
       properties: {}, additionalProperties: false,
+    },
+    // 2026-10-27 Credit 钱包管理（spec §9）：读方法沿用 billing:read；
+    // 写方法必带 idempotency_key（宿主转成 Idempotency-Key 头，服务端
+    // 1–128 位字母/数字/_/-）与 reason。金额一律十进制字符串：
+    // - credits：Credits 文本（最多 7 位小数；送分由服务端整数换算）；
+    // - amount_fen：分（十进制整数字符串；缺键 = 可退全额）；
+    // - units：credit_units 十进制字符串（兼容入口，与 credits 二选一）。
+    "admin.credits.user.get": {
+      properties: { user_id: _userIdSpec },
+      required: ["user_id"],
+      additionalProperties: false,
+    },
+    "admin.credits.pending.list": {
+      properties: { limit: _limitSpec },
+      additionalProperties: false,
+    },
+    "admin.credits.orders.list": {
+      properties: {
+        cursor: _cursorSpec,
+        limit: _limitSpec,
+        user_id: { type: "string", minLength: 1, maxLength: 128,
+                   nullable: true },
+        payment_state: {
+          type: "string",
+          enum: ["created", "paying", "paid", "closed"],
+          nullable: true,
+        },
+      },
+      additionalProperties: false,
+    },
+    "admin.credits.reconcile.get": {
+      properties: {}, additionalProperties: false,
+    },
+    "admin.credits.grant": {
+      properties: {
+        user_id: _userIdSpec,
+        credits: {
+          type: "string",
+          pattern: "^(0|[1-9][0-9]*)(\\.[0-9]{1,7})?$",
+        },
+        units: { type: "string", pattern: "^[0-9]{1,19}$" },
+        reason: { type: "string", minLength: 1, maxLength: 500 },
+        idempotency_key: _idempotencyKeySpec,
+      },
+      required: ["user_id", "reason", "idempotency_key"],
+      additionalProperties: false,
+    },
+    "admin.credits.refund.create": {
+      properties: {
+        order_id: _requestIdSpec,
+        amount_fen: { type: "string", pattern: "^[0-9]{1,19}$",
+                      nullable: true },
+        reason: { type: "string", minLength: 1, maxLength: 500 },
+        idempotency_key: _idempotencyKeySpec,
+      },
+      required: ["order_id", "reason", "idempotency_key"],
+      additionalProperties: false,
+    },
+    "admin.credits.refund.query": {
+      properties: {
+        refund_id: _requestIdSpec,
+        reason: { type: "string", minLength: 1, maxLength: 500 },
+        idempotency_key: _idempotencyKeySpec,
+      },
+      required: ["refund_id", "reason", "idempotency_key"],
+      additionalProperties: false,
+    },
+    "admin.credits.refund.cancel": {
+      properties: {
+        refund_id: _requestIdSpec,
+        reason: { type: "string", minLength: 1, maxLength: 500 },
+        idempotency_key: _idempotencyKeySpec,
+      },
+      required: ["refund_id", "reason", "idempotency_key"],
+      additionalProperties: false,
+    },
+    "admin.credits.refund.retry": {
+      properties: {
+        refund_id: _requestIdSpec,
+        reason: { type: "string", minLength: 1, maxLength: 500 },
+        idempotency_key: _idempotencyKeySpec,
+      },
+      required: ["refund_id", "reason", "idempotency_key"],
+      additionalProperties: false,
+    },
+    "admin.credits.hold.resolve": {
+      properties: {
+        hold_id: _requestIdSpec,
+        action: { type: "string", enum: ["retry", "release", "waive"] },
+        // waive 的 ≥4 字约束在插件 UI 与服务端权威校验；桥层只挡空值/超长
+        reason: { type: "string", minLength: 1, maxLength: 500 },
+        idempotency_key: _idempotencyKeySpec,
+      },
+      required: ["hold_id", "action", "reason", "idempotency_key"],
+      additionalProperties: false,
+    },
+    "admin.credits.unfreeze": {
+      properties: {
+        user_id: _userIdSpec,
+        reason: { type: "string", minLength: 1, maxLength: 500 },
+        idempotency_key: _idempotencyKeySpec,
+      },
+      required: ["user_id", "reason", "idempotency_key"],
+      additionalProperties: false,
     },
     "admin.audit.list": {
       properties: {
@@ -870,6 +993,25 @@
     };
   }
 
+  // 2026-10-27 Credit 管理写方法：额外携带 Idempotency-Key 头（幂等键由
+  // 插件在用户动作开始时生成，重试同一动作复用；makeFetchJson 仍会自动
+  // 叠加 CSRF 双提交头）。
+  function creditWrite(url, body, idempotencyKey) {
+    return function (ctx) {
+      return ctx.fetchJson(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": String(idempotencyKey),
+        },
+        body: JSON.stringify(body === undefined ? {} : body),
+      }).then(function (res) {
+        if (!res.ok) throw backendError(url, res);
+        return res.body;
+      });
+    };
+  }
+
   var METHOD_BACKENDS = {
     "admin.auth.get": function (ctx) {
       return ctx.fetchJson("/api/auth/info").then(function (res) {
@@ -1020,6 +1162,98 @@
         if (!res.ok) throw backendError(url, res);
         return res.body;
       });
+    },
+
+    // 2026-10-27 Credit 钱包管理（spec §9）。读方法 GET 原样透传；写方法
+    // POST + Idempotency-Key 头；路径参数走 pathId 防拼接。
+    "admin.credits.user.get": function (ctx, payload) {
+      var url = "/api/admin/v1/credits/users/" +
+        pathId(payload.user_id, "user_id");
+      return ctx.fetchJson(url).then(function (res) {
+        if (!res.ok) throw backendError(url, res);
+        return res.body;
+      });
+    },
+
+    "admin.credits.pending.list": function (ctx, payload) {
+      var url = "/api/admin/v1/credits/pending" +
+        buildQuery({ limit: payload.limit });
+      return ctx.fetchJson(url).then(function (res) {
+        if (!res.ok) throw backendError(url, res);
+        return res.body;
+      });
+    },
+
+    "admin.credits.orders.list": function (ctx, payload) {
+      var url = "/api/admin/v1/credits/orders" + buildQuery({
+        cursor: payload.cursor, limit: payload.limit,
+        user_id: payload.user_id, payment_state: payload.payment_state,
+      });
+      return ctx.fetchJson(url).then(function (res) {
+        if (!res.ok) throw backendError(url, res);
+        return res.body;
+      });
+    },
+
+    "admin.credits.reconcile.get": jsonGet("/api/admin/v1/credits/reconcile"),
+
+    "admin.credits.grant": function (ctx, payload) {
+      var url = "/api/admin/v1/credits/users/" +
+        pathId(payload.user_id, "user_id") + "/grants";
+      var body = { reason: payload.reason };
+      if (payload.credits !== undefined && payload.credits !== null) {
+        body.credits = payload.credits;
+      }
+      if (payload.units !== undefined && payload.units !== null) {
+        body.units = payload.units;
+      }
+      return creditWrite(url, body, payload.idempotency_key)(ctx);
+    },
+
+    "admin.credits.refund.create": function (ctx, payload) {
+      var url = "/api/admin/v1/credits/orders/" +
+        pathId(payload.order_id, "order_id") + "/refunds";
+      var body = { reason: payload.reason };
+      if (payload.amount_fen !== undefined && payload.amount_fen !== null) {
+        body.amount_fen = payload.amount_fen;
+      }
+      return creditWrite(url, body, payload.idempotency_key)(ctx);
+    },
+
+    "admin.credits.refund.query": function (ctx, payload) {
+      var url = "/api/admin/v1/credits/refunds/" +
+        pathId(payload.refund_id, "refund_id") + "/query";
+      return creditWrite(url, { reason: payload.reason },
+                         payload.idempotency_key)(ctx);
+    },
+
+    "admin.credits.refund.cancel": function (ctx, payload) {
+      var url = "/api/admin/v1/credits/refunds/" +
+        pathId(payload.refund_id, "refund_id") + "/cancel";
+      return creditWrite(url, { reason: payload.reason },
+                         payload.idempotency_key)(ctx);
+    },
+
+    "admin.credits.refund.retry": function (ctx, payload) {
+      var url = "/api/admin/v1/credits/refunds/" +
+        pathId(payload.refund_id, "refund_id") + "/retry";
+      return creditWrite(url, { reason: payload.reason },
+                         payload.idempotency_key)(ctx);
+    },
+
+    "admin.credits.hold.resolve": function (ctx, payload) {
+      var url = "/api/admin/v1/credits/holds/" +
+        pathId(payload.hold_id, "hold_id") + "/resolve";
+      return creditWrite(url, {
+        action: payload.action, reason: payload.reason,
+      }, payload.idempotency_key)(ctx);
+    },
+
+    "admin.credits.unfreeze": function (ctx, payload) {
+      var url = "/api/admin/v1/credits/users/" +
+        pathId(payload.user_id, "user_id") + "/unfreeze";
+      return creditWrite(url, { reason: payload.reason },
+                         payload.idempotency_key)(ctx);
     },
 
     "admin.audit.list": function (ctx, payload) {

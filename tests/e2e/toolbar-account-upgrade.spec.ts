@@ -3,8 +3,9 @@
  *
  * 真实 Chromium + 生产资源（templates/_app_shell.html 原文渲染 + static/app.js +
  * static/i18n.js + static/style.css），静态 fixture（虚构数据，无患者数据）+
- * 路由拦截 mock（后端 /api/account/balance 由主代理并行实施，本 spec 只锁前端
- * 契约；§7.3 红线：性能场景不用 route mock，这里无性能场景）。
+ * 路由拦截 mock（popover 读 /api/account/credits，legacy 账户返回
+ * billing_backend=legacy + 旧总额度字段；本 spec 只锁前端契约；§7.3 红线：
+ * 性能场景不用 route mock，这里无性能场景）。
  *
  * 断言：
  *   - 账户 chip 显示邮箱 local-part（solarise94），popover 显示完整邮箱、角色、
@@ -237,6 +238,7 @@ const BALANCE_OK = {
 		role: "user",
 		preview: false,
 	},
+	billing_backend: "legacy",
 	currency: "CNY",
 	spend_target: "total_allowance",
 	limit_nano_cny: "50000000000",
@@ -288,7 +290,7 @@ async function serveFixture(
 		if (p === "/api/auth/info") {
 			return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(opts.mode === "demo" ? { auth_enabled: false, username: null, role: null, user_id: null, actor: {}, preview: null } : AUTH_USER) });
 		}
-		if (p === "/api/account/balance") {
+		if (p === "/api/account/credits") {
 			const r = (opts.balance ?? (() => ({ status: 200, body: BALANCE_OK })))();
 			return route.fulfill({ status: r.status, contentType: "application/json", body: JSON.stringify(r.body) });
 		}

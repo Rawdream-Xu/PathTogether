@@ -355,11 +355,18 @@ def test_schema_migrations_recorded(conn):
         # password-reset 分支占用）：订单/通知事件/退款 + 下单与退款幂等键
         # 的后绑定别名表。
         "0087_support_payments.sql",
-        # 用户「最近活跃」（2026-10-27；0088 已被 credit-wallet 分支占用）：
-        # users.last_active_at + 从
+        # Credit 钱包：credit_lots / 流水与预占分配 / 充值订单 / 支付事件 /
+        # 退款六表 + billing_accounts / billing_ledger_entries / billing_holds
+        # 的 credits 列（ledger_scope、pending_reconciliation 等）。
+        "0088_credit_wallet.sql",
+        # 用户「最近活跃」（2026-10-27）：users.last_active_at + 从
         # audit_events / upload_tasks / ingestion_jobs / ai_usage_events
         # 集合式回填（GREATEST，全空保持 NULL，可重跑）。
         "0089_user_last_active.sql",
+        # 格式申请证据（生产 2026-11-04 已应用）：format_requests 增加
+        # manufacturer / sample_url / sample_access_code 三列（旧行保持可读，
+        # 新提交在 HTTP 层要求证据）。
+        "0090_format_request_evidence.sql",
     ]
 
 

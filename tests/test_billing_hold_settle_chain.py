@@ -1384,7 +1384,8 @@ def test_usage_events_window_projection_and_capabilities():
     # 能力探测字段
     assert out["enforcement_mode"] == "shadow"
     assert out["capabilities"] == {"settle_with_usage_event": True,
-                                   "spend_enforcement": "shadow"}
+                                   "spend_enforcement": "shadow",
+                                   "credit_wallet_v1": True}
     # 总额度投影：user allowance spent += charge
     actual = _expected_charge(T0, (0, 1_000_000, 200_000))
     assert int(_allowance(user["user_id"])["spent_nano_cny"]) == actual
@@ -1443,7 +1444,8 @@ def test_route_envelopes_and_capability_fields():
     assert r_ok.status_code == 200
     out_ok = r_ok.get_json()
     assert out_ok["capabilities"] == {"settle_with_usage_event": True,
-                                      "spend_enforcement": "shadow"}
+                                      "spend_enforcement": "shadow",
+                                      "credit_wallet_v1": True}
     assert out_ok["enforcement_mode"] == "shadow"
     assert out_ok["denial_reason"] == "spend_budget_exhausted"  # 观测
     # registered：金额用尽 → 429

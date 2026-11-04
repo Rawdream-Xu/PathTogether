@@ -250,6 +250,14 @@ _BUSINESS_TABLES = (
     # 用例的同名 key 会被当成「已绑定」命中上一用例的订单/退款行）
     "support_order_key_aliases",
     "support_refund_key_aliases",
+    # 0088 起：Credit 钱包（批次/流水分配/预占分配/充值订单/通道事件/退款；
+    # 组合外键保证同账户，TRUNCATE CASCADE 兜底，显式列出防跨用例残留）
+    "credit_ledger_allocations",
+    "credit_hold_allocations",
+    "credit_lots",
+    "credit_payment_events",
+    "credit_refunds",
+    "credit_topup_orders",
 )
 
 @pytest.fixture(scope="session")

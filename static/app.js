@@ -586,6 +586,7 @@
     // nano-CNY 精确换算锚点）
     acctDisplayUsername: acctDisplayUsername,
     acctCny: acctCny,
+    acctCredits: acctCreditsUnit,
   };
 
   // ---------- 修改我的密码（账户系统批次 A docs §7.1；owner/user 通用） ----------
@@ -1743,6 +1744,7 @@
     acctPopScope: $("acct-pop-scope"),
     acctPopRemaining: $("acct-pop-remaining"),
     acctPopDetail: $("acct-pop-detail"),
+    acctTopupLink: $("acct-topup-link"),
     acctSettingsBtn: $("acct-settings-btn"),
   };
 
@@ -14135,6 +14137,40 @@
     return s === null ? null : s + " CNY";
   }
 
+  // ---------- Credit 格式化（0088；units / 10^7，截断 4 位小数，BigInt） ----------
+  // 非零但 < 0.0001 显示「小于 0.0001」（不能显示为 0/免费）。
+  function acctGroupThousands(digits) {
+    var out = "", count = 0;
+    for (var i = digits.length - 1; i >= 0; i--) {
+      out = digits.charAt(i) + out;
+      count += 1;
+      if (count % 3 === 0 && i > 0) out = "," + out;
+    }
+    return out;
+  }
+
+  function formatCredits4(v) {
+    if (v === null || v === undefined || v === "") return null;
+    var b;
+    try { b = BigInt(v); } catch (e) { return null; }
+    var neg = b < 0n;
+    if (neg) b = -b;
+    var whole = b / 10000000n;
+    var frac = (b % 10000000n) / 1000n;
+    if (whole === 0n && frac === 0n) {
+      return b !== 0n ? t("acct.credits.less_than_min") : "0";
+    }
+    var fracText = frac.toString().padStart(4, "0").replace(/0+$/, "");
+    var text = acctGroupThousands(whole.toString()) +
+      (fracText ? "." + fracText : "");
+    return (neg ? "-" : "") + text;
+  }
+
+  function acctCreditsUnit(v) {
+    var s = formatCredits4(v);
+    return s === null ? null : s + " Credits";
+  }
+
   // 规范化邮箱 @ 前的 local-part；非邮箱存量账号回退完整 login_id
   function acctDisplayUsername(username) {
     var s = String(username == null ? "" : username);
@@ -14268,11 +14304,68 @@
     if (els.acctPopDetail) {
       els.acctPopDetail.textContent = t("acct.balance.unavailable", { reason: reason });
     }
+    if (els.acctTopupLink) els.acctTopupLink.hidden = true;
+  }
+
+  // Credit 钱包（0088）：可用 Credit（4 位截断）/ 预占 / 退款冻结 / 受限说明；
+  // 充值入口新标签打开 /app/credits（预览态只读，不显示入口）。
+  function acctCreditsRestrictedText(reason) {
+    var raw = String(reason || "");
+    if (raw.indexOf("account_status_") === 0) {
+      return t("credit.restricted.account_status");
+    }
+    if (raw.indexOf("frozen:") === 0) {
+      return t("credit.restricted.frozen", { reason: raw.slice(7) });
+    }
+    if (raw === "pending_reconciliation") {
+      return t("credit.restricted.pending_reconciliation");
+    }
+    return t("credit.restricted.other", { reason: raw });
+  }
+
+  function acctCreditsRender(data) {
+    var subject = data.subject || {};
+    var wallet = data.wallet || {};
+    if (els.acctPopScope) {
+      els.acctPopScope.textContent = t("acct.credits.scope");
+    }
+    if (els.acctPopRemaining) {
+      var available = formatCredits4(wallet.available_units);
+      els.acctPopRemaining.textContent =
+        t("acct.credits.available") + " " + (available === null ? "—" : available);
+    }
+    if (els.acctPopDetail) {
+      var rows = [];
+      // 预占/退款冻结只在非零时显示（余额卡片保持简洁）
+      var reserved = acctCreditsUnit(wallet.reserved_units);
+      if (reserved !== null && String(wallet.reserved_units) !== "0") {
+        rows.push(t("acct.credits.reserved") + " " + reserved);
+      }
+      var refundPending = acctCreditsUnit(wallet.refund_pending_units);
+      if (refundPending !== null &&
+          String(wallet.refund_pending_units) !== "0") {
+        rows.push(t("acct.credits.refund_pending") + " " + refundPending);
+      }
+      if (wallet.restricted_reason) {
+        rows.push(t("acct.credits.restricted", {
+          reason: acctCreditsRestrictedText(wallet.restricted_reason),
+        }));
+      }
+      els.acctPopDetail.textContent = rows.join(" · ");
+    }
+    if (els.acctTopupLink) {
+      els.acctTopupLink.hidden = !!subject.preview;
+    }
   }
 
   function acctBalanceRender(data) {
     data = data || {};
+    if (data.billing_backend === "credits") {
+      acctCreditsRender(data);
+      return;
+    }
     var isMonth = data.spend_target === "owner_month_window";
+    if (els.acctTopupLink) els.acctTopupLink.hidden = true;
     if (els.acctPopScope) {
       els.acctPopScope.textContent = t(isMonth ? "acct.balance.scope.month" : "acct.balance.scope.total");
     }
@@ -14304,7 +14397,9 @@
     if (els.acctPopRemaining) els.acctPopRemaining.textContent = t("acct.balance.loading");
     if (els.acctPopDetail) els.acctPopDetail.textContent = "";
     if (els.acctPopScope) els.acctPopScope.textContent = "";
-    apiFetch("/api/account/balance").then(function (r) {
+    if (els.acctTopupLink) els.acctTopupLink.hidden = true;
+    // 统一入口：credits / legacy / owner 由 billing_backend 分流
+    apiFetch("/api/account/credits").then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (body) {
         return { status: r.status, body: body };
       });

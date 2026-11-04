@@ -2,7 +2,7 @@
   "manifestSchemaVersion": "1.1.0",
   "id": "pathtogether-admin",
   "name": "PathTogether Admin",
-  "pluginVersion": "0.4.21",
+  "pluginVersion": "0.4.22",
   "pluginContractVersion": "1.0.0",
   "bridgeProtocolVersion": "1.0.0",
   "ui": {
@@ -11,9 +11,9 @@
       "admin.workspace"
     ],
     "fileHashes": {
-      "ui/index.html": "1bf1f8aff566a6c09ea3f7630849f927190a0f2769c8a8a190162eacf62d1774",
-      "ui/main.js": "f992d01dbffac990877b78af3a8acee59d60e344c4c7ecd6d5c247106b91f3f8",
-      "ui/style.css": "73c05cae6d26fee5e11a989318ecec5881965c047f723205ce806469fc28aa8c"
+      "ui/index.html": "9e546c5c49214d8250a29dbbe8d78d5bcef9a15121e2ab54c34c25415ff856e2",
+      "ui/main.js": "b9c12a9202083c8444d1180058ca88e8cd1d7c6c1a39549671d8e1da1048bcbe",
+      "ui/style.css": "8b4a3573a2aa7494aadb8420223da28d023223e2a8721529134da57abbba0f0f"
     }
   },
   "service": {
@@ -32,6 +32,7 @@
     "admin:plugins:read",
     "admin:plugins:write",
     "admin:settings:read",
-    "admin:settings:write"
+    "admin:settings:write",
+    "admin:credits:write"
   ]
 }

@@ -601,11 +601,12 @@ def test_admin_manifest_v1_1_validates():
     # §4/§6）：邀请页退役——admin.invites.* 桥方法整行删除，manifest 同步
     # 移除 admin:invites:read/write（SDK 词表 plugins/sdk/manifest.py 保留
     # 这两个枚举值——非本线文件；manifest 是其真子集，校验器允许）。
-    # 期望集合 = SDK 词表 − 邀请两项 = 11 项。
+    # 期望集合 = SDK 词表 − 邀请两项 = 12 项（2026-10-27 新增
+    # admin:credits:write：Credit 钱包管理写动作独立权限域）。
     expected_perms = (set(M.MANIFEST_ADMIN_PERMISSIONS)
                       - {"admin:invites:read", "admin:invites:write"})
     assert set(data["adminPermissions"]) == expected_perms
-    assert len(data["adminPermissions"]) == 11
+    assert len(data["adminPermissions"]) == 12
     for retired in ("admin:turn-budgets:read", "admin:turn-budgets:write",
                     "admin:billing:write", "admin:acquisition:read",
                     "admin:invites:read", "admin:invites:write"):
@@ -614,6 +615,7 @@ def test_admin_manifest_v1_1_validates():
     assert "admin:overview:read" in data["adminPermissions"]
     assert "admin:settings:read" in data["adminPermissions"]
     assert "admin:settings:write" in data["adminPermissions"]
+    assert "admin:credits:write" in data["adminPermissions"]
 
 
 def test_admin_permissions_enum_and_type_enforced():
@@ -980,11 +982,21 @@ def test_admin_manifest_plugin_version_bumped_with_hashes():
     # 任务行遵守统一筛选与 totals 口径、列表行批投影权威生命周期状态、
     # 展开面板独立有效性令牌、原始调用分页保留完整筛选；0.4.18 的 bundle
     # 已在 homePC 以不可变版本目录暂存，修复必须换新版本号。hashes/pin 同步。
+    # 2026-10-27 0.4.20（Credit 钱包 D2/spec §9）：余额列 Credit 口径 +
+    # 用户抽屉 Credit 钱包（赠送/退款/待核对处置/解冻）+ 费用页「Credit 待办」
+    # 标签；新增桥方法 admin.credits.*（读 billing:read / 写 credits:write），
+    # hashes/pin 同步。
     # 2026-10-29 0.4.20（0089 最近活跃）：用户列表「最近登录」列改「最近活跃」
     #（last_active_at，排序 last_active_desc；台账 value 旧值仅服务端兼容），
     # 详情抽屉仍显示「最近登录」；0.4.19 bundle 已在 homePC 以不可变版本目录
     # 暂存，必须换新版本号。hashes/pin 同步。
-    assert data["pluginVersion"] == "0.4.21"  # hashes/pin 同步
+    # 0.4.21 = format-evidence（生产，2026-11-04 已上线）：格式申请详情/样本列
+    # 增加厂商、原文件下载链接与网盘提取码；生产 bundle 已在不可变版本目录
+    # 使用，内容不同不得复用版本号。
+    # 0.4.22 = release-20261105b 合并：Credit 钱包 admin 改动 + 存储容量
+    #（存储部分在 storage-quota-10g 合并后落地）；hashes/pin 按最终 bundle
+    # 重算。
+    assert data["pluginVersion"] == "0.4.22"  # hashes/pin 同步
     assert "admin:settings:read" in data["adminPermissions"]
     assert "admin:settings:write" in data["adminPermissions"]
     assert "admin:slides:read" in data["adminPermissions"]

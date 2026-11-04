@@ -1,0 +1,641 @@
+/* =========================================================================
+   /app/credits —— 充值 Credit 页（D1，credit wallet）
+   独立轻量页面：桌面双列（左余额+档位 / 右付款摘要），下方充值记录与
+   Credit 明细；≤680px 单列。视觉基线 docs/design-assets/credit-recharge-20261026。
+   本文件不得依赖内联样式（页面 CSP style-src 'self'）。
+   ========================================================================= */
+:root {
+  color-scheme: dark;
+  --credit-bg: #161616;
+  --credit-panel: #1e1e1e;
+  --credit-panel-2: #242424;
+  --credit-line: #303030;
+  --credit-line-strong: #3b3b3b;
+  --credit-text: #eeeeee;
+  --credit-muted: #a0a0a0;
+  --credit-muted-2: #858585;
+  --credit-blue: #1685ff;
+  --credit-blue-strong: #087bf2;
+  --credit-blue-soft: #1c2939;
+  --credit-green: #78d6a4;
+  --credit-red: #e08989;
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; padding: 0; }
+
+body {
+  background: var(--credit-bg);
+  color: var(--credit-text);
+  font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI",
+        "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+a { color: inherit; text-decoration: none; }
+button { font: inherit; color: inherit; cursor: pointer; }
+button:disabled { cursor: default; }
+img { max-width: 100%; }
+h1, h2, p, dl, dd, dt { margin: 0; }
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible {
+  outline: 2px solid #8ac1ff;
+  outline-offset: 4px;
+}
+
+.credit-skip {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 20;
+  padding: 8px 14px;
+  background: #fff;
+  color: #000;
+}
+.credit-skip:focus { left: 8px; top: 8px; }
+
+/* ------------------------------- 顶栏 ---------------------------------- */
+.credit-topbar {
+  border-bottom: 1px solid var(--credit-line);
+  background: #171717;
+}
+.credit-topbar-inner {
+  max-width: 1184px;
+  margin: 0 auto;
+  height: 72px;
+  padding: 0 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+.credit-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.4px;
+}
+.credit-brand .site-logo { width: 38px; height: 38px; object-fit: contain; }
+.credit-brand-sep {
+  width: 1px;
+  height: 20px;
+  background: #3a3a3a;
+}
+.credit-brand-page {
+  font-size: 14px;
+  font-weight: 500;
+  color: #b9b9b9;
+  letter-spacing: 0;
+}
+.credit-nav {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  color: #b0b0b0;
+  font-size: 13px;
+}
+.credit-nav-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.credit-nav-link:hover { color: #fff; }
+.credit-nav .lang-toggle {
+  background: transparent;
+  border: 1px solid #414141;
+  border-radius: 7px;
+  padding: 4px 10px;
+  color: #c9c9c9;
+  font-size: 12px;
+}
+.credit-nav .lang-toggle:hover { border-color: #6e6e6e; color: #fff; }
+
+/* ------------------------------- 主体 ---------------------------------- */
+.credit-main {
+  max-width: 1184px;
+  margin: 0 auto;
+  padding: 42px 32px 26px;
+}
+
+.credit-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 28px;
+}
+.credit-breadcrumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #999;
+  font-size: 13px;
+}
+.credit-breadcrumb:hover { color: #ddd; }
+.credit-heading h1 {
+  margin-top: 14px;
+  font-size: 34px;
+  line-height: 1.25;
+  letter-spacing: -1px;
+  font-weight: 650;
+}
+.credit-h1-mark { font-weight: 500; }
+.credit-lead { margin-top: 10px; color: var(--credit-muted); font-size: 14px; }
+.credit-account {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 5px;
+  color: #999;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.credit-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--credit-green);
+  flex: none;
+}
+.credit-preview-tag {
+  padding: 1px 7px;
+  border: 1px solid #5b513b;
+  border-radius: 5px;
+  background: #2b271e;
+  color: #d8c79f;
+  font-size: 11px;
+}
+
+.credit-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 330px;
+  gap: 24px;
+  align-items: start;
+}
+.credit-main-column { min-width: 0; }
+
+/* ------------------------------ 余额卡 --------------------------------- */
+.credit-balance {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  min-height: 156px;
+  padding: 26px 30px;
+  border: 1px solid #353535;
+  border-radius: 16px;
+  background: linear-gradient(115deg, #242424, #1d1f21);
+}
+.credit-balance-body { min-width: 0; }
+.credit-balance-label { color: #b5b5b5; font-size: 13px; }
+.credit-balance-kind {
+  margin-top: 2px;
+  color: #8f8f8f;
+  font-size: 12px;
+  min-height: 0;
+}
+.credit-balance-kind:empty { display: none; }
+.credit-balance-value {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.credit-balance-value strong {
+  font-size: 40px;
+  line-height: 1.25;
+  font-weight: 550;
+  letter-spacing: -1.1px;
+}
+.credit-balance-value span { color: #adadad; font-size: 14px; }
+.credit-balance-foot {
+  margin-top: 8px;
+  color: #8e8e8e;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.credit-balance-rows { margin-top: 8px; }
+.credit-balance-row {
+  display: flex;
+  gap: 8px;
+  color: #a9a9a9;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.credit-balance-row dt::after { content: "："; }
+.credit-notice {
+  margin-top: 10px;
+  padding: 7px 10px;
+  border: 1px solid #5b4a3b;
+  border-radius: 7px;
+  background: #2c241d;
+  color: #e0c6a5;
+  font-size: 12px;
+}
+.credit-wallet-art {
+  flex: none;
+  width: 74px;
+  height: 74px;
+  margin: 0 5px 0 18px;
+  border: 1px solid #353c46;
+  border-radius: 22px;
+  background: #282c32;
+  color: #87b9ff;
+  display: grid;
+  place-items: center;
+  transform: rotate(-8deg);
+}
+
+/* ------------------------------ 套餐档位 ------------------------------- */
+.credit-packages { margin-top: 28px; }
+.credit-section-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 13px;
+}
+.credit-section-label h2 { font-size: 15px; font-weight: 550; }
+.credit-section-label span { color: #888; font-size: 12px; }
+.credit-tier-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.credit-tier { position: relative; display: block; cursor: pointer; }
+.credit-tier input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+.credit-tier-body {
+  display: block;
+  padding: 24px 20px 21px;
+  border: 1px solid var(--credit-line-strong);
+  border-radius: 12px;
+  background: var(--credit-panel);
+  transition: border-color 0.18s, background 0.18s, transform 0.18s,
+              box-shadow 0.18s;
+}
+.credit-tier:hover .credit-tier-body {
+  border-color: #6e8cae;
+  background: #23262a;
+  transform: translateY(-3px);
+}
+.credit-tier input:checked + .credit-tier-body {
+  padding: 23px 19px 20px;
+  border: 2px solid #438fea;
+  background: var(--credit-blue-soft);
+}
+.credit-tier input:focus-visible + .credit-tier-body {
+  outline: 2px solid #a4ceff;
+  outline-offset: 4px;
+}
+.credit-tier input:disabled + .credit-tier-body {
+  opacity: 0.45;
+  transform: none;
+}
+.credit-tier:has(input:disabled) { cursor: default; }
+.credit-tier-price {
+  display: block;
+  font-size: 27px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+  font-variant-numeric: tabular-nums;
+}
+.credit-tier-price small {
+  margin-right: 3px;
+  color: #bcbcbc;
+  font-size: 16px;
+  font-weight: 400;
+}
+.credit-tier-credit { display: block; margin-top: 13px; color: #aaa; font-size: 13px; }
+.credit-tier input:checked + .credit-tier-body .credit-tier-credit { color: #b7d5fa; }
+.credit-tier-check {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #438fea;
+  color: #fff;
+  font-size: 11px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+}
+.credit-tier input:checked + .credit-tier-body .credit-tier-check { display: flex; }
+.credit-rate {
+  margin-top: 14px;
+  color: var(--credit-muted-2);
+  font-size: 12px;
+}
+
+/* ------------------------------ 付款摘要 ------------------------------- */
+.credit-checkout {
+  min-height: 386px;
+  padding: 25px;
+  border: 1px solid #343434;
+  border-radius: 16px;
+  background: var(--credit-panel);
+}
+.credit-checkout h2 { color: #bbb; font-size: 14px; font-weight: 500; }
+.credit-receive {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin-top: 18px;
+  font-variant-numeric: tabular-nums;
+}
+.credit-receive strong {
+  font-size: 34px;
+  font-weight: 550;
+  letter-spacing: -1px;
+  line-height: 1.2;
+}
+.credit-receive span { color: #999; font-size: 14px; }
+.credit-rule { height: 1px; margin: 24px 0 18px; border: 0; background: #333; }
+.credit-detail {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 15px 0;
+  color: #999;
+  font-size: 13px;
+}
+.credit-detail strong { color: #ddd; font-weight: 500; font-variant-numeric: tabular-nums; }
+.credit-alipay { display: inline-flex; align-items: center; gap: 7px; color: #ddd; }
+.credit-alipay-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  background: #1677ff;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 650;
+  display: grid;
+  place-items: center;
+}
+.credit-total { margin-top: 24px; color: #ccc; }
+.credit-total strong { font-size: 23px; letter-spacing: -0.5px; }
+.credit-pay {
+  width: 100%;
+  min-height: 48px;
+  margin-top: 6px;
+  padding: 10px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border: 1px solid #3291ff;
+  border-radius: 9px;
+  background: var(--credit-blue-strong);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  transition: background 0.15s, transform 0.15s, box-shadow 0.15s;
+}
+.credit-pay:hover:not(:disabled) {
+  background: #238bfb;
+  transform: translateY(-2px);
+  box-shadow: 0 7px 20px #007aff24;
+}
+.credit-pay:active:not(:disabled) { transform: translateY(0); }
+.credit-pay:disabled {
+  border-color: #3a3a3a;
+  background: #303030;
+  color: #999;
+}
+.credit-pay-link { text-decoration: none; }
+.credit-checkout-note {
+  margin-top: 11px;
+  text-align: center;
+  color: var(--credit-muted-2);
+  font-size: 11px;
+}
+.credit-state-message {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid #424242;
+  border-radius: 8px;
+  background: #252525;
+  color: #c4c4c4;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.credit-state-message.credit-success {
+  border-color: #345d46;
+  background: #203128;
+  color: #a6e3c1;
+}
+.credit-state-message.credit-error {
+  border-color: #5d3b3b;
+  background: #312323;
+  color: #e3b1b1;
+}
+
+/* ------------------------------ 订单结果 ------------------------------- */
+.credit-order {
+  padding: 26px 28px;
+  border: 1px solid #343434;
+  border-radius: 16px;
+  background: var(--credit-panel);
+}
+.credit-order h2 { color: #bbb; font-size: 14px; font-weight: 500; }
+.credit-order-state {
+  margin-top: 14px;
+  font-size: 27px;
+  font-weight: 550;
+  letter-spacing: -0.5px;
+}
+.credit-order-detail { margin-top: 8px; color: var(--credit-muted); font-size: 13px; }
+.credit-order-facts {
+  margin: 22px 0;
+  display: grid;
+  gap: 11px;
+}
+.credit-order-facts div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #2b2b2b;
+}
+.credit-order-facts dt { color: #929292; font-size: 12px; }
+.credit-order-facts dd {
+  color: #ddd;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+.credit-order-links { margin-top: 16px; }
+.credit-order-back { color: #9ac8ff; font-size: 13px; }
+.credit-order-back:hover { text-decoration: underline; }
+
+/* ------------------------------ 记录表 --------------------------------- */
+.credit-history { margin-top: 42px; }
+.credit-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.credit-history-head h2 { font-size: 16px; font-weight: 550; }
+.credit-history-box {
+  overflow-x: auto;
+  border: 1px solid var(--credit-line);
+  border-radius: 12px;
+  background: #1a1a1a;
+}
+.credit-history table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.credit-history th {
+  padding: 12px 20px;
+  background: #1d1d1d;
+  color: #929292;
+  font-size: 12px;
+  font-weight: 400;
+  white-space: nowrap;
+}
+.credit-history td {
+  padding: 15px 20px;
+  border-top: 1px solid #2b2b2b;
+  color: #b9b9b9;
+  vertical-align: top;
+}
+.credit-history td:nth-child(2) { color: #e1e1e1; }
+.credit-history th:last-child,
+.credit-history td:last-child { text-align: right; }
+.credit-history td small {
+  display: block;
+  margin-top: 2px;
+  color: #7f7f7f;
+  font-size: 11px;
+}
+.credit-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #94caaa;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.credit-status::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #75b68d;
+}
+.credit-status.is-closed { color: #a99a9a; }
+.credit-status.is-closed::before { background: #a07575; }
+.credit-status.is-waiting { color: #c9b98e; }
+.credit-status.is-waiting::before { background: #c9a75e; }
+.credit-status.is-unavailable { color: #a5a5a5; }
+.credit-status.is-unavailable::before { background: #8a8a8a; }
+.credit-empty {
+  padding: 18px 20px;
+  color: #8c8c8c;
+  font-size: 13px;
+}
+.credit-more {
+  display: block;
+  margin: 14px auto 0;
+  padding: 7px 18px;
+  border: 1px solid #414141;
+  border-radius: 8px;
+  background: #212121;
+  color: #c4c4c4;
+  font-size: 12px;
+}
+.credit-more:hover { border-color: #6a6a6a; color: #fff; }
+
+.credit-noscript {
+  margin-top: 24px;
+  padding: 12px 14px;
+  border: 1px solid #5b4a3b;
+  border-radius: 8px;
+  background: #2c241d;
+  color: #e0c6a5;
+  font-size: 13px;
+}
+
+.credit-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 30px;
+  padding-bottom: 14px;
+  color: #747474;
+  font-size: 12px;
+}
+.credit-footer a { color: #999; }
+.credit-footer a:hover { color: #ccc; }
+
+[hidden] { display: none !important; }
+
+/* ------------------------------- 响应式 -------------------------------- */
+@media (max-width: 850px) {
+  .credit-layout { grid-template-columns: minmax(0, 1fr) 290px; gap: 18px; }
+  .credit-checkout { min-height: 0; padding: 22px; }
+  .credit-tier-body { padding: 22px 14px 19px; }
+  .credit-tier input:checked + .credit-tier-body { padding: 21px 13px 18px; }
+  .credit-nav { gap: 14px; }
+}
+
+@media (max-width: 680px) {
+  .credit-topbar-inner { height: 62px; padding: 0 20px; }
+  .credit-brand { gap: 9px; font-size: 17px; }
+  .credit-brand .site-logo { width: 32px; height: 32px; }
+  .credit-brand-sep,
+  .credit-brand-page { display: none; }
+  .credit-nav-link span { display: none; }
+  .credit-main { padding: 26px 18px 14px; }
+  .credit-heading { margin-bottom: 22px; }
+  .credit-heading h1 { margin-top: 12px; font-size: 28px; }
+  .credit-account { display: none; }
+  .credit-layout { grid-template-columns: 1fr; gap: 22px; }
+  .credit-balance { min-height: 140px; padding: 22px; }
+  .credit-balance-value strong { font-size: 34px; }
+  .credit-wallet-art { width: 56px; height: 56px; border-radius: 17px; margin: 0; }
+  .credit-wallet-art svg { width: 28px; height: 28px; }
+  .credit-tier-grid { gap: 8px; }
+  .credit-tier-body { padding: 20px 11px 17px; }
+  .credit-tier input:checked + .credit-tier-body { padding: 19px 10px 16px; }
+  .credit-tier-price { font-size: 23px; }
+  .credit-tier-credit { margin-top: 10px; font-size: 11px; }
+  .credit-tier-check { top: 8px; right: 8px; width: 15px; height: 15px; }
+  .credit-checkout { padding: 22px; }
+  .credit-receive { margin-top: 10px; }
+  .credit-receive strong { font-size: 31px; }
+  .credit-history { margin-top: 32px; }
+  .credit-history th, .credit-history td { padding: 13px 11px; font-size: 12px; }
+  .credit-history th:first-child, .credit-history td:first-child { padding-left: 14px; }
+  .credit-amount-col { display: none; }
+  .credit-history td small { margin-top: 3px; }
+  .credit-footer { margin-top: 24px; font-size: 11px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}

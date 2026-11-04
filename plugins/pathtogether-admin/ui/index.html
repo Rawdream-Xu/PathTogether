@@ -611,6 +611,8 @@
                       aria-selected="false" tabindex="-1" aria-controls="adm-tabpanel-detail">账务流水</button>
               <button type="button" class="adm-tab" role="tab" id="adm-tab-unpriced"
                       aria-selected="false" tabindex="-1" aria-controls="adm-tabpanel-detail">计费异常</button>
+              <button type="button" class="adm-tab" role="tab" id="adm-tab-credit"
+                      aria-selected="false" tabindex="-1" aria-controls="adm-tabpanel-detail">Credit 待办</button>
             </div>
             <div class="adm-tabpanel" id="adm-tabpanel-detail" role="tabpanel" aria-labelledby="adm-tab-usage">
               <!-- 模型调用（2026-10-20 review 二：默认「按用户 / 小时」聚合，
@@ -721,6 +723,48 @@
                 </div>
                 <div class="adm-pager">
                   <button type="button" id="adm-unpriced-more-btn" class="adm-btn-secondary">加载更多</button>
+                </div>
+              </div>
+              <!-- Credit 待办（2026-10-27，spec §9）：跨账户待核对 hold、
+                   异常订单、unknown/failed 退款、冻结账户与对账状态。
+                   只读；处置动作在用户详情抽屉的 Credit 钱包区。 -->
+              <div id="adm-credit-section" hidden>
+                <p class="adm-note">Credit 钱包待办：待核对 hold（最旧优先）、付款/退款异常、冻结账户与账务对账。对账只报告、不自动修账；处置动作在用户详情 → Credit 钱包。</p>
+                <div class="adm-form-actions">
+                  <button type="button" id="adm-credit-refresh-btn" class="adm-btn-secondary">刷新</button>
+                  <span id="adm-credit-todo-status" class="adm-status" role="status"></span>
+                </div>
+                <h3>账务对账</h3>
+                <p id="adm-credit-reconcile-status" class="adm-status" role="status"></p>
+                <dl id="adm-credit-reconcile-dl" class="adm-kv"></dl>
+                <ul id="adm-credit-reconcile-list" class="adm-alerts"></ul>
+                <h3>待核对 hold（pending_reconciliation）</h3>
+                <div class="adm-table-wrap">
+                  <table class="adm-table">
+                    <thead><tr><th>hold</th><th>用户</th><th>call 后缀</th><th>状态</th><th>原因</th><th>短差</th><th>实际</th><th>创建</th></tr></thead>
+                    <tbody id="adm-credit-pending-holds-tbody"></tbody>
+                  </table>
+                </div>
+                <h3>异常订单</h3>
+                <div class="adm-table-wrap">
+                  <table class="adm-table">
+                    <thead><tr><th>订单</th><th>用户</th><th>金额</th><th>支付</th><th>异常</th><th>创建</th></tr></thead>
+                    <tbody id="adm-credit-anomalous-orders-tbody"></tbody>
+                  </table>
+                </div>
+                <h3>退款异常（unknown / failed）</h3>
+                <div class="adm-table-wrap">
+                  <table class="adm-table">
+                    <thead><tr><th>退款</th><th>用户</th><th>订单</th><th>金额</th><th>状态</th><th>错误</th><th>创建</th></tr></thead>
+                    <tbody id="adm-credit-problem-refunds-tbody"></tbody>
+                  </table>
+                </div>
+                <h3>冻结账户</h3>
+                <div class="adm-table-wrap">
+                  <table class="adm-table">
+                    <thead><tr><th>账户</th><th>用户</th><th>状态</th><th>余额</th><th>预占</th><th>冻结原因</th><th>冻结时间</th></tr></thead>
+                    <tbody id="adm-credit-frozen-accounts-tbody"></tbody>
+                  </table>
                 </div>
               </div>
             </div>

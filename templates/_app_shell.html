@@ -228,6 +228,11 @@
             <div id="acct-pop-remaining" class="acct-pop-remaining">—</div>
             <div id="acct-pop-detail" class="acct-pop-detail"></div>
           </div>
+          {# Credit 钱包（0088）：credits 账户显示充值入口；legacy/owner 隐藏。
+             新标签打开（rel=noopener），不打断当前切片/对话。 #}
+          <a id="acct-topup-link" class="acct-settings acct-topup-link"
+             href="/app/credits" target="_blank" rel="noopener"
+             data-i18n="acct.credits.topup" hidden>充值 Credit</a>
           <button type="button" id="acct-settings-btn" class="acct-settings" data-i18n="acct.settings" hidden>账户设置</button>
           <!-- 反馈问题（改版第四轮 §3）第二入口：账户弹层内（与侧栏底部链接同功能） -->
           <button type="button" id="acct-feedback-btn" class="acct-settings" data-i18n="fbk.entry" hidden>反馈问题</button>

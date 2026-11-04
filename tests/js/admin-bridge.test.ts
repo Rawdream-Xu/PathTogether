@@ -447,7 +447,23 @@ describe("AdminBridge host — §8.4 method→permission mapping (drift guard)",
 			//（billing:read 只读）；「研究删除」一级页退役，新增 users.research（抽屉
 			//「研究数据」只读，复用 users:read），researchDeletionJobs.list/retry 保留兼容。
 			// 35 → 38
-			expect(Object.keys(table)).toHaveLength(38);
+			// 2026-10-27（Credit 钱包 D2/spec §9）：新增 11 个 admin.credits.*
+			// 桥方法——4 个只读（billing:read）与 7 个资金写（credits:write）。
+			// 38 → 49
+			expect(Object.keys(table)).toHaveLength(49);
+			// Credit 钱包：读复用 billing:read，写收敛到 credits:write
+			//（旧 admin.billing.adjust 仍不在表内）
+			expect(table["admin.credits.user.get"]).toBe("admin:billing:read");
+			expect(table["admin.credits.pending.list"]).toBe("admin:billing:read");
+			expect(table["admin.credits.orders.list"]).toBe("admin:billing:read");
+			expect(table["admin.credits.reconcile.get"]).toBe("admin:billing:read");
+			expect(table["admin.credits.grant"]).toBe("admin:credits:write");
+			expect(table["admin.credits.refund.create"]).toBe("admin:credits:write");
+			expect(table["admin.credits.refund.query"]).toBe("admin:credits:write");
+			expect(table["admin.credits.refund.cancel"]).toBe("admin:credits:write");
+			expect(table["admin.credits.refund.retry"]).toBe("admin:credits:write");
+			expect(table["admin.credits.hold.resolve"]).toBe("admin:credits:write");
+			expect(table["admin.credits.unfreeze"]).toBe("admin:credits:write");
 			expect(table["admin.formatRequests.list"]).toBe("admin:users:read");
 			expect(table["admin.formatRequests.get"]).toBe("admin:users:read");
 			expect(table["admin.formatRequests.patch"]).toBe("admin:users:write");
@@ -549,6 +565,12 @@ describe("AdminBridge host — §8.4 method→permission mapping (drift guard)",
 			"admin.researchDeletionJobs.list",
 			// 2026-10-20（评审 §三）：用户研究数据视图（user_id 必填）
 			"admin.users.research",
+			// 2026-10-27（Credit 钱包 D2）：只读方法（user_id / limit /
+			// orders 筛选 / 无参数对账）
+			"admin.credits.user.get",
+			"admin.credits.pending.list",
+			"admin.credits.orders.list",
+			"admin.credits.reconcile.get",
 		]) {
 			expect(schemas[method], method).toBeTruthy();
 			// 附加属性一律拒绝（iframe 不能借桥传任意字段）
@@ -2378,5 +2400,132 @@ describe("AdminBridge host — W2 格式申请工单方法（format-requests，2
 		const rs = responses(posted, "r1");
 		expect(rs[0].env.ok).toBe(false);
 		expect((rs[0].env.error as { code: string }).code).toBe("permission_denied");
+	});
+});
+
+describe("AdminBridge host — Credit 钱包（2026-10-27 spec §9）", () => {
+	const PERMS = ["admin:billing:read", "admin:credits:write"];
+
+	function makeCreditHost(fetchJson: (url: string, o?: unknown) => Promise<unknown>) {
+		return makeHost({ permissions: PERMS, fetchJson });
+	}
+
+	it("只读方法代理到 /api/admin/v1/credits/*（orders 带筛选）", async () => {
+		const urls: string[] = [];
+		const { handle, posted, contentWindow } = makeCreditHost(async (url) => {
+			urls.push(url);
+			return { status: 200, ok: true, body: {} };
+		});
+		handle._handleIframeLoad();
+		handle._handleWindowMessage({
+			source: contentWindow,
+			data: requestEnv(nonce0(posted), "r1", "admin.credits.user.get", {
+				user_id: "usr_1",
+			}),
+		});
+		await ticks();
+		handle._handleWindowMessage({
+			source: contentWindow,
+			data: requestEnv(nonce0(posted), "r2", "admin.credits.pending.list", {
+				limit: 25,
+			}),
+		});
+		await ticks();
+		handle._handleWindowMessage({
+			source: contentWindow,
+			data: requestEnv(nonce0(posted), "r3", "admin.credits.orders.list", {
+				limit: 10, user_id: "usr_1", payment_state: "paid",
+				cursor: "abc",
+			}),
+		});
+		await ticks();
+		handle._handleWindowMessage({
+			source: contentWindow,
+			data: requestEnv(nonce0(posted), "r4", "admin.credits.reconcile.get", {}),
+		});
+		await ticks();
+		expect(urls[0]).toBe("/api/admin/v1/credits/users/usr_1");
+		expect(urls[1]).toBe("/api/admin/v1/credits/pending?limit=25");
+		expect(urls[2]).toBe(
+			"/api/admin/v1/credits/orders?cursor=abc&limit=10&user_id=usr_1&payment_state=paid");
+		expect(urls[3]).toBe("/api/admin/v1/credits/reconcile");
+	});
+
+	it("写方法 POST 并携带 Idempotency-Key 头（路径参数编码）", async () => {
+		const calls: Array<{ url: string; opts: Record<string, unknown> }> = [];
+		const { handle, posted, contentWindow } = makeCreditHost(
+			async (url, o) => {
+				calls.push({ url, opts: (o || {}) as Record<string, unknown> });
+				return { status: 200, ok: true, body: { ok: true } };
+			});
+		handle._handleIframeLoad();
+		handle._handleWindowMessage({
+			source: contentWindow,
+			data: requestEnv(nonce0(posted), "r1", "admin.credits.grant", {
+				user_id: "usr_1", credits: "12.5", reason: "活动补偿",
+				idempotency_key: "grant-key-1",
+			}),
+		});
+		await ticks();
+		expect(calls[0].url).toBe("/api/admin/v1/credits/users/usr_1/grants");
+		expect(calls[0].opts.method).toBe("POST");
+		expect((calls[0].opts.headers as Record<string, string>)["Idempotency-Key"])
+			.toBe("grant-key-1");
+		expect(JSON.parse(String(calls[0].opts.body))).toEqual({
+			reason: "活动补偿", credits: "12.5",
+		});
+	});
+
+	it("hold.resolve/grant 的 schema 门拒绝非法枚举与超精度金额", async () => {
+		const { handle, posted, contentWindow } = makeCreditHost(
+			async () => ({ status: 200, ok: true, body: {} }));
+		handle._handleIframeLoad();
+		handle._handleWindowMessage({
+			source: contentWindow,
+			data: requestEnv(nonce0(posted), "r1", "admin.credits.grant", {
+				user_id: "usr_1", credits: "1.12345678", reason: "x",
+				idempotency_key: "k-1",
+			}),
+		});
+		await ticks();
+		handle._handleWindowMessage({
+			source: contentWindow,
+			data: requestEnv(nonce0(posted), "r2", "admin.credits.hold.resolve", {
+				hold_id: "hold_1", action: "explode", reason: "理由",
+				idempotency_key: "k-2",
+			}),
+		});
+		await ticks();
+		handle._handleWindowMessage({
+			source: contentWindow,
+			data: requestEnv(nonce0(posted), "r3", "admin.credits.grant", {
+				user_id: "usr_1", credits: "1", reason: "x",
+				idempotency_key: "bad key!",
+			}),
+		});
+		await ticks();
+		expect((responses(posted, "r1")[0].env.error as { code: string }).code)
+			.toBe("invalid_params");
+		expect((responses(posted, "r2")[0].env.error as { code: string }).code)
+			.toBe("invalid_params");
+		expect((responses(posted, "r3")[0].env.error as { code: string }).code)
+			.toBe("invalid_params");
+	});
+
+	it("仅 billing:read 时写方法 permission_denied", async () => {
+		const { handle, posted, contentWindow } = makeHost({
+			permissions: ["admin:billing:read"],
+			fetchJson: async () => ({ status: 200, ok: true, body: {} }),
+		});
+		handle._handleIframeLoad();
+		handle._handleWindowMessage({
+			source: contentWindow,
+			data: requestEnv(nonce0(posted), "r1", "admin.credits.unfreeze", {
+				user_id: "usr_1", reason: "核实", idempotency_key: "k-3",
+			}),
+		});
+		await ticks();
+		expect((responses(posted, "r1")[0].env.error as { code: string }).code)
+			.toBe("permission_denied");
 	});
 });
