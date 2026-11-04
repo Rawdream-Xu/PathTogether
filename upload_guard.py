@@ -1091,9 +1091,8 @@ DEFAULTS_RATIONALE = {
         "的极大 specimen；上线前按真实分布 P99 收紧，且边缘代理 body 上限"
         "必须同步同值"),
     "UPLOAD_USER_QUOTA_BYTES": (
-        "10 GiB：与单请求上限同量级，受邀账号正常实验量；单账号占用收敛到"
-        " 10 GiB，管理员可经 admin API 按用户调高（硬顶 1 TiB）。存量行由"
-        " 0090 迁移从旧默认 20 GiB 收敛，自定义值保持不变"),
+        "10 GiB：新用户默认；早期真实用户由 0091 迁移保留 20 GiB。管理员"
+        "可经 admin API 按用户调高（硬顶 1 TiB）"),
     "UPLOAD_RESERVED_FREE_BYTES": (
         "20 GiB：为 PG 数据目录、日志与解压暂存保留的余量；按磁盘规格与"
         "PG/日志实际增速复核"),
