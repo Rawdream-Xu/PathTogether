@@ -555,7 +555,7 @@ describe("壳模板：侧栏两主入口 + 抽屉 + 对话框（W3/W4/W6）", ()
 		const frForm = shellSrc.slice(
 			shellSrc.indexOf('id="format-req-form"'),
 			shellSrc.indexOf('id="fr-result"'));
-		expect((frForm.match(/<label class="imp-field"/g) || []).length).toBe(4);
+		expect((frForm.match(/<label class="imp-field"/g) || []).length).toBe(7);
 	});
 
 	it("i18n：新键 zh/en 双语齐备；sb.upload/sb.format.req 更新为产品词", () => {
@@ -818,6 +818,8 @@ describe("U05：申请新格式支持", () => {
 		}));
 		h.els["fr-result"].hidden = true;   // 模板初始 hidden
 		h.els["fr-ext"].value = ".zsv";
+		h.els["fr-manufacturer"].value = "Scanner X";
+		h.els["fr-sample-url"].value = "https://example.com/original.zsv";
 		h.els["fr-message"].value = "来自设备 X";
 		h.UI.submitFormatRequest();
 		await flush();
@@ -839,6 +841,8 @@ describe("U05：申请新格式支持", () => {
 		}));
 		h.els["fr-result"].hidden = true;
 		h.els["fr-ext"].value = ".zsv";
+		h.els["fr-manufacturer"].value = "Scanner X";
+		h.els["fr-sample-url"].value = "https://example.com/original.zsv";
 		h.els["fr-contact"].value = "a@b.c";
 		h.UI.submitFormatRequest();
 		await flush();

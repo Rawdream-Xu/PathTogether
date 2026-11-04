@@ -4306,6 +4306,7 @@
 
   // 样本列短文案：无 / 有 / 已缺失（元数据在但文件丢失）
   function formatSampleText(rec) {
+    if (rec && rec.sample_url && !rec.has_sample) return "下载链接";
     if (!rec || !rec.has_sample) return "无";
     return rec.sample_missing ? "已缺失" : "有";
   }
@@ -4411,6 +4412,9 @@
     dl.className = "adm-kv adm-detail-kv";
     kvRow(dl, "工单 id", rec.id);
     kvRow(dl, "格式扩展名", rec.format_ext);
+    kvRow(dl, "厂商 / 设备 / 软件", rec.manufacturer);
+    kvRow(dl, "原文件下载链接", rec.sample_url);
+    kvRow(dl, "网盘提取码", rec.sample_access_code);
     kvRow(dl, "留言", rec.message);
     kvRow(dl, "联系方式", rec.contact);
     kvRow(dl, "业务状态",

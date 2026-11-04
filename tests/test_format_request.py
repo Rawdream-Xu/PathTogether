@@ -85,6 +85,9 @@ class FakeRequest:
 def _submit_full(ident=None, **kwargs):
     daily_limit = kwargs.pop("daily_limit", None)
     max_sample_bytes = kwargs.pop("max_sample_bytes", None)
+    kwargs.setdefault("manufacturer", "Test scanner / software 1.0")
+    if "sample" not in kwargs:
+        kwargs.setdefault("sample_url", "https://example.com/original.slide")
     files = {}
     if "sample" in kwargs:
         files["sample"] = kwargs.pop("sample")
@@ -128,7 +131,7 @@ def _mail_row(request_id):
 # --------------------------------------------------------------------------- #
 def test_submit_minimal_request_sends_mail():
     c = _client()
-    r = c.post("/api/format-requests", data={"format_ext": ".xyz"},
+    r = c.post("/api/format-requests", data={"format_ext": ".xyz", "manufacturer": "Scanner X", "sample_url": "https://example.com/original.xyz"},
                content_type="multipart/form-data")
     assert r.status_code == 202, r.get_data(as_text=True)
     body = r.get_json()
@@ -200,10 +203,10 @@ def test_daily_rate_limit_http_route(monkeypatch):
     c = _client()
     for i in range(2):
         r = c.post("/api/format-requests",
-                   data={"format_ext": ".x%d" % i},
+                   data={"format_ext": ".x%d" % i, "manufacturer": "Scanner X", "sample_url": "https://example.com/original"},
                    content_type="multipart/form-data")
         assert r.status_code == 202
-    r = c.post("/api/format-requests", data={"format_ext": ".x3"},
+    r = c.post("/api/format-requests", data={"format_ext": ".x3", "manufacturer": "Scanner X", "sample_url": "https://example.com/original"},
                content_type="multipart/form-data")
     assert r.status_code == 429
     assert r.get_json()["code"] == "rate_limited"
@@ -498,7 +501,8 @@ def test_f07_cas_mismatch_version_conflict_and_view_hygiene():
     assert set(view) == {
         "id", "format_ext", "message", "contact", "business_status",
         "created_at", "updated_at", "has_sample", "sample_name",
-        "sample_size", "sample_missing", "mail_status"}
+        "sample_size", "sample_missing", "mail_status",
+        "manufacturer", "sample_url", "sample_access_code"}
     assert view["mail_status"] in ("queued", "sending", "sent",
                                    "failed", "uncertain")
     dumped = repr(view)
@@ -508,3 +512,40 @@ def test_f07_cas_mismatch_version_conflict_and_view_hygiene():
     admin_view = frs.public_view(rec, admin=True)
     assert "sample_internal_ref" in admin_view
     assert "mail_last_error" in admin_view
+
+
+@pytest.mark.parametrize("extra,code", [
+    ({}, "manufacturer_required"),
+    ({"manufacturer": "Scanner X"}, "sample_required"),
+    ({"manufacturer": "Scanner X", "sample_url": "javascript:alert(1)"}, "invalid_sample_url"),
+    ({"manufacturer": "Scanner X", "sample_url": "https://example.com:bad/file"}, "invalid_sample_url"),
+    ({"manufacturer": "Scanner X", "sample_access_code": "1234"}, "invalid_sample_url"),
+])
+def test_required_evidence_cannot_be_bypassed(extra, code):
+    c = _client()
+    response = c.post("/api/format-requests", data={"format_ext": ".svs", **extra})
+    assert response.status_code == 400
+    assert response.get_json()["code"] == code
+    assert _row_count() == 0
+    assert frs.drain_once() == 0
+
+
+def test_empty_sample_does_not_create_request_or_leave_file():
+    body, status = _submit_full(format_ext=".svs", sample=_FakeFile(io.BytesIO(b""), "empty.svs"))
+    assert status == 400 and body["code"] == "sample_empty"
+    assert _row_count() == 0
+    assert not os.listdir(frs.samples_dir())
+
+
+def test_download_evidence_survives_store_and_mail():
+    body, status = _submit_full(format_ext=".kfbf", manufacturer="Vendor / scanner / v2.2",
+                               sample_url="https://example.com/full.kfbf", sample_access_code="abc9")
+    assert status == 202
+    rec = frs.get_request(body["request_id"])
+    assert rec["manufacturer"] == "Vendor / scanner / v2.2"
+    assert rec["sample_url"] == "https://example.com/full.kfbf"
+    assert frs.public_view(rec)["sample_access_code"] == "abc9"
+    assert frs.drain_once() == 1
+    mail = rmw.install_fake_sender().sent[0][2]
+    assert rec["manufacturer"] in mail and rec["sample_url"] in mail and "abc9" in mail
+    assert "样本文件: (未附带)" not in mail

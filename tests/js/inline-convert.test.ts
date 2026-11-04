@@ -2088,7 +2088,7 @@ describe("上传行按钮（§6.3 是按钮全集的唯一权威）", () => {
 			hidden: true, textContent: "", innerHTML: "", value: "", disabled: false,
 			checked: false, type: "", title: "", name: "", className: "",
 			style: {}, children,
-			classList: { add() { }, remove() { }, contains() { return false; } },
+			classList: { add() { }, remove() { }, toggle() { }, contains() { return false; } },
 			parentNode: null,
 			appendChild(c: unknown) { children.push(c); return c; },
 			removeChild(c: unknown) {
@@ -2355,7 +2355,7 @@ describe("上传行按钮（§6.3 是按钮全集的唯一权威）", () => {
 		expect(msgOn).not.toContain("/tools/slides");
 	});
 
-	it("申请支持内核：预填 format_ext/message 并 POST /api/format-requests（§9.2 第 13 项）", async () => {
+	it("申请支持先打开预填表单，补齐实际文件证据后才提交", async () => {
 		const h = loadApp(inlineCaps(true));
 		const up = h.w.HP_UPLOAD as unknown as {
 			submitFormatRequestCore(o: Record<string, unknown>): void;
@@ -2378,12 +2378,21 @@ describe("上传行按钮（§6.3 是按钮全集的唯一权威）", () => {
 			name: "shot.jpg", error: { code: "content_ext_mismatch", detectedType: "png" },
 		});
 		await flush(10);
+		expect(posted).toBeNull();
+		expect(h.els["format-req-form"].hidden).toBe(false);
+		expect(h.els["fr-ext"].value).toBe("jpg");
+		await up.submitFormatRequestCore({ ext: "jpg", message: h.els["fr-message"].value,
+			manufacturer: "Vendor / scanner v2", sampleUrl: "https://example.com/original.jpg",
+			sampleAccessCode: "a123" });
 		expect(posted, "未发起带 body 的 /api/format-requests").toBeTruthy();
 		expect(posted!.url).toBe("/api/format-requests");
 		// FormData：断言字段已带上（test 环境有真 FormData）
 		const fd = posted!.body as FormData;
 		expect(typeof fd.get).toBe("function");
 		expect(fd.get("format_ext")).toBe("jpg");
+		expect(fd.get("manufacturer")).toBe("Vendor / scanner v2");
+		expect(fd.get("sample_url")).toBe("https://example.com/original.jpg");
+		expect(fd.get("sample_access_code")).toBe("a123");
 		expect(String(fd.get("message"))).toContain("code=content_ext_mismatch");
 		expect(String(fd.get("message"))).toContain("detected=png");
 	});
@@ -2393,7 +2402,7 @@ describe("上传行按钮（§6.3 是按钮全集的唯一权威）", () => {
 		// hidden），用户点完行内按钮看不到任何回执——设计 §7.1 要求行内显示
 		// 申请编号 + 业务状态。
 		const h = loadApp(inlineCaps(true));
-		const up = h.w.HP_UPLOAD as unknown as { openSupportForEntry(e: unknown): void };
+		const up = h.w.HP_UPLOAD as unknown as { openSupportForEntry(e: unknown): void; submitFormatRequest(): void };
 		h.fetch.mockImplementation((url: string, init?: { body?: unknown }) => {
 			if (String(url) === "/api/format-requests" && init && init.body) {
 				return Promise.resolve({
@@ -2408,6 +2417,9 @@ describe("上传行按钮（§6.3 是按钮全集的唯一权威）", () => {
 		const entry = { id: "ic_row_support", name: "shot.jpg", state: "rejected",
 			error: { code: "content_ext_mismatch", detectedType: "png" } };
 		up.openSupportForEntry(entry);
+		h.els["fr-manufacturer"].value = "Scanner X";
+		h.els["fr-sample-url"].value = "https://example.com/original.jpg";
+		up.submitFormatRequest();
 		await flush(10);
 		// 编号回执记在 entry 上（inlineRowNoteText 据此渲染行附注）
 		expect((entry as { supportRequestId?: string }).supportRequestId).toBe("fr_row1");
@@ -2415,6 +2427,17 @@ describe("上传行按钮（§6.3 是按钮全集的唯一权威）", () => {
 		// 或回显键；只断言它带上了编号，不锁具体措辞）
 		expect((entry as { supportBusinessStatus?: string }).supportBusinessStatus)
 			.toBe("submitted");
+	});
+	it("缺少原文件/厂商或链接非法时不发请求", async () => {
+		const h = loadApp(inlineCaps(true));
+		const up = h.w.HP_UPLOAD as { submitFormatRequestCore(o: unknown): Promise<boolean> };
+		for (const fields of [ {}, { manufacturer: "Scanner X" },
+			{ manufacturer: "Scanner X", sampleUrl: "javascript:alert(1)" },
+			{ manufacturer: "Scanner X", sampleFile: new Blob([]) } ]) {
+			expect(await up.submitFormatRequestCore({ ext: ".svs", ...fields })).toBe(false);
+		}
+		expect(h.fetch.mock.calls.filter((c: unknown[]) => c[1] &&
+			(c[1] as { method?: string }).method === "POST")).toHaveLength(0);
 	});
 	it("续传语义：未收口的 ingestionId 作为 resumeJobId 复用（§6.4）", () => {
 		const h = loadApp(inlineCaps(true));
@@ -2913,7 +2936,7 @@ describe("失败提示与入口（独立审查）", () => {
 			hidden: true, textContent: "", innerHTML: "", value: "", disabled: false,
 			checked: false, type: "", title: "", name: "", href: "",
 			style: {}, children,
-			classList: { add() { }, remove() { }, contains() { return false; } },
+			classList: { add() { }, remove() { }, toggle() { }, contains() { return false; } },
 			parentNode: null,
 			appendChild(c: unknown) { children.push(c); return c; },
 			removeChild(c: unknown) {
@@ -3072,7 +3095,7 @@ describe("失败提示与入口（独立审查）", () => {
 		const posts: unknown[] = [];
 		let resolvePost: (() => void) | null = null;
 		h.fetch.mockImplementation((url: string, init?: unknown) => {
-			if (String(url) === "/api/format-requests") {
+			if (String(url) === "/api/format-requests" && (init as { method?: string })?.method === "POST") {
 				posts.push(init);
 				return new Promise((res) => {
 					resolvePost = () => res({
@@ -3089,6 +3112,8 @@ describe("失败提示与入口（独立审查）", () => {
 		const submitBtn = h.els["fr-submit"] || h.doc.getElementById("fr-submit");
 		h.els["fr-ext"] = h.els["fr-ext"] || h.doc.getElementById("fr-ext");
 		(h.els["fr-ext"] as { value: string }).value = "xyz";
+		h.els["fr-manufacturer"].value = "Scanner X";
+		h.els["fr-sample-url"].value = "https://example.com/original.xyz";
 		const drawerSubmit = (h.w.HP_PROJECT_UI as unknown as {
 			submitFormatRequest(): void;
 		}).submitFormatRequest;

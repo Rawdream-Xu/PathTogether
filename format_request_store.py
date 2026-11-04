@@ -134,6 +134,7 @@ def _default_daily_limit():
 # --------------------------------------------------------------------------- #
 _SELECT_REQUEST = (
     "SELECT r.id, r.owner_user_id, r.format_ext, r.message, r.contact, "
+    "r.manufacturer, r.sample_url, r.sample_access_code, "
     "r.sample_name, r.sample_size, r.sample_sha256, r.sample_internal_ref, "
     "r.sample_missing, r.business_status, r.admin_note, r.version, "
     "r.created_at, r.updated_at, "
@@ -154,7 +155,8 @@ def _fetch_one(cur, request_id, owner_user_id=None):
 
 
 def submit_request(*, user_id, format_ext, message="", contact="",
-                   sample=None, daily_limit=None) -> dict:
+                   sample=None, daily_limit=None, manufacturer="",
+                   sample_url="", sample_access_code="") -> dict:
     """登记一条格式兼容请求 + queued 邮件作业（同一事务），返回合并行。
 
     原子限流：per-user 事务级咨询锁（hashtext 域分离）串行化同用户并发
@@ -189,14 +191,15 @@ def submit_request(*, user_id, format_ext, message="", contact="",
                     "INSERT INTO format_requests "
                     "(id, owner_user_id, format_ext, message, contact, "
                     " sample_name, sample_size, sample_sha256, "
-                    " sample_internal_ref) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    " sample_internal_ref, manufacturer, sample_url, sample_access_code) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     (request_id, owner, format_ext, message or "",
                      contact or "", sample.get("name") or None,
                      int(sample["size"]) if sample.get("size") is not None
                      else None,
                      sample.get("sha256") or None,
-                     sample.get("path") or None))
+                     sample.get("path") or None, manufacturer, sample_url,
+                     sample_access_code))
                 cur.execute(
                     "INSERT INTO format_request_mail_jobs (job_id, request_id) "
                     "VALUES (%s, %s)",
@@ -383,6 +386,9 @@ def public_view(rec, *, admin=False):
         "format_ext": rec.get("format_ext"),
         "message": rec.get("message"),
         "contact": rec.get("contact"),
+        "manufacturer": rec.get("manufacturer") or "",
+        "sample_url": rec.get("sample_url") or "",
+        "sample_access_code": rec.get("sample_access_code") or "",
         "business_status": rec.get("business_status"),
         "created_at": _iso(rec.get("created_at")),
         "updated_at": _iso(rec.get("updated_at")),
@@ -422,6 +428,7 @@ def _build_mail(rec):
         "用户: %s" % (rec.get("owner_user_id") or "(匿名/内网)"),
         "格式/扩展名: %s" % rec.get("format_ext"),
         "联系邮箱: %s" % (rec.get("contact") or "(未留)"),
+        "厂商 / 设备 / 软件: %s" % (rec.get("manufacturer") or "(未留)"),
         "",
         "备注:",
         rec.get("message") or "(无)",
@@ -435,8 +442,11 @@ def _build_mail(rec):
             "  SHA-256: %s" % rec.get("sample_sha256"),
             "  服务器路径: %s" % rec.get("sample_internal_ref"),
         ]
-    else:
+    elif not rec.get("sample_url"):
         lines += ["", "样本文件: (未附带)"]
+    if rec.get("sample_url"):
+        lines += ["", "原文件下载链接: %s" % rec["sample_url"],
+                  "提取码: %s" % (rec.get("sample_access_code") or "(无)")]
     return to, subject, "\n".join(lines)
 
 
@@ -492,6 +502,7 @@ def claim_mail_job(worker_id, lease_seconds=LEASE_SECONDS):
                     "SELECT j.job_id, j.request_id, "
                     "r.id, r.owner_user_id, r.format_ext, r.message, "
                     "r.contact, r.sample_name, r.sample_size, "
+                    "r.manufacturer, r.sample_url, r.sample_access_code, "
                     "r.sample_sha256, r.sample_internal_ref, "
                     "r.sample_missing, r.created_at "
                     "FROM format_request_mail_jobs j "

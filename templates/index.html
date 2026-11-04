@@ -9,7 +9,7 @@
   <!-- OpenSeadragon 5.0.1（已本地化） -->
   <script src="/static/openseadragon.min.js"></script>
   <!-- 中英双语切换（必须在 app.js 之前加载，提供 window.HP_I18N） -->
-  <script src="/static/i18n.js?v=20261103a"></script>
+  <script src="/static/i18n.js?v=20261104a"></script>
 </head>
 <body class="app-mode-official" data-app-mode="official">
   <script>
@@ -60,7 +60,7 @@
   <!-- 上传面板内转换编排器（设计 docs/upload-inline-convert-design-20261015.md）：
        classic script，与共享引擎同风格；必须晚于 cos-uploader/slide-sniff、
        早于 app.js（app.js 初始化时读 window.HP_INLINE_CONVERT） -->
-  <script src="/static/upload/inline-convert.js?v=20261103a"></script>
+  <script src="/static/upload/inline-convert.js?v=20261104a"></script>
   <!-- 用户反馈客户端记录器（改版第四轮 §3）：先于 app.js 尽早装载——包装
        window.fetch / console / onerror 并记录点击控件标识。只在内存环形缓冲
        （300 条 / 15 分钟），不落盘、不上传；用户主动发送反馈时才随
@@ -71,7 +71,7 @@
   <script src="/static/anno-geometry.js?v=20261009a"></script>
   <!-- AI 面板外框共享模块（拖动/缩放/建议提示条；正式版与 Demo 同源） -->
   <script src="/static/ai-panel-shell.js?v=20261102a"></script>
-  <script src="/static/app.js?v=20261103a"></script>
+  <script src="/static/app.js?v=20261104a"></script>
   {% if histopilot_ui_enabled %}<script src="/static/ai-panel-chrome.js?v=20261009b"></script>{% endif %}
 </body>
 </html>

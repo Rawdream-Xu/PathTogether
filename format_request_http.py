@@ -27,6 +27,7 @@ import hashlib
 import os
 import re
 import secrets
+from urllib.parse import urlsplit
 
 import format_request_store as store
 
@@ -97,6 +98,9 @@ def _save_sample(fileobj, max_bytes):
     except Exception as e:  # noqa: BLE001  # 与旧路由同语义：流读取异常 → 400
         _unlink_quietly(dst)
         return None, _err("样本保存失败: %s" % type(e).__name__, status=400)
+    if total == 0:
+        _unlink_quietly(dst)
+        return None, _err("样本文件为空，请附带完整原文件", code="sample_empty")
     return {"name": safe, "path": dst, "size": total,
             "sha256": h.hexdigest()}, None
 
@@ -140,8 +144,33 @@ def handle_submit(ident, req, *, daily_limit=None,
                 or not _CONTACT_RE.match(contact):
             return _err("联系邮箱格式不正确")
 
+    manufacturer = (form.get("manufacturer") or "").strip()
+    if not manufacturer or len(manufacturer) > 500 or "\x00" in manufacturer:
+        return _err("请填写厂商、设备型号或扫描/导出软件信息（上限 500 字符）",
+                    code="manufacturer_required")
+    sample_url = (form.get("sample_url") or "").strip()
+    access_code = (form.get("sample_access_code") or "").strip()
+    if len(access_code) > 200 or "\x00" in access_code:
+        return _err("提取码过长或含非法字符", code="invalid_sample_access_code")
+    if sample_url:
+        try:
+            parsed = urlsplit(sample_url)
+            valid_url = (len(sample_url) <= 2000
+                         and not any(c.isspace() or ord(c) < 32 for c in sample_url)
+                         and parsed.scheme in ("http", "https")
+                         and bool(parsed.hostname) and parsed.port != 0
+                         and parsed.username is None and parsed.password is None)
+        except ValueError:
+            valid_url = False
+        if not valid_url:
+            return _err("请填写有效的 HTTP(S) 原文件下载链接", code="invalid_sample_url")
+    elif access_code:
+        return _err("填写提取码时须同时提供原文件下载链接", code="invalid_sample_url")
+
     sample_info = None
     fileobj = req.files.get("sample")
+    if not sample_url and (fileobj is None or not fileobj.filename):
+        return _err("请附带实际原文件或填写原文件下载链接", code="sample_required")
     if fileobj is not None and (fileobj.filename or ""):
         sample_info, err = _save_sample(fileobj, max_sample_bytes)
         if err is not None:
@@ -151,6 +180,8 @@ def handle_submit(ident, req, *, daily_limit=None,
         rec = store.submit_request(
             user_id=_owner_key(ident), format_ext=format_ext,
             message=message, contact=contact, sample=sample_info,
+            manufacturer=manufacturer, sample_url=sample_url,
+            sample_access_code=access_code,
             daily_limit=daily_limit)
     except store.RateLimited:
         if sample_info:

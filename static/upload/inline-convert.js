@@ -225,6 +225,8 @@
     }
     var code = (e.error && e.error.code) || "unsupported";
     var parts = ["code=" + code];
+    if (name) parts.push("filename=" + name.slice(0, 255));
+    if (e.file && typeof e.file.size === "number") parts.push("size=" + e.file.size);
     if (e.error && e.error.detectedType) {
       parts.push("detected=" + e.error.detectedType);
     }

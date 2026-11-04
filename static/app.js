@@ -1673,6 +1673,9 @@
     formatReqForm: $("format-req-form"),
     frExt: $("fr-ext"),
     frMessage: $("fr-message"),
+    frManufacturer: $("fr-manufacturer"),
+    frSampleUrl: $("fr-sample-url"),
+    frSampleAccessCode: $("fr-sample-access-code"),
     frContact: $("fr-contact"),
     frSample: $("fr-sample"),
     frSubmit: $("fr-submit"),
@@ -10622,7 +10625,7 @@
       // 未登记扩展名：说明 + 同行的「申请支持该格式」（设计 §7.1）。文案不再
       // 点名 /tools/slides（该分支与开关无关，开启时也不走工具页）。
       addRowButton(row, tt("upload.inline.action.requestSupport"), function () {
-        openSupportForEntry({ name: file && file.name,
+        openSupportForEntry({ name: file && file.name, file: file,
           error: { code: "unsupported_ext" } });
       });
       row.finish(10000);
@@ -10702,7 +10705,7 @@
     row.setStage("upload.kfb.unavailable");
     addRowButton(row, tt("upload.cos.retry"), retry);
     addRowButton(row, tt("upload.inline.action.requestSupport"), function () {
-      openSupportForEntry({ name: displayName || (file && file.name) || "",
+      openSupportForEntry({ name: displayName || (file && file.name) || "", file: file,
         error: { code: "needs_conversion" } });
     });
     row.finish(60000);
@@ -11934,44 +11937,37 @@
     inlineOrch.act(entry.id, "continue");
   }
 
-  /// 申请支持（§7.1）：复用既有抽屉的表单提交内核（format_ext + message 预填）。
-  /// 结果**同时**落在两处：抽屉的 `#fr-result`（既有语义）与**该行**——
-  /// 面板行不在抽屉里，只写 drawer 的话用户点完什么都看不到（抽屉默认关闭，
-  /// 行内按钮却是主入口）。
+  // Failed uploads open a reviewable evidence form; a click never submits a bare request.
+  var formatRequestEntry = null;
   function openSupportForEntry(entry) {
-    var pre;
-    try {
-      pre = window.HP_INLINE_CONVERT
-        ? window.HP_INLINE_CONVERT.prefillFormatRequest(entry, {
-            inlineConvert: inlineConvertCaps(),
-          })
-        : { format_ext: "", message: "" };
-    } catch (e) {
-      pre = { format_ext: "", message: "" };
+    if (!els.formatReqForm || (els.frSubmit && els.frSubmit.disabled)) return;
+    var pre = window.HP_INLINE_CONVERT
+      ? window.HP_INLINE_CONVERT.prefillFormatRequest(entry, {
+          inlineConvert: inlineConvertCaps(),
+        }) : { format_ext: "", message: "" };
+    formatRequestEntry = entry || null;
+    els.frExt.value = pre.format_ext;
+    els.frMessage.value = pre.message;
+    els.frManufacturer.value = "";
+    els.frSampleUrl.value = "";
+    els.frSampleAccessCode.value = "";
+    els.frSample.value = "";
+    // Reuse the selected original when the browser supports FileList assignment.
+    // Oversize/bundle inputs require a complete downloadable file/package instead.
+    if (entry && !entry.bundle && entry.file && entry.file.size > 0 &&
+        entry.file.size <= importDrawerState.maxSampleBytes) {
+      try {
+        var transfer = new DataTransfer();
+        transfer.items.add(entry.file);
+        els.frSample.files = transfer.files;
+      } catch (e) { /* The visible file picker remains available. */ }
     }
-    if (typeof submitFormatRequestCore !== "function") return;
-    if (entry && entry.supportInFlight) return;   // 行内在途守卫（连点不去重）
-    if (entry) entry.supportInFlight = true;
-    submitFormatRequestCore({
-      ext: pre.format_ext,
-      message: pre.message,
-      onResult: function (rec) {
-        renderFormatRequestResult(rec);
-        loadRecentFormatRequests();
-        // 行内回执：申请编号 + 业务状态（沿用同一键与「只说已登记、不说已
-        // 兼容」的口径）。
-        var rid = (rec && (rec.request_id || rec.id)) || "";
-        if (entry && rid) {
-          entry.supportRequestId = rid;
-          entry.supportBusinessStatus = (rec && rec.business_status) || "";
-          inlineRowRefreshNote(entry);
-        }
-        toast(tt("fr.ok.registered", { id: rid }), "success");
-      },
-      onError: function (msg) { toast(msg, "error"); },
-    }).then(function () {
-      if (entry) entry.supportInFlight = false;
-    });
+    if (els.frResult) els.frResult.hidden = true;
+    openImportDrawer();
+    switchImportTab("local");
+    els.formatReqForm.hidden = false;
+    if (els.formatReqForm.scrollIntoView) els.formatReqForm.scrollIntoView({ block: "nearest" });
+    if (els.frManufacturer.focus) els.frManufacturer.focus();
   }
 
   /// 只重画某行的附注（不触碰阶段/进度——申请支持与转换阶段无关）。
@@ -12496,6 +12492,7 @@
     importBundleRows: importBundleRows,
     submitFormatRequestCore: submitFormatRequestCore,
     openSupportForEntry: openSupportForEntry,
+    submitFormatRequest: submitFormatRequest,
   };
   // 供测试（升级 A）：侧栏开合控制器与偏好存取的真实逻辑入口
   window.HP_SIDEBAR = {
@@ -13178,6 +13175,27 @@
       return Promise.resolve(false);
     }
     var sample = opts.sampleFile || null;
+    var manufacturer = String(opts.manufacturer || "").trim();
+    var sampleUrl = String(opts.sampleUrl || "").trim();
+    var accessCode = String(opts.sampleAccessCode || "").trim();
+    var errorKey = !manufacturer || manufacturer.length > 500 ? "fr.need.manufacturer" : "";
+    if (!errorKey && !sample && !sampleUrl) errorKey = "fr.need.sample";
+    if (!errorKey && sample && !sample.size) errorKey = "fr.sample.empty";
+    if (!errorKey && accessCode && !sampleUrl) errorKey = "fr.sample.url.invalid";
+    if (!errorKey && accessCode.length > 200) errorKey = "fr.sample.code.invalid";
+    if (!errorKey && sampleUrl) {
+      try {
+        var url = new URL(sampleUrl);
+        if (sampleUrl.length > 2000 || /[\s\x00-\x1f]/.test(sampleUrl) ||
+            !/^https?:$/.test(url.protocol) || !url.hostname || url.username || url.password ||
+            url.port === "0") errorKey = "fr.sample.url.invalid";
+      } catch (e) { errorKey = "fr.sample.url.invalid"; }
+    }
+    if (errorKey) {
+      if (opts.onError) opts.onError(t(errorKey));
+      else toast(t(errorKey), "error");
+      return Promise.resolve(false);
+    }
     // 前端预检样本大小（服务端仍权威校验）
     if (sample && sample.size > importDrawerState.maxSampleBytes) {
       var tooBig = t("fr.sample.too.large", {
@@ -13191,6 +13209,9 @@
     fd.append("format_ext", ext);
     fd.append("message", String(opts.message || "").trim());
     fd.append("contact", String(opts.contact || "").trim());
+    fd.append("manufacturer", manufacturer);
+    fd.append("sample_url", sampleUrl);
+    fd.append("sample_access_code", accessCode);
     if (sample) fd.append("sample", sample);
     // 401 不跳转（设计 §7.1）：申请支持不属状态推进请求，不把页面导航走
     return apiFetchNoRedirect("/api/format-requests", { method: "POST", body: fd })
@@ -13222,13 +13243,17 @@
   /// 未知码保留原始 error 文本供排障）。
   function frFailureText(status, body) {
     var code = (body && body.code) || "";
+    var evidenceErrors = { sample_required: "fr.need.sample", sample_empty: "fr.sample.empty",
+      manufacturer_required: "fr.need.manufacturer", invalid_sample_url: "fr.sample.url.invalid",
+      invalid_sample_access_code: "fr.sample.code.invalid" };
+    if (evidenceErrors[code]) return t(evidenceErrors[code]);
     if (status === 429 || code === "rate_limited") return t("fr.err.rate");
     if (status === 413 || code === "request_too_large") return t("fr.err.too_large");
     return (body && body.error) || t("fr.fail");
   }
 
   function submitFormatRequest() {
-    if (!els.frExt || !els.frSubmit) return;
+    if (!els.frExt || !els.frSubmit || els.frSubmit.disabled) return;
     var ext = (els.frExt.value || "").trim();
     if (!ext) { toast(t("fr.need.ext"), "error"); return; }
     // 前端预检样本大小（服务端仍权威校验）
@@ -13239,14 +13264,26 @@
       }), "error");
       return;
     }
+    var entry = formatRequestEntry;
     els.frSubmit.disabled = true;
     submitFormatRequestCore({
       ext: ext,
       message: els.frMessage.value,
+      manufacturer: els.frManufacturer.value,
+      sampleUrl: els.frSampleUrl.value,
+      sampleAccessCode: els.frSampleAccessCode.value,
       contact: els.frContact.value,
       sampleFile: (els.frSample.files && els.frSample.files[0]) || null,
       onResult: function (rec) {
         renderFormatRequestResult(rec);
+        if (entry) {
+          entry.supportRequestId = rec.request_id || rec.id || "";
+          entry.supportBusinessStatus = rec.business_status || "submitted";
+          if (entry.id) inlineRowRefreshNote(entry);
+        }
+        formatRequestEntry = null;
+        els.frManufacturer.value = ""; els.frSampleUrl.value = "";
+        els.frSampleAccessCode.value = "";
         els.frExt.value = ""; els.frMessage.value = "";
         els.frContact.value = ""; els.frSample.value = "";
       },
@@ -14831,6 +14868,8 @@
         els.formatReqForm.hidden = !els.formatReqForm.hidden;
       });
       els.frCancel.addEventListener("click", function () {
+        if (els.frSubmit.disabled) return;
+        formatRequestEntry = null;
         els.formatReqForm.hidden = true;
       });
       els.frSubmit.addEventListener("click", submitFormatRequest);

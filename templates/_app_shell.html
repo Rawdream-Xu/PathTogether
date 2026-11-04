@@ -853,12 +853,17 @@
           <button id="format-req-btn" type="button" class="btn secondary block"
                   data-i18n="sb.format.req">申请新格式支持</button>
           <div id="format-req-form" class="format-req-form" hidden>
+            <p class="imp-hint" data-i18n="fr.evidence.hint">请提供出现问题的完整原文件（附件或下载链接二选一）及厂商信息，用于复现并补充格式变体支持。</p>
             <label class="imp-field" for="fr-ext">
               <span data-i18n="fr.ext.label">格式 / 扩展名</span>
               <input id="fr-ext" type="text" maxlength="40" autocomplete="off" />
             </label>
+            <label class="imp-field" for="fr-manufacturer">
+              <span data-i18n="fr.manufacturer.label">厂商 / 设备型号 / 扫描或导出软件（必填）</span>
+              <input id="fr-manufacturer" type="text" maxlength="500" required autocomplete="off" />
+            </label>
             <label class="imp-field" for="fr-message">
-              <span data-i18n="fr.msg.label">来源设备 / 软件与说明</span>
+              <span data-i18n="fr.msg.label">报错与补充说明（可选）</span>
               <textarea id="fr-message" maxlength="2000" rows="3"></textarea>
             </label>
             <label class="imp-field" for="fr-contact">
@@ -866,8 +871,16 @@
               <input id="fr-contact" type="email" maxlength="200" autocomplete="off" />
             </label>
             <label class="imp-field" for="fr-sample">
-              <span data-i18n="fr.sample.label">小样本（可选）</span>
+              <span data-i18n="fr.sample.label">原文件附件（与下载链接二选一）</span>
               <input id="fr-sample" type="file" />
+            </label>
+            <label class="imp-field" for="fr-sample-url">
+              <span data-i18n="fr.sample.url.label">原文件下载链接（与附件二选一）</span>
+              <input id="fr-sample-url" type="url" maxlength="2000" placeholder="https://" autocomplete="off" />
+            </label>
+            <label class="imp-field" for="fr-sample-access-code">
+              <span data-i18n="fr.sample.code.label">网盘提取码（如有）</span>
+              <input id="fr-sample-access-code" type="text" maxlength="200" autocomplete="off" />
             </label>
             <p class="imp-hint" id="fr-sample-max"></p>
             <div class="np-actions">
