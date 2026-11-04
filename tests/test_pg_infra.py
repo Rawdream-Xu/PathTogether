@@ -361,7 +361,7 @@ def test_schema_migrations_recorded(conn):
         # 集合式回填（GREATEST，全空保持 NULL，可重跑）。
         "0089_user_last_active.sql",
         # 新用户默认存储配额 10 GiB，存量用户保留 20 GiB（为
-        # 本迁移前注册的普通用户预建 20 GiB 行；已有行不动）。
+        # 本迁移前注册的真实普通用户预建 20 GiB 行；已有行不动）。
         "0090_upload_user_quota_10g.sql",
     ]
 

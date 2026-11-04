@@ -7,8 +7,9 @@
 -- 尚未上传过的用户还没有配额行，若不处理会在首次上传时拿到新默认 10 GiB。
 --
 -- 语义：
---   1. 为本迁移执行时已存在、尚无配额行的普通用户（role='user'）预建
---      20 GiB（21474836480）配额行——早期用户统一按 20 GiB 保留。
+--   1. 为本迁移执行时已存在、尚无配额行的真实普通用户（role='user' 且
+--      account_kind='real'）预建 20 GiB（21474836480）配额行——早期用户统一
+--      按 20 GiB 保留；dogfood 测试账号不预建，首次上传按新默认 10 GiB。
 --   2. 已有配额行一律不动（旧默认 20 GiB 与管理员手工值均保持原样；
 --      used_bytes / reserved_bytes 不碰）。
 --   3. owner 不适用配额（upload_guard.quota_applies），不建行。
@@ -20,4 +21,5 @@ INSERT INTO upload_user_quotas (user_id, quota_bytes, updated_at)
 SELECT u.user_id, 21474836480, now()
   FROM users u
  WHERE u.role = 'user'
+   AND u.account_kind = 'real'
 ON CONFLICT (user_id) DO NOTHING;

@@ -112,6 +112,8 @@ def test_migration_0090_grandfathers_existing_users_at_20_gib():
     owner, old = _make_users()
     custom = user_store.create_user("custom@x.com", "userpass1234567")
     no_row = user_store.create_user("norow@x.com", "userpass1234567")
+    dogfood = user_store.create_user("dogfood@x.com", "userpass1234567")
+    user_store.set_user_account_kind(dogfood["user_id"], "dogfood")
     # 旧默认行：已用 12 GiB + 1 GiB 预占
     _insert_quota(old["user_id"], OLD_DEFAULT, used=12 * GiB, reserved=GiB)
     # 管理员手工值：保持原样
@@ -129,6 +131,9 @@ def test_migration_0090_grandfathers_existing_users_at_20_gib():
     assert _quota(no_row["user_id"]) == {
         "quota_bytes": OLD_DEFAULT, "used_bytes": 0, "reserved_bytes": 0}
     assert _quota(owner["user_id"]) is None
+    # dogfood 测试账号不预建，首次上传按新默认 10 GiB
+    assert _quota(dogfood["user_id"]) is None
+    assert upload_guard.get_quota_row(dogfood["user_id"])["quota_bytes"] == NEW_DEFAULT
 
     # 幂等重跑：值不变、不报错
     _run_migration()
