@@ -361,7 +361,7 @@ def test_schema_migrations_recorded(conn):
         # 集合式回填（GREATEST，全空保持 NULL，可重跑）。
         "0089_user_last_active.sql",
         # 普通用户默认存储配额 20 GiB → 10 GiB（仅收敛仍等于旧默认
-        # 21474836480 的 upload_user_quotas 行；自定义值/已用量不动）。
+        # 21474836480 且已用 ≤ 10 GiB 的行；自定义值与已超 10 GiB 的保留）。
         "0090_upload_user_quota_10g.sql",
     ]
 

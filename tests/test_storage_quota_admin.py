@@ -121,8 +121,9 @@ def test_migration_0090_converges_only_old_default_and_is_idempotent():
 
     _run_migration()
 
+    # 已用超过 10 GiB 的旧默认行保留 20 GiB（产品决定：不在迁移中卡住重度用户）
     assert _quota(old["user_id"]) == {
-        "quota_bytes": NEW_DEFAULT, "used_bytes": 12 * GiB,
+        "quota_bytes": OLD_DEFAULT, "used_bytes": 12 * GiB,
         "reserved_bytes": GiB}
     assert _quota(custom["user_id"]) == {
         "quota_bytes": 5 * GiB, "used_bytes": 2 * GiB, "reserved_bytes": 0}
@@ -130,7 +131,7 @@ def test_migration_0090_converges_only_old_default_and_is_idempotent():
 
     # 幂等重跑：值不变、不报错
     _run_migration()
-    assert _quota(old["user_id"])["quota_bytes"] == NEW_DEFAULT
+    assert _quota(old["user_id"])["quota_bytes"] == OLD_DEFAULT
     assert _quota(custom["user_id"])["quota_bytes"] == 5 * GiB
 
 

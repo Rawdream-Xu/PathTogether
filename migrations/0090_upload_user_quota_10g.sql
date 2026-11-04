@@ -10,10 +10,10 @@
 -- 语义边界：
 --   1. 只命中 quota_bytes 恰为旧默认 21474836480 的行；其它值（owner/管理员
 --      手工调整过的配额）保持不变——迁移不猜测哪些是「自定义」，绝不覆盖。
---   2. 只改 quota_bytes；used_bytes / reserved_bytes 一律不动。已用超过
---      10 GiB 的账号：已有文件不删除、不受影响；后续 reserve/topup 的不等式
---      （used + reserved + nbytes <= quota）自然拒绝新增上传。used > quota
---      不触发任何减法/归零，额度判断不会崩溃或下溢。
+--   2. 已用超过 10 GiB 的账号保留 20 GiB（产品决定 2026-11-04：上线时已有
+--      两位用户分别占用约 19.4 / 13.4 GiB，不在迁移中把他们卡住；之后由
+--      管理员按需单独调整）。只改 quota_bytes，used_bytes / reserved_bytes
+--      一律不动。
 --   3. 幂等：UPDATE 条件精确匹配旧默认值，重跑不再命中（行值已是新默认）。
 --   4. updated_at 同步刷新，表示该行在本次数据迁移中被改写。
 -- =========================================================================== --
@@ -21,4 +21,5 @@
 UPDATE upload_user_quotas
    SET quota_bytes = 10737418240,
        updated_at = now()
- WHERE quota_bytes = 21474836480;
+ WHERE quota_bytes = 21474836480
+   AND used_bytes <= 10737418240;
