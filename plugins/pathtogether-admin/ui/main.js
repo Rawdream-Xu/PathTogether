@@ -1618,6 +1618,176 @@
     return String(source);
   }
 
+  // ---- 存储容量换算（2026-11-04：GB ↔ 字节；全程 BigInt，禁 float 误差）----
+  // 1 GB = 1024^3 字节（与后端 UPLOAD_USER_QUOTA_* 常量同口径）。输入允许
+  // 最多两位小数；服务端另做 [0, 1 TiB] 整数边界校验（本层只挡非法形状）。
+  var GB_BYTES = 1073741824n;
+  var STORAGE_MAX_BYTES = 1099511627776n; // 1 TiB
+
+  function gbToBytes(text) {
+    var s = String(text === null || text === undefined ? "" : text).trim();
+    if (!/^[0-9]+(\.[0-9]{1,2})?$/.test(s)) return null;
+    try {
+      var parts = s.split(".");
+      var whole = BigInt(parts[0]);
+      var digits = (parts[1] || "").length;
+      var frac = digits ? BigInt(parts[1]) : 0n;
+      var den = 10n ** BigInt(digits);
+      var bytes = whole * GB_BYTES + (frac * GB_BYTES + den / 2n) / den;
+      if (bytes < 0n || bytes > STORAGE_MAX_BYTES) return null;
+      // 1 TiB < 2^53：Number 精确（桥 schema 要求 integer JSON number）
+      return Number(bytes);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function bytesToGbText(bytes) {
+    if (bytes === null || bytes === undefined || bytes === "") return "—";
+    var b;
+    try { b = BigInt(bytes); } catch (e) { return String(bytes); }
+    if (b < 0n) return String(bytes);
+    // 一位小数展示（四舍五入）；输入框回显仍以实际字节为准。
+    var tenths = (b * 10n + GB_BYTES / 2n) / GB_BYTES;
+    var whole = tenths / 10n;
+    var frac = tenths % 10n;
+    return whole.toString() + (frac ? "." + frac.toString() : "") + " GB";
+  }
+
+  // ---- 存储容量编辑器（2026-11-04）----
+  // 用户抽屉内「查看 + 修改」入口：显示 已用 / 上限（GB），输入以 GB 为单位，
+  // 调用 admin.users.storageQuota.get/set/restoreDefault（字节绝对值；恢复
+  // 默认 = 当前 env 默认 10 GiB）。只改上限，不清零已用/预占。
+  function renderStorageQuotaEditor(u) {
+    var wrap = document.createElement("div");
+    wrap.className = "adm-drawer-override";
+    var title = document.createElement("p");
+    title.className = "adm-note";
+    title.textContent = "存储容量：查看该用户已用 / 上限，并可按需单独调整上限。"
+      + "调低到低于已用不会删除已有文件，只会拒绝新增上传。";
+    var usage = document.createElement("p");
+    usage.className = "adm-status";
+    usage.textContent = "存储用量读取中…";
+    var field = document.createElement("div");
+    field.className = "adm-field";
+    var label = document.createElement("label");
+    label.className = "adm-field-label";
+    var inputId = "adm-storage-quota-input";
+    label.htmlFor = inputId;
+    label.textContent = "存储上限（GB，必填）";
+    var input = document.createElement("input");
+    input.type = "text";
+    input.id = inputId;
+    input.placeholder = "如 10";
+    input.autocomplete = "off";
+    input.setAttribute("aria-describedby", "adm-storage-quota-help");
+    var help = document.createElement("small");
+    help.className = "adm-field-help";
+    help.id = "adm-storage-quota-help";
+    help.textContent = "1 GB = 1024³ 字节；允许 0–1024 GB（0 = 禁止新增上传）。"
+      + "只改上限，已用/预占不清零。";
+    field.appendChild(label);
+    field.appendChild(input);
+    field.appendChild(help);
+    var statusEl = document.createElement("p");
+    statusEl.className = "adm-status";
+    var actions = document.createElement("div");
+    actions.className = "adm-form-actions";
+    var defaultBytes = null;
+
+    function editorStatus(text) {
+      statusEl.textContent = text;
+      setStatus("adm-users-status", text);
+    }
+
+    function renderUsage(res) {
+      res = res || {};
+      if (res.default_quota_bytes !== null && res.default_quota_bytes !== undefined) {
+        defaultBytes = res.default_quota_bytes;
+      }
+      usage.textContent = "已用 " + bytesToGbText(res.used_bytes) +
+        " / 上限 " + bytesToGbText(res.quota_bytes) +
+        (res.reserved_bytes ? "（在途预占 " + bytesToGbText(res.reserved_bytes) + "）" : "");
+      input.placeholder = "当前 " + bytesToGbText(res.quota_bytes);
+    }
+
+    function loadQuota() {
+      usage.textContent = "存储用量读取中…";
+      request("admin.users.storageQuota.get", { user_id: u.user_id })
+        .then(renderUsage)
+        .catch(function (err) {
+          usage.textContent = "存储配额读取失败：" + errText(err);
+          showError(err && err.code, err && err.message);
+        });
+    }
+
+    function markInvalid(message) {
+      input.setAttribute("aria-invalid", "true");
+      if (input.focus) input.focus();
+      editorStatus(message);
+    }
+
+    var saveBtn = actionBtn("设置存储容量", function () {
+      var text = (input.value || "").trim();
+      var bytes = text ? gbToBytes(text) : null;
+      if (!text || bytes === null) {
+        markInvalid("存储上限非法（GB，最多两位小数，范围 0–1024）");
+        return;
+      }
+      clearInvalid(input);
+      askConfirm($("adm-drawer-confirm"),
+        "确认把 " + identityText(u) + " 的存储上限定为 " + text +
+        " GB（" + bytes + " 字节）？只改上限：已用/预占不清零；"
+        + "调低到低于已用后，已有文件保留、后续新增上传被拒。",
+        function () {
+          editorStatus("保存中…");
+          request("admin.users.storageQuota.set", {
+            user_id: u.user_id,
+            quota_bytes: bytes,
+          }).then(function (res) {
+            editorStatus("已设置存储上限 " + bytesToGbText(res.quota_bytes)
+              + "（已用/预占保留）");
+            input.value = "";
+            renderUsage(res);
+          }).catch(function (err) {
+            editorStatus(errText(err));
+            showError(err && err.code, err && err.message);
+          });
+        });
+    }, "primary");
+
+    var restoreBtn = actionBtn("恢复默认", function () {
+      var defText = defaultBytes === null ? "默认值" : bytesToGbText(defaultBytes);
+      askConfirm($("adm-drawer-confirm"),
+        "确认把 " + identityText(u) + " 的存储上限恢复为默认 " + defText +
+        "？已用/预占保留，不会清零。",
+        function () {
+          editorStatus("保存中…");
+          request("admin.users.storageQuota.restoreDefault", {
+            user_id: u.user_id,
+          }).then(function (res) {
+            editorStatus("已恢复默认存储上限 " + bytesToGbText(res.quota_bytes)
+              + "（已用/预占保留）");
+            input.value = "";
+            renderUsage(res);
+          }).catch(function (err) {
+            editorStatus(errText(err));
+            showError(err && err.code, err && err.message);
+          });
+        });
+    }, "secondary");
+
+    actions.appendChild(saveBtn);
+    actions.appendChild(restoreBtn);
+    wrap.appendChild(title);
+    wrap.appendChild(usage);
+    wrap.appendChild(field);
+    wrap.appendChild(actions);
+    wrap.appendChild(statusEl);
+    loadQuota();
+    return wrap;
+  }
+
   // ------------------------------------------------------------------
   // user 抽屉金额编辑器（wave 2 §4.3）：唯一两个金额动作——
   //   「设置总额度」admin.spend.userTotalLimit.set（绝对 limit + CAS）
@@ -2544,6 +2714,11 @@
       els.drawerBody.appendChild(renderTotalLimitEditor(u));
     } else if (info.shape === "window") {
       els.drawerBody.appendChild(renderWindowAdjustEditor(u));
+    }
+    // 2026-11-04：普通用户的存储容量查看/修改（owner 不受存储配额限制，
+    // 不渲染该区）。放在金额动作之后，仍是同一抽屉内的独立区块。
+    if (u.role === "user") {
+      els.drawerBody.appendChild(renderStorageQuotaEditor(u));
     }
     els.drawer.hidden = false;
     if (els.drawerMask) els.drawerMask.hidden = false;
@@ -5969,6 +6144,9 @@
     creditUnitsText: creditUnitsText,
     yuanTextToFen: yuanTextToFen,
     newIdempotencyKey: newIdempotencyKey,
+    // 2026-11-04：存储容量 GB ↔ 字节换算（测试锁定精度/边界）
+    gbToBytes: gbToBytes,
+    bytesToGbText: bytesToGbText,
     tempViewStatusOf: tempViewStatusOf,
     handshakeState: function () {
       return {

@@ -994,7 +994,8 @@ def test_admin_manifest_plugin_version_bumped_with_hashes():
     # 增加厂商、原文件下载链接与网盘提取码；生产 bundle 已在不可变版本目录
     # 使用，内容不同不得复用版本号。
     # 0.4.22 = release-20261105b 合并：Credit 钱包 admin 改动 + 存储容量
-    #（存储部分在 storage-quota-10g 合并后落地）；hashes/pin 按最终 bundle
+    #（用户详情抽屉新增 admin.users.storageQuota.get/set/restoreDefault，
+    # 读 users:read、写 users:write，不扩权限域）；hashes/pin 按最终 bundle
     # 重算。
     assert data["pluginVersion"] == "0.4.22"  # hashes/pin 同步
     assert "admin:settings:read" in data["adminPermissions"]

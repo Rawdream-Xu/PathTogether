@@ -456,6 +456,46 @@ describe("账户 popover 余额（GET /api/account/credits）", () => {
 		});
 		expect(h.els["acct-pop-remaining"].textContent).toBe("—");
 	});
+
+	it("打开 popover 同时拉取存储用量：已用 x GB / 上限 y GB；owner 隐藏", async () => {
+		const h = bootApp();
+		h.HP_AUTH.applyAuthInfo(loggedIn());
+		h.fetchRoutes.set("/api/account/balance", () => ({ status: 200, body: BALANCE_OK }));
+		h.fetchRoutes.set("/api/account/storage", () => ({
+			status: 200,
+			body: {
+				quota_applies: true, quota_bytes: 10 * 1024 ** 3,
+				used_bytes: Math.round(2.5 * 1024 ** 3), reserved_bytes: 0,
+			},
+		}));
+		await openAcctPop(h);
+		await vi.waitFor(() => {
+			expect(h.els["acct-pop-storage"].textContent)
+				.toContain("acct.storage.usage");
+		});
+		expect(h.els["acct-pop-storage"].textContent).toContain("2.5 GB");
+		expect(h.els["acct-pop-storage"].textContent).toContain("10 GB");
+		expect(h.els["acct-pop-storage"].hidden).toBe(false);
+
+		// owner：quota_applies=false → 整行隐藏（不显示伪造 0）
+		const owner = bootApp();
+		owner.HP_AUTH.applyAuthInfo(
+			loggedIn({
+				username: "boss@x.com", role: "owner", user_id: "a1",
+				actor: { username: "boss@x.com", role: "owner", user_id: "a1" },
+			}),
+		);
+		owner.fetchRoutes.set("/api/account/balance", () => ({ status: 200, body: BALANCE_OK }));
+		owner.fetchRoutes.set("/api/account/storage", () => ({
+			status: 200,
+			body: { quota_applies: false, quota_bytes: null, used_bytes: null },
+		}));
+		await openAcctPop(owner);
+		await vi.waitFor(() => {
+			expect(owner.els["acct-pop-storage"].hidden).toBe(true);
+		});
+		expect(owner.els["acct-pop-storage"].textContent).toBe("");
+	});
 });
 
 describe("标注名称迁移 + 矩形 popover（§3.3）", () => {

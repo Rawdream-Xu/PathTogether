@@ -233,6 +233,9 @@
           <a id="acct-topup-link" class="acct-settings acct-topup-link"
              href="/app/credits" target="_blank" rel="noopener"
              data-i18n="acct.credits.topup" hidden>充值 Credit</a>
+          {# 存储用量（2026-11-04）：GET /api/account/storage，打开 popover 时
+             与余额一起拉取；role=user 显示「已用 x.x GB / 10 GB」，owner 隐藏。 #}
+          <div id="acct-pop-storage" class="acct-pop-detail" hidden></div>
           <button type="button" id="acct-settings-btn" class="acct-settings" data-i18n="acct.settings" hidden>账户设置</button>
           <!-- 反馈问题（改版第四轮 §3）第二入口：账户弹层内（与侧栏底部链接同功能） -->
           <button type="button" id="acct-feedback-btn" class="acct-settings" data-i18n="fbk.entry" hidden>反馈问题</button>

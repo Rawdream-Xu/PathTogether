@@ -367,6 +367,9 @@ def test_schema_migrations_recorded(conn):
         # manufacturer / sample_url / sample_access_code 三列（旧行保持可读，
         # 新提交在 HTTP 层要求证据）。
         "0090_format_request_evidence.sql",
+        # 新用户默认存储配额 10 GiB，存量用户保留 20 GiB（为
+        # 本迁移前注册的真实普通用户预建 20 GiB 行；已有行不动）。
+        "0091_upload_user_quota_10g.sql",
     ]
 
 

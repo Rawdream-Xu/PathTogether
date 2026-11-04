@@ -70,10 +70,21 @@ def _env_int(name, default):
 #: 注意：边缘代理（frp/nginx）的 body 上限必须与此值一致（docs §3.3-1）。
 UPLOAD_MAX_REQUEST_BYTES = _env_int("UPLOAD_MAX_REQUEST_BYTES", 10 * 1024 ** 3)
 
-#: 每用户空间配额字节上限（PG 权威，仅 role=user）。默认 20 GiB ≈ 2 个
-#: 上限大小的整切片，够受邀账号做几次正常实验。[测] 按 deploy-host 可用磁盘
-#: 与单用户合理保有量复核。
-UPLOAD_USER_QUOTA_BYTES = _env_int("UPLOAD_USER_QUOTA_BYTES", 20 * 1024 ** 3)
+#: 每用户空间配额字节上限（PG 权威，仅 role=user）。默认 10 GiB：与单请求
+#: 上限同量级，够受邀账号做几次正常实验，同时把单账号可占用的平台容量收敛
+#: 到 10 GiB。[测] 按 deploy-host 可用磁盘与单用户合理保有量复核。
+#: owner 不受本配额限制；管理员可经 admin API 为单个用户单独调高（硬边界见
+#: ``UPLOAD_USER_QUOTA_MIN_BYTES`` / ``UPLOAD_USER_QUOTA_MAX_BYTES``）。
+UPLOAD_USER_QUOTA_BYTES = _env_int("UPLOAD_USER_QUOTA_BYTES", 10 * 1024 ** 3)
+
+#: 管理员调整单用户配额时的硬边界（字节）。下限 0 = 立即冻结该用户的新上传
+#: （已有文件不删除、used_bytes 不清零）；上限 1 TiB = 平台单用户合理保有量
+#: 的硬顶，防止一次误操作使容量管理失去意义。
+UPLOAD_USER_QUOTA_MIN_BYTES = 0
+UPLOAD_USER_QUOTA_MAX_BYTES = 1024 ** 4
+
+#: 单用户配额调整审计动作（写入与配额变更同一事务）。
+UPLOAD_QUOTA_AUDIT_ACTION = "upload.user_quota_update"
 
 #: 磁盘保留水位：UPLOAD_DIR 所在卷 free < 该值时拒绝新写入（507）。
 #: 默认 20 GiB：需同时容纳 PG 数据目录、日志与解压暂存的并发余量。
@@ -328,8 +339,18 @@ def reservation_holder_matches(out, holder_kind, holder_id) -> bool:
             and (out.get("holder_id") or None) == holder_id)
 
 
+def _quota_out(row):
+    """配额行 → 统一 dict（字节数一律 int）。"""
+    return {
+        "user_id": row["user_id"],
+        "quota_bytes": int(row["quota_bytes"]),
+        "used_bytes": int(row["used_bytes"]),
+        "reserved_bytes": int(row["reserved_bytes"]),
+    }
+
+
 def get_quota_row(user_id):
-    """读取配额行（不存在则按 env 默认建行）；调试/测试用。"""
+    """读取配额行（不存在则按 env 默认建行）；调试/测试/管理读取用。"""
     conn = _connect()
     try:
         with pg_store.transaction(conn) as c:
@@ -342,14 +363,125 @@ def get_quota_row(user_id):
                     "SELECT user_id, quota_bytes, used_bytes, reserved_bytes "
                     "FROM upload_user_quotas WHERE user_id = %s", (user_id,))
                 row = cur.fetchone()
-        if not row:
-            return None
-        return {
-            "user_id": row["user_id"],
-            "quota_bytes": int(row["quota_bytes"]),
-            "used_bytes": int(row["used_bytes"]),
-            "reserved_bytes": int(row["reserved_bytes"]),
-        }
+        return _quota_out(row) if row else None
+    finally:
+        conn.close()
+
+
+def peek_quota_row(user_id):
+    """只读读取配额行；不存在返回 None（**不建行**，用于自助展示）。
+
+    自助用量接口不应因为用户点开账户页就产生配额行；真正需要行时由
+    reserve/set 路径惰性创建。
+    """
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT user_id, quota_bytes, used_bytes, reserved_bytes "
+                "FROM upload_user_quotas WHERE user_id = %s", (user_id,))
+            row = cur.fetchone()
+        return _quota_out(row) if row else None
+    finally:
+        conn.close()
+
+
+def _validate_quota_bytes(value):
+    """管理员配额入参校验：整数且落在 [MIN, MAX] 字节区间。"""
+    if isinstance(value, bool):
+        raise ValueError("quota_bytes 需为整数（字节）")
+    try:
+        quota = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("quota_bytes 需为整数（字节）")
+    if quota < UPLOAD_USER_QUOTA_MIN_BYTES \
+            or quota > UPLOAD_USER_QUOTA_MAX_BYTES:
+        raise ValueError(
+            "quota_bytes 需在 [%d, %d] 字节区间内"
+            % (UPLOAD_USER_QUOTA_MIN_BYTES, UPLOAD_USER_QUOTA_MAX_BYTES))
+    return quota
+
+
+def _lock_or_create_quota_row(cur, user_id):
+    """锁内确保配额行存在（首次按 env 默认建行），返回 FOR UPDATE 行。"""
+    cur.execute(
+        "INSERT INTO upload_user_quotas (user_id, quota_bytes) "
+        "VALUES (%s, %s) ON CONFLICT (user_id) DO NOTHING",
+        (user_id, UPLOAD_USER_QUOTA_BYTES))
+    cur.execute(
+        "SELECT user_id, quota_bytes, used_bytes, reserved_bytes "
+        "FROM upload_user_quotas WHERE user_id = %s FOR UPDATE", (user_id,))
+    return cur.fetchone()
+
+
+def _write_quota_update(cur, user_id, quota_bytes, *, op, actor_user_id,
+                        updated_by, audit_detail=None):
+    """锁内写入配额 + 同事务审计（set / restore-default 共用）。"""
+    import share_store_pg
+
+    before = _lock_or_create_quota_row(cur, user_id)
+    previous = int(before["quota_bytes"])
+    cur.execute(
+        "UPDATE upload_user_quotas SET quota_bytes=%s, updated_at=now() "
+        "WHERE user_id=%s "
+        "RETURNING user_id, quota_bytes, used_bytes, reserved_bytes",
+        (quota_bytes, user_id))
+    out = _quota_out(cur.fetchone())
+    detail = dict(audit_detail or {})
+    detail.update({
+        "op": op,
+        "user_id": user_id,
+        "previous_quota_bytes": previous,
+        "new_quota_bytes": out["quota_bytes"],
+        "used_bytes": out["used_bytes"],
+        "reserved_bytes": out["reserved_bytes"],
+        "updated_by": updated_by or actor_user_id,
+    })
+    share_store_pg.record_audit_tx(
+        cur, UPLOAD_QUOTA_AUDIT_ACTION,
+        actor_user_id=actor_user_id, actor_role="owner",
+        target_type="upload_user_quota", target_id=user_id, detail=detail)
+    return out
+
+
+def set_user_quota(user_id, quota_bytes, *, actor_user_id=None,
+                   updated_by=None):
+    """管理员设置单用户存储配额（绝对值，字节；行不存在则创建）。
+
+    只改 quota_bytes：used_bytes / reserved_bytes 一律不动。调低到低于已用
+    时既有文件不删除、不受影响；后续 reserve/topup 的不等式
+    ``used + reserved + nbytes <= quota`` 自然拒绝新增上传。边界见
+    ``UPLOAD_USER_QUOTA_MIN_BYTES`` / ``UPLOAD_USER_QUOTA_MAX_BYTES``。
+    写入与审计同一事务（action=``UPLOAD_QUOTA_AUDIT_ACTION``）。
+    """
+    quota = _validate_quota_bytes(quota_bytes)
+    conn = _connect()
+    try:
+        with pg_store.transaction(conn) as c:
+            with c.cursor() as cur:
+                return _write_quota_update(
+                    cur, user_id, quota, op="set_user_quota",
+                    actor_user_id=actor_user_id, updated_by=updated_by)
+    finally:
+        conn.close()
+
+
+def restore_user_quota_default(user_id, *, actor_user_id=None,
+                               updated_by=None):
+    """管理员「恢复默认」：把该用户配额显式改为**当时**的 env 默认值。
+
+    与 :func:`set_user_quota` 同款写入 + 同事务审计；used/reserved 不动。
+    """
+    conn = _connect()
+    try:
+        with pg_store.transaction(conn) as c:
+            with c.cursor() as cur:
+                return _write_quota_update(
+                    cur, user_id, int(UPLOAD_USER_QUOTA_BYTES),
+                    op="restore_user_quota_default",
+                    actor_user_id=actor_user_id, updated_by=updated_by,
+                    audit_detail={"default_quota_bytes":
+                                  int(UPLOAD_USER_QUOTA_BYTES)})
     finally:
         conn.close()
 
@@ -959,8 +1091,8 @@ DEFAULTS_RATIONALE = {
         "的极大 specimen；上线前按真实分布 P99 收紧，且边缘代理 body 上限"
         "必须同步同值"),
     "UPLOAD_USER_QUOTA_BYTES": (
-        "20 GiB ≈ 2 个上限大小切片：受邀账号正常实验量；按 deploy-host 可用磁盘"
-        "复核"),
+        "10 GiB：新用户默认；早期真实用户由 0091 迁移保留 20 GiB。管理员"
+        "可经 admin API 按用户调高（硬顶 1 TiB）"),
     "UPLOAD_RESERVED_FREE_BYTES": (
         "20 GiB：为 PG 数据目录、日志与解压暂存保留的余量；按磁盘规格与"
         "PG/日志实际增速复核"),
