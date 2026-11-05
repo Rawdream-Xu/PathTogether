@@ -624,7 +624,9 @@ test.describe("账户 chip + popover（§3.5）", () => {
 		// user = 一次性额度口径；1 nano-CNY == 1 credit unit，
 		// 37e9 nano = 3,700 Credits（不再出现 CNY）
 		await expect(page.locator("#acct-pop-scope")).toHaveText("一次性额度");
-		await expect(page.locator("#acct-pop-remaining")).toHaveText("3,700 Credits");
+		await expect(page.locator("#acct-pop-remaining")).toHaveText("3,700");
+		await expect(page.locator("#acct-pop-unit")).toHaveText("Credits");
+		await expect(page.locator("#acct-pop-unit")).toBeVisible();
 		await expect(page.locator("#acct-pop-detail")).toContainText("已用 1,300 / 5,000");
 		await expect(page.locator("#acct-pop-usage")).toBeVisible();
 		await expect(page.locator("#acct-pop-usage")).toHaveAttribute("aria-valuenow", "26");
@@ -643,6 +645,7 @@ test.describe("账户 chip + popover（§3.5）", () => {
 		await page.locator("#acct-btn").click();
 		const remaining = page.locator("#acct-pop-remaining");
 		await expect(remaining).toHaveText("—");
+		await expect(page.locator("#acct-pop-unit")).toBeHidden();
 		await expect(page.locator("#acct-pop-detail")).toContainText("额度信息暂不可用");
 		await expect(page.locator("#acct-pop-detail")).toContainText("未设置总额度");
 		await expect(page.locator("#acct-pop-usage")).toBeHidden();

@@ -386,7 +386,8 @@ describe("账户 popover：credits/legacy/owner", () => {
 		}));
 		await openPopover(h);
 		await vi.waitFor(() => {
-			expect(h.els["acct-pop-remaining"].textContent).toBe("1.2345 Credits");
+			expect(h.els["acct-pop-remaining"].textContent).toBe("1.2345");
+			expect(h.els["acct-pop-unit"].hidden).toBe(false);
 		});
 		expect(h.els["acct-pop-scope"].textContent).toBe("acct.credits.scope");
 		// issued 22,345,678 / available 12,345,678 → used 10,000,000（1.0 Credits）
@@ -424,7 +425,8 @@ describe("账户 popover：credits/legacy/owner", () => {
 		}));
 		await openPopover(h);
 		await vi.waitFor(() => {
-			expect(h.els["acct-pop-remaining"].textContent).toBe("3,800 Credits");
+			expect(h.els["acct-pop-remaining"].textContent).toBe("3,800");
+			expect(h.els["acct-pop-unit"].hidden).toBe(false);
 		});
 		expect(h.els["acct-pop-scope"].textContent).toBe("acct.balance.scope.total");
 		expect(h.els["acct-pop-detail"].textContent).toBe(
@@ -456,7 +458,8 @@ describe("账户 popover：credits/legacy/owner", () => {
 		}));
 		await openPopover(h);
 		await vi.waitFor(() => {
-			expect(h.els["acct-pop-remaining"].textContent).toBe("9,700 Credits");
+			expect(h.els["acct-pop-remaining"].textContent).toBe("9,700");
+			expect(h.els["acct-pop-unit"].hidden).toBe(false);
 		});
 		expect(h.els["acct-pop-scope"].textContent).toBe(
 			"acct.balance.scope.month · acct.balance.reset({\"date\":\"11-01\"})");

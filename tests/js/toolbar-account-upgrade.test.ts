@@ -388,7 +388,8 @@ describe("账户 popover 余额（GET /api/account/credits）", () => {
 		h.fetchRoutes.set("/api/account/credits", () => ({ status: 200, body: BALANCE_OK }));
 		await openAcctPop(h);
 		await vi.waitFor(() => {
-			expect(h.els["acct-pop-remaining"].textContent).toBe("3,700 Credits");
+			expect(h.els["acct-pop-remaining"].textContent).toBe("3,700");
+			expect(h.els["acct-pop-unit"].hidden).toBe(false);
 		});
 		expect(h.els["acct-pop-scope"].textContent).toBe("acct.balance.scope.total");
 		// used = spent + reserved = 1,300 / 5,000 → 26%
@@ -437,7 +438,8 @@ describe("账户 popover 余额（GET /api/account/credits）", () => {
 		}));
 		await openAcctPop(h);
 		await vi.waitFor(() => {
-			expect(h.els["acct-pop-remaining"].textContent).toBe("99,853 Credits");
+			expect(h.els["acct-pop-remaining"].textContent).toBe("99,853");
+			expect(h.els["acct-pop-unit"].hidden).toBe(false);
 		});
 		expect(h.els["acct-pop-scope"].textContent).toBe(
 			"acct.balance.scope.month · acct.balance.reset({\"date\":\"11-30\"})");
@@ -498,7 +500,8 @@ describe("账户 popover 余额（GET /api/account/credits）", () => {
 		}));
 		await openAcctPop(h);
 		await vi.waitFor(() => {
-			expect(h.els["acct-pop-remaining"].textContent).toBe("83,000 Credits");
+			expect(h.els["acct-pop-remaining"].textContent).toBe("83,000");
+			expect(h.els["acct-pop-unit"].hidden).toBe(false);
 		});
 		expect(h.els["acct-pop-scope"].textContent).toBe("acct.credits.scope");
 		expect(h.els["acct-pop-detail"].textContent).toBe(

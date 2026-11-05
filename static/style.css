@@ -551,14 +551,22 @@ button {
   color: var(--text-3);
   font-weight: 400;
 }
+.acct-pop-amount {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+}
 .acct-pop-remaining {
-  font-size: 18px;
+  font-size: 22px;
   font-weight: 600;
-  line-height: 1.25;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
   color: var(--text);
-  font-family: var(--mono);
   font-variant-numeric: tabular-nums;
 }
+.acct-pop-unit { font-size: 12px; color: var(--text-3); }
+.acct-pop-unit[hidden] { display: none; }
 /* 用量条：track 取分隔线同级的中性色，fill 默认 accent；≥80% 琥珀、
    ≥95% danger（JS 打 is-warn / is-danger，宽度走内联百分比）。 */
 .acct-pop-meter {
@@ -5315,6 +5323,10 @@ html, body { font-size: 14px; }
 .acct-pop, .acct-pop-detail, .acct-pop-balance-head,
 .tb-share-target, .tsr-sub, .fb-count, .fb-folder-count, .fb-page-info { font-size: 13px; }
 .acct-settings, .fb-menu-item { min-height: var(--control-h); font-size: 14px; padding: 9px 12px; }
+/* 账户弹层的操作行与上方额度/存储内容左对齐；链接形态的入口不带下划线 */
+.acct-pop .acct-settings { display: flex; align-items: center; padding-left: 0; padding-right: 0; text-decoration: none; }
+.acct-pop .acct-settings[hidden] { display: none; }
+.acct-pop .acct-settings:hover { text-decoration: underline; }
 .tb-search-title, .tb-share-title { font-size: 16px; }
 .tb-search-pop { width: 360px; }
 .tb-search-result { min-height: 56px; padding: 8px; }

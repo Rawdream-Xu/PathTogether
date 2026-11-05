@@ -1748,6 +1748,7 @@
     acctPopRole: $("acct-pop-role"),
     acctPopScope: $("acct-pop-scope"),
     acctPopRemaining: $("acct-pop-remaining"),
+    acctPopUnit: $("acct-pop-unit"),
     acctPopUsage: $("acct-pop-usage"),
     acctPopUsageFill: $("acct-pop-usage-fill"),
     acctPopDetail: $("acct-pop-detail"),
@@ -14374,6 +14375,12 @@
     acctMeterHide(els.acctPopUsage, els.acctPopUsageFill);
   }
 
+  // 大数字只放数值，单位「Credits」是模板里的独立小字（无数值时隐藏）
+  function acctSetAmount(text) {
+    if (els.acctPopRemaining) els.acctPopRemaining.textContent = text === null ? "—" : text;
+    if (els.acctPopUnit) els.acctPopUnit.hidden = text === null;
+  }
+
   function acctBalanceUnavailable(status, code) {
     var key;
     if (status === 400 && code === "spend_total_allowance_missing") {
@@ -14389,7 +14396,7 @@
     }
     var reason = t(key, key === "acct.balance.reason.http" ? { status: String(status) } : null);
     if (els.acctPopScope) els.acctPopScope.textContent = "";
-    if (els.acctPopRemaining) els.acctPopRemaining.textContent = "—";
+    acctSetAmount(null);
     acctUsageMeterHide();
     if (els.acctPopDetail) {
       els.acctPopDetail.textContent = t("acct.balance.unavailable", { reason: reason });
@@ -14423,9 +14430,7 @@
     if (els.acctPopScope) {
       els.acctPopScope.textContent = t("acct.credits.scope");
     }
-    if (els.acctPopRemaining) {
-      els.acctPopRemaining.textContent = acctCreditsUnit(wallet.available_units) || "—";
-    }
+    acctSetAmount(formatCredits4(wallet.available_units));
     // 大数字 = 可用；进度分母 = 累计发放（issued_units，缺失/0 时隐藏条与副行）
     var available = acctBig(wallet.available_units);
     var issued = acctBig(wallet.issued_units);
@@ -14493,9 +14498,7 @@
       }
       els.acctPopScope.textContent = scope;
     }
-    if (els.acctPopRemaining) {
-      els.acctPopRemaining.textContent = acctCreditsUnit(data.remaining_nano_cny) || "—";
-    }
+    acctSetAmount(formatCredits4(data.remaining_nano_cny));
     // legacy / owner 同口径：used = 已用 + 在途预留；分母 = 限额
     var limit = acctBig(data.limit_nano_cny);
     var spent = acctBig(data.spent_nano_cny);
@@ -14592,6 +14595,7 @@
 
   function loadAccountBalance() {
     if (els.acctPopRemaining) els.acctPopRemaining.textContent = t("acct.balance.loading");
+    if (els.acctPopUnit) els.acctPopUnit.hidden = true;
     if (els.acctPopDetail) els.acctPopDetail.textContent = "";
     if (els.acctPopExtra) {
       els.acctPopExtra.textContent = "";
