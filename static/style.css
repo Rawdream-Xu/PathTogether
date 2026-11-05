@@ -501,8 +501,8 @@ button {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  min-width: 240px;
-  max-width: 300px;
+  min-width: 260px;
+  max-width: 320px;
   font-size: 12px;
 }
 .acct-pop-preview {
@@ -529,28 +529,64 @@ button {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
 }
+.acct-pop-balance[hidden] { display: none; }
 .acct-pop-balance-head {
   display: flex;
   justify-content: space-between;
+  align-items: baseline;
   gap: 8px;
+  min-width: 0;
   color: var(--text-3);
   font-size: 11px;
 }
-.acct-pop-scope { color: var(--accent); font-weight: 600; }
+.acct-pop-title { flex-shrink: 0; }
+.acct-pop-scope {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  color: var(--text-3);
+  font-weight: 400;
+}
 .acct-pop-remaining {
-  font-size: 16px;
+  font-size: 18px;
   font-weight: 600;
+  line-height: 1.25;
   color: var(--text);
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
 }
+/* 用量条：track 取分隔线同级的中性色，fill 默认 accent；≥80% 琥珀、
+   ≥95% danger（JS 打 is-warn / is-danger，宽度走内联百分比）。 */
+.acct-pop-meter {
+  position: relative;
+  display: block;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--hover-strong);
+  overflow: hidden;
+}
+.acct-pop-meter[hidden] { display: none; }
+.acct-pop-meter-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.18s ease, background 0.18s ease;
+}
+.acct-pop-meter.is-warn .acct-pop-meter-fill { background: #FF9500; }
+.acct-pop-meter.is-danger .acct-pop-meter-fill { background: var(--danger); }
 .acct-pop-detail {
   color: var(--text-2);
   font-size: 11px;
   line-height: 1.5;
   word-break: break-word;
 }
+.acct-pop-extra[hidden] { display: none; }
 .acct-settings {
   align-self: stretch;
   text-align: left;

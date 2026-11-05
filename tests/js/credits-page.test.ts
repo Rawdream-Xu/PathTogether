@@ -359,7 +359,7 @@ describe("账户 popover：credits/legacy/owner", () => {
 		delete (globalThis as { HP_ViewerCore?: unknown }).HP_ViewerCore;
 	});
 
-	it("credits：可用 Credit/预占/受限/充值入口", async () => {
+	it("credits：可用 Credit/累计进度/预占/受限/充值入口", async () => {
 		const h = bootApp();
 		h.HP_AUTH.applyAuthInfo(loggedIn());
 		expect(h.HP_AUTH.acctCredits("12345678")).toBe("1.2345 Credits");
@@ -374,6 +374,7 @@ describe("账户 popover：credits/legacy/owner", () => {
 					reserved_units: "10000000",
 					refund_pending_units: "0",
 					available_units: "12345678",
+					issued_units: "22345678",
 					composition: { promotional_units: "1", legacy_grant_units: "0", paid_units: "0" },
 					restricted_reason: "pending_reconciliation",
 					migrated_at: null,
@@ -385,17 +386,22 @@ describe("账户 popover：credits/legacy/owner", () => {
 		}));
 		await openPopover(h);
 		await vi.waitFor(() => {
-			expect(h.els["acct-pop-remaining"].textContent).toContain("1.2345");
+			expect(h.els["acct-pop-remaining"].textContent).toBe("1.2345 Credits");
 		});
 		expect(h.els["acct-pop-scope"].textContent).toBe("acct.credits.scope");
-		const detail = h.els["acct-pop-detail"].textContent;
-		expect(detail).toContain("acct.credits.reserved");
-		expect(detail).toContain("credit.restricted.pending_reconciliation");
-		expect(detail).not.toContain("acct.credits.refund_pending");
+		// issued 22,345,678 / available 12,345,678 → used 10,000,000（1.0 Credits）
+		expect(h.els["acct-pop-detail"].textContent).toBe(
+			"acct.credits.used({\"used\":\"1\",\"issued\":\"2.2345\"})");
+		expect(h.els["acct-pop-usage"].hidden).toBe(false);
+		const extra = h.els["acct-pop-extra"].textContent;
+		expect(extra).toContain("acct.credits.reserved");
+		expect(extra).toContain("credit.restricted.pending_reconciliation");
+		expect(extra).not.toContain("acct.credits.refund_pending");
 		expect(h.els["acct-topup-link"].hidden).toBe(false);
+		expect(h.els["acct-topup-link"].textContent).toBe("acct.credits.topup");
 	});
 
-	it("legacy：保持 CNY 一次性总额度呈现，无充值入口", async () => {
+	it("legacy：一次性额度改以 Credits 呈现，无充值入口", async () => {
 		const h = bootApp();
 		h.HP_AUTH.applyAuthInfo(loggedIn());
 		h.routes.set("/api/account/credits", () => ({
@@ -418,14 +424,16 @@ describe("账户 popover：credits/legacy/owner", () => {
 		}));
 		await openPopover(h);
 		await vi.waitFor(() => {
-			expect(h.els["acct-pop-remaining"].textContent).toContain("38.00 CNY");
+			expect(h.els["acct-pop-remaining"].textContent).toBe("3,800 Credits");
 		});
 		expect(h.els["acct-pop-scope"].textContent).toBe("acct.balance.scope.total");
-		expect(h.els["acct-pop-detail"].textContent).toContain("50.00 CNY");
+		expect(h.els["acct-pop-detail"].textContent).toBe(
+			"acct.balance.used({\"used\":\"1,200\",\"total\":\"5,000\"})");
+		expect(h.els["acct-pop-usage-fill"].style.width).toBe("24%");
 		expect(h.els["acct-topup-link"].hidden).toBe(true);
 	});
 
-	it("owner：当月窗口呈现，无充值入口", async () => {
+	it("owner：当月窗口 + 重置日期，无充值入口", async () => {
 		const h = bootApp();
 		h.HP_AUTH.applyAuthInfo(loggedIn());
 		h.routes.set("/api/account/credits", () => ({
@@ -448,10 +456,11 @@ describe("账户 popover：credits/legacy/owner", () => {
 		}));
 		await openPopover(h);
 		await vi.waitFor(() => {
-			expect(h.els["acct-pop-scope"].textContent).toBe("acct.balance.scope.month");
+			expect(h.els["acct-pop-remaining"].textContent).toBe("9,700 Credits");
 		});
-		expect(h.els["acct-pop-remaining"].textContent).toContain("97.00 CNY");
-		expect(h.els["acct-pop-detail"].textContent).toContain("2026-10-01");
+		expect(h.els["acct-pop-scope"].textContent).toBe(
+			"acct.balance.scope.month · acct.balance.reset({\"date\":\"11-01\"})");
+		expect(h.els["acct-pop-detail"].textContent).toContain("300");
 		expect(h.els["acct-topup-link"].hidden).toBe(true);
 	});
 });

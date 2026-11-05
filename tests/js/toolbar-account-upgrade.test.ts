@@ -6,10 +6,10 @@
  *     未登录不显示；预览态显示被预览 subject 并在 popover 顶部标「管理员预览」；
  *     真实 actor 的账户设置入口在预览态隐藏；
  *   - 账户 popover：打开时拉 GET /api/account/credits（apiFetch 路径）；
- *     user=一次性总额度口径 / owner=当月窗口口径；nano-CNY 十进制字符串精确
- *     换算两位小数（半分进位锚点 17806450800→17.81）；额度缺失（400
+ *     legacy=一次性额度 / owner=当月窗口，数值一律 Credits（1 nano-CNY ==
+ *     1 credit unit）；余额与存储用量条宽度/aria/阈值色；额度缺失（400
  *     spend_total_allowance_missing）/503/网络失败显示「暂不可用（原因）」，
- *     绝不显示 ¥0；
+ *     绝不显示 ¥0 且隐藏用量条；
  *   - 标注名称迁移：#anno-label-input 只出现在标注选项 popover 内，
  *     主行 tbb-context 不再有自由文本输入框；
  *   - 矩形设置 popover：#roi-settings 锚定 popover + #roi-summary 摘要载体；
@@ -369,24 +369,47 @@ describe("账户 popover 余额（GET /api/account/credits）", () => {
 		expect(h.HP_AUTH.acctCny(null)).toBeNull();
 	});
 
-	it("打开 popover 拉取余额；user 口径=一次性总额度；剩余/明细精确两位", async () => {
+	it("壳模板：余额/存储用量条 progressbar 骨架（aria + i18n label）", () => {
+		expect(shellSrc).toContain('id="acct-pop-usage"');
+		expect(shellSrc).toContain('id="acct-pop-usage-fill"');
+		expect(shellSrc).toContain('id="acct-pop-storage-bar"');
+		expect(shellSrc).toContain('id="acct-pop-storage-fill"');
+		expect((shellSrc.match(/role="progressbar"/g) || []).length).toBe(2);
+		expect((shellSrc.match(/aria-valuemin="0"/g) || []).length).toBe(2);
+		expect((shellSrc.match(/aria-valuemax="100"/g) || []).length).toBe(2);
+		expect((shellSrc.match(/aria-valuenow="0"/g) || []).length).toBe(2);
+		expect(shellSrc).toContain('data-i18n-aria="acct.balance.bar.aria"');
+		expect(shellSrc).toContain('data-i18n-aria="acct.storage.bar.aria"');
+	});
+
+	it("打开 popover 拉取余额；legacy 一次性额度以 Credits 呈现（无 CNY 文本）", async () => {
 		const h = bootApp();
 		h.HP_AUTH.applyAuthInfo(loggedIn());
 		h.fetchRoutes.set("/api/account/credits", () => ({ status: 200, body: BALANCE_OK }));
 		await openAcctPop(h);
 		await vi.waitFor(() => {
-			expect(h.els["acct-pop-remaining"].textContent).toContain("37.00 CNY");
+			expect(h.els["acct-pop-remaining"].textContent).toBe("3,700 Credits");
 		});
 		expect(h.els["acct-pop-scope"].textContent).toBe("acct.balance.scope.total");
-		const detail = h.els["acct-pop-detail"].textContent;
-		expect(detail).toContain("50.00 CNY");
-		expect(detail).toContain("12.00 CNY");
-		expect(detail).toContain("1.00 CNY");
+		// used = spent + reserved = 1,300 / 5,000 → 26%
+		expect(h.els["acct-pop-detail"].textContent).toContain("acct.balance.used");
+		expect(h.els["acct-pop-detail"].textContent).toContain("1,300");
+		expect(h.els["acct-pop-detail"].textContent).toContain("5,000");
+		expect(h.els["acct-pop-usage"].hidden).toBe(false);
+		expect(h.els["acct-pop-usage-fill"].style.width).toBe("26%");
+		expect(h.els["acct-pop-usage"].getAttribute("aria-valuenow")).toBe("26");
+		const visible = [
+			h.els["acct-pop-remaining"],
+			h.els["acct-pop-detail"],
+			h.els["acct-pop-extra"],
+			h.els["acct-pop-scope"],
+		].map((el) => el.textContent).join(" ");
+		expect(visible).not.toContain("CNY");
 		expect(h.els["acct-pop"].hidden).toBe(false);
 		expect(h.els["acct-btn"].getAttribute("aria-expanded")).toBe("true");
 	});
 
-	it("owner 月窗口口径：spend_target=owner_month_window", async () => {
+	it("owner 月窗口口径：Credits + 重置日期；小用量至少 2% 可见", async () => {
 		const h = bootApp();
 		h.HP_AUTH.applyAuthInfo(
 			loggedIn({
@@ -401,16 +424,122 @@ describe("账户 popover 余额（GET /api/account/credits）", () => {
 			body: {
 				...BALANCE_OK,
 				subject: { ...BALANCE_OK.subject, role: "owner" },
+				billing_backend: "owner_budget",
 				spend_target: "owner_month_window",
-				period_start: "2026-09-01T00:00:00Z",
-				period_end: "2026-10-01T00:00:00Z",
+				// 1,000 CNY = 100,000 Credits；已用 147 Credits
+				limit_nano_cny: "1000000000000",
+				spent_nano_cny: "1200000000",
+				reserved_nano_cny: "270000000",
+				remaining_nano_cny: "998530000000",
+				period_start: "2026-11-01T00:00:00Z",
+				period_end: "2026-11-30T00:00:00Z",
 			},
 		}));
 		await openAcctPop(h);
 		await vi.waitFor(() => {
-			expect(h.els["acct-pop-scope"].textContent).toBe("acct.balance.scope.month");
+			expect(h.els["acct-pop-remaining"].textContent).toBe("99,853 Credits");
 		});
-		expect(h.els["acct-pop-detail"].textContent).toContain("2026-09-01");
+		expect(h.els["acct-pop-scope"].textContent).toBe(
+			"acct.balance.scope.month · acct.balance.reset({\"date\":\"11-30\"})");
+		expect(h.els["acct-pop-detail"].textContent).toContain("147");
+		expect(h.els["acct-pop-detail"].textContent).toContain("100,000");
+		// 147/100,000 = 0.1% → 最小可见填充 2%，aria 仍报整数 0
+		expect(h.els["acct-pop-usage"].hidden).toBe(false);
+		expect(h.els["acct-pop-usage-fill"].style.width).toBe("2%");
+		expect(h.els["acct-pop-usage"].getAttribute("aria-valuenow")).toBe("0");
+		expect(h.els["acct-pop-usage"].classList.contains("is-warn")).toBe(false);
+		expect(h.els["acct-topup-link"].hidden).toBe(true);
+		// 无窗口（period_end 缺失）时只显示「本月」
+		const noWindow = bootApp();
+		noWindow.HP_AUTH.applyAuthInfo(
+			loggedIn({
+				username: "boss@x.com", role: "owner", user_id: "a1",
+				actor: { username: "boss@x.com", role: "owner", user_id: "a1" },
+			}),
+		);
+		noWindow.fetchRoutes.set("/api/account/credits", () => ({
+			status: 200,
+			body: {
+				...BALANCE_OK,
+				billing_backend: "owner_budget",
+				spend_target: "owner_month_window",
+				period_start: null,
+				period_end: null,
+			},
+		}));
+		await openAcctPop(noWindow);
+		await vi.waitFor(() => {
+			expect(noWindow.els["acct-pop-scope"].textContent)
+				.toBe("acct.balance.scope.month");
+		});
+	});
+
+	it("credits：可用数 + 累计发放分母；预占/受限副行；充值入口文案随 can_topup", async () => {
+		const h = bootApp();
+		h.HP_AUTH.applyAuthInfo(loggedIn());
+		h.fetchRoutes.set("/api/account/credits", () => ({
+			status: 200,
+			body: {
+				subject: { username: "credit@x.com", display_username: "credit", role: "user", preview: false },
+				billing_backend: "credits",
+				wallet: {
+					balance_units: "900000000000",
+					reserved_units: "10000000",
+					refund_pending_units: "0",
+					available_units: "830000000000",
+					issued_units: "1000000000000",
+					composition: { promotional_units: "0", legacy_grant_units: "0", paid_units: "830000000000" },
+					restricted_reason: null,
+					migrated_at: null,
+				},
+				can_topup: true,
+				as_of: "2026-11-05T00:00:00Z",
+			},
+		}));
+		await openAcctPop(h);
+		await vi.waitFor(() => {
+			expect(h.els["acct-pop-remaining"].textContent).toBe("83,000 Credits");
+		});
+		expect(h.els["acct-pop-scope"].textContent).toBe("acct.credits.scope");
+		expect(h.els["acct-pop-detail"].textContent).toBe(
+			"acct.credits.used({\"used\":\"17,000\",\"issued\":\"100,000\"})");
+		// (100,000 - 83,000) / 100,000 = 17%
+		expect(h.els["acct-pop-usage-fill"].style.width).toBe("17%");
+		expect(h.els["acct-pop-usage"].getAttribute("aria-valuenow")).toBe("17");
+		expect(h.els["acct-pop-extra"].textContent).toContain("acct.credits.reserved");
+		expect(h.els["acct-pop-extra"].hidden).toBe(false);
+		expect(h.els["acct-topup-link"].hidden).toBe(false);
+		expect(h.els["acct-topup-link"].textContent).toBe("acct.credits.topup");
+		expect(h.els["acct-topup-link"].getAttribute("data-i18n")).toBe("acct.credits.topup");
+
+		// can_topup=false：入口保留（账本页）但文案改为「Credit 明细」
+		const noTopup = bootApp();
+		noTopup.HP_AUTH.applyAuthInfo(loggedIn());
+		noTopup.fetchRoutes.set("/api/account/credits", () => ({
+			status: 200,
+			body: {
+				subject: { username: "credit@x.com", display_username: "credit", role: "user", preview: false },
+				billing_backend: "credits",
+				wallet: {
+					balance_units: "10000000", reserved_units: "0",
+					refund_pending_units: "0", available_units: "10000000",
+					composition: { promotional_units: "10000000", legacy_grant_units: "0", paid_units: "0" },
+					restricted_reason: null, migrated_at: null,
+				},
+				can_topup: false,
+				as_of: "2026-11-05T00:00:00Z",
+			},
+		}));
+		await openAcctPop(noTopup);
+		await vi.waitFor(() => {
+			expect(noTopup.els["acct-topup-link"].textContent).toBe("acct.credits.history");
+		});
+		expect(noTopup.els["acct-topup-link"].getAttribute("data-i18n")).toBe("acct.credits.history");
+		expect(noTopup.els["acct-topup-link"].hidden).toBe(false);
+		// issued_units 缺失 → 进度条与副行隐藏（不伪造分母）
+		expect(noTopup.els["acct-pop-usage"].hidden).toBe(true);
+		expect(noTopup.els["acct-pop-usage-fill"].style.width).toBe("0%");
+		expect(noTopup.els["acct-pop-detail"].textContent).toBe("");
 	});
 
 	it("额度缺失 400 spend_total_allowance_missing：显示暂不可用（未设置总额度），绝不显示 ¥0", async () => {
@@ -427,6 +556,8 @@ describe("账户 popover 余额（GET /api/account/credits）", () => {
 		expect(h.els["acct-pop-detail"].textContent).toContain("acct.balance.reason.missing");
 		expect(h.els["acct-pop-remaining"].textContent).toBe("—");
 		expect(h.els["acct-pop-remaining"].textContent).not.toContain("0.00");
+		expect(h.els["acct-pop-usage"].hidden).toBe(true);
+		expect(h.els["acct-pop-usage-fill"].style.width).toBe("0%");
 	});
 
 	it("DB 不可用 503：显示暂不可用（数据库暂不可用），不显示 ¥0", async () => {
@@ -441,6 +572,7 @@ describe("账户 popover 余额（GET /api/account/credits）", () => {
 			expect(h.els["acct-pop-detail"].textContent).toContain("acct.balance.reason.db");
 		});
 		expect(h.els["acct-pop-remaining"].textContent).toBe("—");
+		expect(h.els["acct-pop-usage"].hidden).toBe(true);
 	});
 
 	it("网络失败：fetch reject 同样走「暂不可用（网络异常）」，不显示 ¥0", async () => {
@@ -457,7 +589,7 @@ describe("账户 popover 余额（GET /api/account/credits）", () => {
 		expect(h.els["acct-pop-remaining"].textContent).toBe("—");
 	});
 
-	it("打开 popover 同时拉取存储用量：已用 x GB / 上限 y GB；owner 隐藏", async () => {
+	it("打开 popover 同时拉取存储用量：head 值 / 剩余 / 用量条；owner 隐藏", async () => {
 		const h = bootApp();
 		h.HP_AUTH.applyAuthInfo(loggedIn());
 		h.fetchRoutes.set("/api/account/balance", () => ({ status: 200, body: BALANCE_OK }));
@@ -470,14 +602,18 @@ describe("账户 popover 余额（GET /api/account/credits）", () => {
 		}));
 		await openAcctPop(h);
 		await vi.waitFor(() => {
-			expect(h.els["acct-pop-storage"].textContent)
-				.toContain("acct.storage.usage");
+			expect(h.els["acct-pop-storage-value"].textContent).toBe("2.5 GB / 10 GB");
 		});
-		expect(h.els["acct-pop-storage"].textContent).toContain("2.5 GB");
-		expect(h.els["acct-pop-storage"].textContent).toContain("10 GB");
+		expect(h.els["acct-pop-storage-detail"].textContent)
+			.toBe("acct.storage.remaining({\"remaining\":\"7.5 GB\"})");
 		expect(h.els["acct-pop-storage"].hidden).toBe(false);
+		expect(h.els["acct-pop-storage-bar"].hidden).toBe(false);
+		expect(h.els["acct-pop-storage-fill"].style.width).toBe("25%");
+		expect(h.els["acct-pop-storage-bar"].getAttribute("aria-valuenow")).toBe("25");
+		expect(h.els["acct-pop-storage-bar"].classList.contains("is-warn")).toBe(false);
+		expect(h.els["acct-pop-storage-bar"].classList.contains("is-danger")).toBe(false);
 
-		// owner：quota_applies=false → 整行隐藏（不显示伪造 0）
+		// owner：quota_applies=false → 整段隐藏（不显示伪造 0）
 		const owner = bootApp();
 		owner.HP_AUTH.applyAuthInfo(
 			loggedIn({
@@ -494,7 +630,45 @@ describe("账户 popover 余额（GET /api/account/credits）", () => {
 		await vi.waitFor(() => {
 			expect(owner.els["acct-pop-storage"].hidden).toBe(true);
 		});
-		expect(owner.els["acct-pop-storage"].textContent).toBe("");
+		expect(owner.els["acct-pop-storage-value"].textContent).toBe("");
+		expect(owner.els["acct-pop-storage-bar"].hidden).toBe(true);
+	});
+
+	it("存储 ≥80% 琥珀、满盘 danger 文案", async () => {
+		const warn = bootApp();
+		warn.HP_AUTH.applyAuthInfo(loggedIn());
+		warn.fetchRoutes.set("/api/account/storage", () => ({
+			status: 200,
+			body: {
+				quota_applies: true, quota_bytes: 10 * 1024 ** 3,
+				used_bytes: Math.round(8.5 * 1024 ** 3), reserved_bytes: 0,
+			},
+		}));
+		await openAcctPop(warn);
+		await vi.waitFor(() => {
+			expect(warn.els["acct-pop-storage-bar"].hidden).toBe(false);
+		});
+		expect(warn.els["acct-pop-storage-fill"].style.width).toBe("85%");
+		expect(warn.els["acct-pop-storage-bar"].classList.contains("is-warn")).toBe(true);
+		expect(warn.els["acct-pop-storage-bar"].classList.contains("is-danger")).toBe(false);
+
+		const full = bootApp();
+		full.HP_AUTH.applyAuthInfo(loggedIn());
+		full.fetchRoutes.set("/api/account/storage", () => ({
+			status: 200,
+			body: {
+				quota_applies: true, quota_bytes: 10 * 1024 ** 3,
+				used_bytes: 10 * 1024 ** 3, reserved_bytes: 0,
+			},
+		}));
+		await openAcctPop(full);
+		await vi.waitFor(() => {
+			expect(full.els["acct-pop-storage-detail"].textContent)
+				.toBe("acct.storage.full");
+		});
+		expect(full.els["acct-pop-storage-fill"].style.width).toBe("100%");
+		expect(full.els["acct-pop-storage-bar"].classList.contains("is-danger")).toBe(true);
+		expect(full.els["acct-pop-storage-bar"].getAttribute("aria-valuenow")).toBe("100");
 	});
 });
 
@@ -702,16 +876,27 @@ describe("Beta 徽标 + i18n 新键（§3.4/§7）", () => {
 		expect(zh.t("tb.anno.label.name")).toBe("标注名称（可选）");
 		expect(zh.t("tb.anno.more")).toBe("标注选项");
 		expect(zh.t("acct.preview.tag")).toBe("管理员预览");
-		expect(zh.t("acct.balance.scope.total")).toBe("一次性总额度");
-		expect(zh.t("acct.balance.scope.month")).toBe("当月窗口");
+		expect(zh.t("acct.balance.title")).toBe("AI 额度");
+		expect(zh.t("acct.balance.scope.total")).toBe("一次性额度");
+		expect(zh.t("acct.balance.scope.month")).toBe("本月");
+		expect(zh.t("acct.balance.reset", { date: "11-30" })).toBe("11-30 重置");
+		expect(zh.t("acct.balance.used", { used: "147", total: "100,000" }))
+			.toBe("已用 147 / 100,000");
+		expect(zh.t("acct.balance.bar.aria")).toBe("AI 额度用量");
 		expect(zh.t("acct.balance.unavailable", { reason: "X" })).toBe("额度信息暂不可用（X）");
 		expect(zh.t("acct.balance.reason.missing")).toBe("未设置总额度");
+		expect(zh.t("acct.storage.remaining", { remaining: "30.6 GB" })).toBe("剩余 30.6 GB");
+		expect(zh.t("acct.storage.full")).toContain("联系管理员");
+		expect(zh.t("acct.storage.bar.aria")).toBe("存储用量");
+		expect(zh.t("acct.credits.history")).toBe("Credit 明细");
 		expect(zh.t("acct.settings")).toBe("账户设置");
 
 		zh.setLang("en");
 		expect(zh.t("beta.badge.tip")).toContain("Beta");
-		expect(zh.t("acct.balance.scope.total")).toBe("Total allowance (one-time)");
-		expect(zh.t("acct.balance.scope.month")).toBe("Current monthly window");
+		expect(zh.t("acct.balance.scope.total")).toBe("One-time allowance");
+		expect(zh.t("acct.balance.scope.month")).toBe("This month");
+		expect(zh.t("acct.storage.full")).toContain("Storage full");
+		expect(zh.t("acct.credits.history")).toBe("Credit history");
 		expect(zh.t("acct.balance.unavailable", { reason: "X" })).toBe("Balance info unavailable (X)");
 	});
 });

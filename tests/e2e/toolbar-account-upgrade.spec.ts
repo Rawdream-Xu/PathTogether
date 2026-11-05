@@ -9,8 +9,9 @@
  *
  * 断言：
  *   - 账户 chip 显示邮箱 local-part（solarise94），popover 显示完整邮箱、角色、
- *     余额（精确两位 CNY）与口径（user=一次性总额度）；额度缺失（400
- *     spend_total_allowance_missing）显示「额度信息暂不可用」，绝不显示 ¥0；
+ *     AI 额度（Credits，1 nano-CNY == 1 credit unit）与口径（user=一次性额度）；
+ *     额度缺失（400 spend_total_allowance_missing）显示「额度信息暂不可用」，
+ *     绝不显示 ¥0；
  *   - 标注名称（可选）在「标注选项」popover 内，主行不再出现自由文本输入框；
  *   - 矩形尺寸为按钮下方锚定 popover；选预设后主行只显示简短摘要（6×6 mm）；
  *   - 品牌区 Beta 徽标可聚焦提示；壳内无 #current-slide；打开切片后
@@ -620,12 +621,14 @@ test.describe("账户 chip + popover（§3.5）", () => {
 		await expect(pop).toBeVisible();
 		await expect(page.locator("#acct-pop-email")).toHaveText("solarise94@gmail.com");
 		await expect(page.locator("#acct-pop-role")).toHaveText("用户（user）");
-		// user = 一次性总额度口径；nano-CNY 精确两位换算（37e9 nano = 37.00 CNY）
-		await expect(page.locator("#acct-pop-scope")).toHaveText("一次性总额度");
-		await expect(page.locator("#acct-pop-remaining")).toContainText("37.00 CNY");
-		await expect(page.locator("#acct-pop-detail")).toContainText("50.00 CNY");
-		await expect(page.locator("#acct-pop-detail")).toContainText("12.00 CNY");
-		await expect(page.locator("#acct-pop-detail")).toContainText("1.00 CNY");
+		// user = 一次性额度口径；1 nano-CNY == 1 credit unit，
+		// 37e9 nano = 3,700 Credits（不再出现 CNY）
+		await expect(page.locator("#acct-pop-scope")).toHaveText("一次性额度");
+		await expect(page.locator("#acct-pop-remaining")).toHaveText("3,700 Credits");
+		await expect(page.locator("#acct-pop-detail")).toContainText("已用 1,300 / 5,000");
+		await expect(page.locator("#acct-pop-usage")).toBeVisible();
+		await expect(page.locator("#acct-pop-usage")).toHaveAttribute("aria-valuenow", "26");
+		await expect(pop).not.toContainText("CNY");
 		await expect(chip).toHaveAttribute("aria-expanded", "true");
 		// 预览标记只在预览态出现
 		await expect(page.locator("#acct-pop-preview")).toBeHidden();
@@ -642,6 +645,7 @@ test.describe("账户 chip + popover（§3.5）", () => {
 		await expect(remaining).toHaveText("—");
 		await expect(page.locator("#acct-pop-detail")).toContainText("额度信息暂不可用");
 		await expect(page.locator("#acct-pop-detail")).toContainText("未设置总额度");
+		await expect(page.locator("#acct-pop-usage")).toBeHidden();
 	});
 
 	test("DB 不可用（503）：显示「暂不可用（数据库暂不可用）」", async ({ page }) => {
@@ -654,6 +658,7 @@ test.describe("账户 chip + popover（§3.5）", () => {
 		await expect(page.locator("#acct-pop-detail")).toContainText("额度信息暂不可用");
 		await expect(page.locator("#acct-pop-detail")).toContainText("数据库暂不可用");
 		await expect(page.locator("#acct-pop-remaining")).toHaveText("—");
+		await expect(page.locator("#acct-pop-usage")).toBeHidden();
 	});
 
 	test("「账户设置」入口滚动到侧栏既有改密/改绑区并展开侧栏", async ({ page }) => {

@@ -1748,9 +1748,16 @@
     acctPopRole: $("acct-pop-role"),
     acctPopScope: $("acct-pop-scope"),
     acctPopRemaining: $("acct-pop-remaining"),
+    acctPopUsage: $("acct-pop-usage"),
+    acctPopUsageFill: $("acct-pop-usage-fill"),
     acctPopDetail: $("acct-pop-detail"),
+    acctPopExtra: $("acct-pop-extra"),
     acctTopupLink: $("acct-topup-link"),
     acctPopStorage: $("acct-pop-storage"),
+    acctPopStorageValue: $("acct-pop-storage-value"),
+    acctPopStorageBar: $("acct-pop-storage-bar"),
+    acctPopStorageFill: $("acct-pop-storage-fill"),
+    acctPopStorageDetail: $("acct-pop-storage-detail"),
     acctSettingsBtn: $("acct-settings-btn"),
   };
 
@@ -14324,7 +14331,49 @@
   // user=一次性总额度口径（total_allowance）；owner=当月窗口口径
   // （owner_month_window）。额度缺失（400 spend_total_allowance_missing）/
   // DB 不可用（503）/网络失败一律显示「额度信息暂不可用（原因）」，
-  // 绝不显示 ¥0。金额是十进制字符串，经 formatCny2 精确换算两位小数。
+  // 绝不显示 ¥0。额度数值是十进制字符串（nano-CNY），
+  // 因 1 nano-CNY == 1 Credit unit，直接走 formatCredits4 的 BigInt 口径。
+
+  function acctBig(v) {
+    if (v === null || v === undefined || v === "") return null;
+    try { return BigInt(v); } catch (e) { return null; }
+  }
+
+  // 用量条：used/total 传 BigInt（或整数字符串）。fill 宽度按十分位百分比，
+  // 用量 > 0 时至少 2% 保证可见；≥80% 琥珀、≥95% danger。
+  function acctMeterPaint(bar, fill, used, total) {
+    if (!bar || !fill) return false;
+    var u = acctBig(used);
+    var tot = acctBig(total);
+    if (u === null || tot === null || tot <= 0n) {
+      acctMeterHide(bar, fill);
+      return false;
+    }
+    if (u < 0n) u = 0n;
+    var tenths = Number(u * 1000n / tot) / 10;
+    if (tenths > 100) tenths = 100;
+    var pct = Math.floor(tenths);
+    if (u > 0n && tenths < 2) tenths = 2;
+    if (fill.style) fill.style.width = tenths + "%";
+    bar.classList.toggle("is-warn", tenths >= 80 && tenths < 95);
+    bar.classList.toggle("is-danger", tenths >= 95);
+    if (bar.setAttribute) bar.setAttribute("aria-valuenow", String(pct));
+    bar.hidden = false;
+    return true;
+  }
+
+  function acctMeterHide(bar, fill) {
+    if (fill && fill.style) fill.style.width = "0%";
+    if (!bar) return;
+    bar.classList.remove("is-warn", "is-danger");
+    if (bar.setAttribute) bar.setAttribute("aria-valuenow", "0");
+    bar.hidden = true;
+  }
+
+  function acctUsageMeterHide() {
+    acctMeterHide(els.acctPopUsage, els.acctPopUsageFill);
+  }
+
   function acctBalanceUnavailable(status, code) {
     var key;
     if (status === 400 && code === "spend_total_allowance_missing") {
@@ -14341,8 +14390,13 @@
     var reason = t(key, key === "acct.balance.reason.http" ? { status: String(status) } : null);
     if (els.acctPopScope) els.acctPopScope.textContent = "";
     if (els.acctPopRemaining) els.acctPopRemaining.textContent = "—";
+    acctUsageMeterHide();
     if (els.acctPopDetail) {
       els.acctPopDetail.textContent = t("acct.balance.unavailable", { reason: reason });
+    }
+    if (els.acctPopExtra) {
+      els.acctPopExtra.hidden = true;
+      els.acctPopExtra.textContent = "";
     }
     if (els.acctTopupLink) els.acctTopupLink.hidden = true;
   }
@@ -14370,11 +14424,28 @@
       els.acctPopScope.textContent = t("acct.credits.scope");
     }
     if (els.acctPopRemaining) {
-      var available = formatCredits4(wallet.available_units);
-      els.acctPopRemaining.textContent =
-        t("acct.credits.available") + " " + (available === null ? "—" : available);
+      els.acctPopRemaining.textContent = acctCreditsUnit(wallet.available_units) || "—";
     }
-    if (els.acctPopDetail) {
+    // 大数字 = 可用；进度分母 = 累计发放（issued_units，缺失/0 时隐藏条与副行）
+    var available = acctBig(wallet.available_units);
+    var issued = acctBig(wallet.issued_units);
+    var used = null;
+    if (available !== null && issued !== null && issued > 0n) {
+      used = issued > available ? issued - available : 0n;
+    }
+    if (els.acctPopDetail) els.acctPopDetail.textContent = "";
+    if (used !== null && acctMeterPaint(
+        els.acctPopUsage, els.acctPopUsageFill, used, issued)) {
+      if (els.acctPopDetail) {
+        els.acctPopDetail.textContent = t("acct.credits.used", {
+          used: formatCredits4(used),
+          issued: formatCredits4(issued),
+        });
+      }
+    } else {
+      acctUsageMeterHide();
+    }
+    if (els.acctPopExtra) {
       var rows = [];
       // 预占/退款冻结只在非零时显示（余额卡片保持简洁）
       var reserved = acctCreditsUnit(wallet.reserved_units);
@@ -14391,10 +14462,17 @@
           reason: acctCreditsRestrictedText(wallet.restricted_reason),
         }));
       }
-      els.acctPopDetail.textContent = rows.join(" · ");
+      els.acctPopExtra.textContent = rows.join(" · ");
+      els.acctPopExtra.hidden = rows.length === 0;
     }
     if (els.acctTopupLink) {
       els.acctTopupLink.hidden = !!subject.preview;
+      // can_topup 为假时入口仍指向 /app/credits（账本页），文案改为「Credit 明细」
+      var linkKey = data.can_topup ? "acct.credits.topup" : "acct.credits.history";
+      if (els.acctTopupLink.setAttribute) {
+        els.acctTopupLink.setAttribute("data-i18n", linkKey);
+      }
+      els.acctTopupLink.textContent = t(linkKey);
     }
   }
 
@@ -14407,39 +14485,52 @@
     var isMonth = data.spend_target === "owner_month_window";
     if (els.acctTopupLink) els.acctTopupLink.hidden = true;
     if (els.acctPopScope) {
-      els.acctPopScope.textContent = t(isMonth ? "acct.balance.scope.month" : "acct.balance.scope.total");
+      var scope = t(isMonth ? "acct.balance.scope.month" : "acct.balance.scope.total");
+      if (isMonth && data.period_end) {
+        scope += " · " + t("acct.balance.reset", {
+          date: String(data.period_end).slice(5, 10),
+        });
+      }
+      els.acctPopScope.textContent = scope;
     }
     if (els.acctPopRemaining) {
-      var remaining = acctCny(data.remaining_nano_cny);
-      els.acctPopRemaining.textContent =
-        remaining === null ? "—" : t("acct.balance.remaining") + " " + remaining;
+      els.acctPopRemaining.textContent = acctCreditsUnit(data.remaining_nano_cny) || "—";
     }
-    if (els.acctPopDetail) {
-      var rows = [];
-      var limit = acctCny(data.limit_nano_cny);
-      var spent = acctCny(data.spent_nano_cny);
-      var reserved = acctCny(data.reserved_nano_cny);
-      if (limit !== null) rows.push(t("acct.balance.limit") + " " + limit);
-      if (spent !== null) rows.push(t("acct.balance.spent") + " " + spent);
-      if (reserved !== null && String(data.reserved_nano_cny) !== "0") {
-        rows.push(t("acct.balance.reserved") + " " + reserved);
+    // legacy / owner 同口径：used = 已用 + 在途预留；分母 = 限额
+    var limit = acctBig(data.limit_nano_cny);
+    var spent = acctBig(data.spent_nano_cny);
+    var reserved = acctBig(data.reserved_nano_cny) || 0n;
+    if (els.acctPopDetail) els.acctPopDetail.textContent = "";
+    if (limit !== null && spent !== null && limit > 0n &&
+        acctMeterPaint(els.acctPopUsage, els.acctPopUsageFill,
+                       spent + reserved, limit)) {
+      if (els.acctPopDetail) {
+        els.acctPopDetail.textContent = t("acct.balance.used", {
+          used: formatCredits4(spent + reserved),
+          total: formatCredits4(limit),
+        });
       }
-      if (isMonth && data.period_start && data.period_end) {
-        rows.push(t("acct.balance.period") + " " +
-          String(data.period_start).slice(0, 10) + " → " +
-          String(data.period_end).slice(0, 10));
-      }
-      els.acctPopDetail.textContent = rows.join(" · ");
+    } else {
+      acctUsageMeterHide();
+    }
+    if (els.acctPopExtra) {
+      els.acctPopExtra.textContent = "";
+      els.acctPopExtra.hidden = true;
     }
   }
 
   // 存储用量（2026-11-04）：与余额同一 popover 打开时拉取；只读自助接口
-  // （/api/account/storage，不接受 user_id）。owner / 非 user → 隐藏此行。
+  // （/api/account/storage，不接受 user_id）。quota_applies=false（owner）→
+  // 整段隐藏。用量条 fill = (used+reserved)/quota；满盘时提示联系管理员。
   function loadAccountStorage() {
     var el = els.acctPopStorage;
     if (!el) return;
     el.hidden = false;
-    el.textContent = t("acct.storage.loading");
+    acctMeterHide(els.acctPopStorageBar, els.acctPopStorageFill);
+    if (els.acctPopStorageValue) els.acctPopStorageValue.textContent = "";
+    if (els.acctPopStorageDetail) {
+      els.acctPopStorageDetail.textContent = t("acct.storage.loading");
+    }
     apiFetch("/api/account/storage").then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (body) {
         return { status: r.status, body: body };
@@ -14448,25 +14539,66 @@
       var data = res.body || {};
       if (res.status !== 200 || !data.quota_applies) {
         el.hidden = true;
-        el.textContent = "";
+        if (els.acctPopStorageValue) els.acctPopStorageValue.textContent = "";
+        if (els.acctPopStorageDetail) els.acctPopStorageDetail.textContent = "";
+        acctMeterHide(els.acctPopStorageBar, els.acctPopStorageFill);
         return;
       }
-      var used = storageGbText(data.used_bytes);
-      var quota = storageGbText(data.quota_bytes);
-      if (used === null || quota === null) {
-        el.textContent = t("acct.storage.unavailable");
+      var usedText = storageGbText(data.used_bytes);
+      var quotaText = storageGbText(data.quota_bytes);
+      if (usedText === null || quotaText === null) {
+        if (els.acctPopStorageValue) els.acctPopStorageValue.textContent = "";
+        if (els.acctPopStorageDetail) {
+          els.acctPopStorageDetail.textContent = t("acct.storage.unavailable");
+        }
+        acctMeterHide(els.acctPopStorageBar, els.acctPopStorageFill);
         return;
       }
-      el.textContent = t("acct.storage.usage", { used: used, quota: quota });
+      if (els.acctPopStorageValue) {
+        els.acctPopStorageValue.textContent = usedText + " / " + quotaText;
+      }
+      var usedBytes = acctBig(Math.round(Number(data.used_bytes)));
+      var quotaBytes = acctBig(Math.round(Number(data.quota_bytes)));
+      var reservedBytes = acctBig(Math.round(Number(data.reserved_bytes || 0))) || 0n;
+      var filled = false;
+      if (usedBytes !== null && quotaBytes !== null && quotaBytes > 0n) {
+        filled = acctMeterPaint(els.acctPopStorageBar, els.acctPopStorageFill,
+                                usedBytes + reservedBytes, quotaBytes);
+      } else {
+        acctMeterHide(els.acctPopStorageBar, els.acctPopStorageFill);
+      }
+      var full = usedBytes !== null && quotaBytes !== null &&
+        (usedBytes + reservedBytes) >= quotaBytes;
+      if (els.acctPopStorageDetail) {
+        if (full) {
+          els.acctPopStorageDetail.textContent = t("acct.storage.full");
+        } else {
+          var remainingBytes = Number(data.quota_bytes) -
+            Number(data.used_bytes) - Number(data.reserved_bytes || 0);
+          var remaining = storageGbText(Math.max(0, remainingBytes));
+          els.acctPopStorageDetail.textContent = remaining === null ? "" :
+            t("acct.storage.remaining", { remaining: remaining });
+        }
+      }
+      if (!filled) acctMeterHide(els.acctPopStorageBar, els.acctPopStorageFill);
     }).catch(function () {
-      el.textContent = t("acct.storage.unavailable");
+      if (els.acctPopStorageValue) els.acctPopStorageValue.textContent = "";
+      if (els.acctPopStorageDetail) {
+        els.acctPopStorageDetail.textContent = t("acct.storage.unavailable");
+      }
+      acctMeterHide(els.acctPopStorageBar, els.acctPopStorageFill);
     });
   }
 
   function loadAccountBalance() {
     if (els.acctPopRemaining) els.acctPopRemaining.textContent = t("acct.balance.loading");
     if (els.acctPopDetail) els.acctPopDetail.textContent = "";
+    if (els.acctPopExtra) {
+      els.acctPopExtra.textContent = "";
+      els.acctPopExtra.hidden = true;
+    }
     if (els.acctPopScope) els.acctPopScope.textContent = "";
+    acctUsageMeterHide();
     if (els.acctTopupLink) els.acctTopupLink.hidden = true;
     // 统一入口：credits / legacy / owner 由 billing_backend 分流
     apiFetch("/api/account/credits").then(function (r) {
