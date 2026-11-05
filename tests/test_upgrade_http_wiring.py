@@ -39,7 +39,8 @@ def _isolate(tmp_path, monkeypatch):
 
 def test_format_request_post_list_get_wired():
     c = _client()
-    r = c.post("/api/format-requests", data={"format_ext": ".xyz"},
+    r = c.post("/api/format-requests", data={"format_ext": ".xyz", "manufacturer": "Scanner X",
+                                                "sample_url": "https://example.com/original.xyz"},
                content_type="multipart/form-data")
     assert r.status_code == 202, r.get_data(as_text=True)
     body = r.get_json()

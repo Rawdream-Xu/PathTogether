@@ -203,7 +203,8 @@ test.describe("API 契约：格式目录与兼容申请（U05/F 系）", () => {
     await loginAsUser(page);
     const ext = `.z${RUN}`;
     const submit = await api(page, "POST", "/api/format-requests", {
-      multipart: { format_ext: ext, message: "e2e 验收申请" },
+      multipart: { format_ext: ext, message: "e2e 验收申请", manufacturer: "Scanner X",
+        sample_url: "https://example.com/original" },
     });
     expect(submit.status(), await submit.text()).toBe(202);
     const receipt = await submit.json();

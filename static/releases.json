@@ -62,11 +62,13 @@
       },
       "items": {
         "zh": [
-          "申请格式兼容支持时须提供完整原文件附件或下载链接，并填写厂商、设备或软件信息；大文件可使用网盘链接和提取码，无需裁剪原文件。",
+          "申请格式兼容支持时须提供完整原文件附件或下载链接；大文件可使用网盘链接和提取码，无需裁剪原文件。",
+          "申请时需填写厂商、设备或扫描/导出软件信息，便于定位格式差异。",
           "上传失败后申请支持会先打开预填表单，保留报错、文件名和大小；提交前可补齐样本信息，管理员可在工单中查看。"
         ],
         "en": [
-          "Format compatibility requests now require an original file or download link and vendor, scanner or software details. Large files can use a sharing link and access code without truncating the original.",
+          "Format compatibility requests now require an original file or a download link. Large files can use a sharing link and access code without truncating the original.",
+          "Requests must also include vendor, scanner or software details so format differences can be traced.",
           "Requesting support after an upload failure opens a prefilled form with the error, filename and size. Add the sample details before submitting; administrators can review them in the request."
         ]
       }
