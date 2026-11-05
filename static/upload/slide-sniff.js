@@ -460,54 +460,67 @@
 
   // F8：普通图片的可转换头判定（与 Rust raster.rs / engine.js 嗅探同一
   // 契约的头快判，只做分流提示——变体终审在工具页有界探测与核心）。
-  // BMP：DIB 头 12/40/52/56/108/124、未压缩、位深 24/32；JPEG：基线
-  // SOF0/1 三分量（渐进/灰度/算术不满足 → temporary）。
+  //
+  // 2026-11-05（普通图片统一先转 OME-TIFF）：.jpg/.jpeg/.bmp **永远**是
+  // convert，绝不再 temporary/直传。核心能直接吃的（未压缩 24/32 位 BMP、
+  // 三分量基线 JPEG）走原路径；其余变体（渐进/灰度 JPEG、RLE/位域/调色板
+  // BMP）由浏览器解码归一化为未压缩 24 位 BMP 后再转换。`raster` 字段
+  // 供调用方判断「这是普通图片」；`variant=true` 表示需要归一化。
   function classifyRasterHead(headBytes) {
-    var bad = { cls: CLS.TEMPORARY, directClass: DIRECT_CLASS.LEGACY,
-                compression: 0 };
-    if (!headBytes || headBytes.length < 3) return bad;
+    var out = { cls: CLS.CONVERT, directClass: null, compression: 0,
+                raster: null, variant: false };
+    var notImage = { cls: CLS.CONVERT, directClass: null, compression: 0,
+                     raster: null, variant: false };
+    if (!headBytes || headBytes.length < 3) return notImage;
     if (headBytes[0] === 0xFF && headBytes[1] === 0xD8 && headBytes[2] === 0xFF) {
+      out.raster = "jpeg";
       var i = 2, sof = null;
       while (i + 4 <= headBytes.length) {
-        if (headBytes[i] !== 0xFF) return bad;
+        if (headBytes[i] !== 0xFF) { out.variant = true; return out; }
         while (i < headBytes.length && headBytes[i] === 0xFF) i++;
         if (i >= headBytes.length) break;
         var m = headBytes[i]; i++;
         if (m === 0xD9) break;
         if (m === 0x01 || (m >= 0xD0 && m <= 0xD7)) continue;
-        if (i + 2 > headBytes.length) return bad;
+        if (i + 2 > headBytes.length) { out.variant = true; return out; }
         var ln = (headBytes[i] << 8) | headBytes[i + 1];
-        if (ln < 2 || i + ln > headBytes.length) return bad;
+        if (ln < 2 || i + ln > headBytes.length) { out.variant = true; return out; }
         if (m === 0xC0 || m === 0xC1) sof = headBytes.subarray(i + 2, i + ln);
         if (m === 0xDA) break;
         i += ln;
       }
-      if (sof && sof.length >= 6 && sof[5] === 3) {
-        return { cls: CLS.CONVERT, directClass: null, compression: 0 };
-      }
-      return bad;
+      // 三分量基线：核心直接可转；其余（渐进 SOF2/灰度/头截断）→ 归一化。
+      if (sof && sof.length >= 6 && sof[5] === 3) return out;
+      out.variant = true;
+      return out;
     }
-    if (headBytes[0] === 0x42 && headBytes[1] === 0x4D && headBytes.length >= 26) {
+    if (headBytes[0] === 0x42 && headBytes[1] === 0x4D) {
+      out.raster = "bmp";
+      if (headBytes.length < 26) { out.variant = true; return out; }
       try {
         var dv = new DataView(headBytes.buffer, headBytes.byteOffset,
                               headBytes.byteLength);
         var dib = dv.getUint32(14, true);
-        if ([12, 40, 52, 56, 108, 124].indexOf(dib) === -1) return bad;
+        if ([12, 40, 52, 56, 108, 124].indexOf(dib) === -1) {
+          out.variant = true;
+          return out;
+        }
         var bpp, compression = 0;
         if (dib === 12) {
           // OS/2 BITMAPCOREHEADER 只有 26 字节头
           bpp = dv.getUint16(24, true);
         } else {
-          if (headBytes.length < 34) return bad;
+          if (headBytes.length < 34) { out.variant = true; return out; }
           bpp = dv.getUint16(28, true);
           compression = dv.getUint32(30, true);
         }
-        if (compression !== 0) return bad;
-        if (bpp !== 24 && bpp !== 32) return bad;
-        return { cls: CLS.CONVERT, directClass: null, compression: 0 };
-      } catch (e) { return bad; }
+        if (compression !== 0 || (bpp !== 24 && bpp !== 32)) {
+          out.variant = true;
+        }
+        return out;
+      } catch (e) { out.variant = true; return out; }
     }
-    return bad;
+    return notImage;
   }
 
   // ---- Unic TMAP06（单文件明场；头部识别，绝不回退） --------------------
@@ -744,9 +757,9 @@
       case ".bmp":
       case ".jpg":
       case ".jpeg":
-        // F8：普通图片浏览器转换器已覆盖（未压缩 24/32 位 BMP / 三分量
-        // 基线 JPEG）——头解析分派；RLE/位域/调色板位深 BMP 与渐进/
-        // 灰度 JPEG 不满足判定 → temporary（暂时直传，服务端终审）
+        // F8 / 2026-11-05：普通图片一律浏览器转换为 OME-TIFF 后上传——
+        // 永不 temporary/直传。头解析只决定是否需要浏览器解码归一化
+        //（渐进/灰度 JPEG、RLE/位域/调色板 BMP → variant=true）。
         return { route: "raster", ext: ext };
       case ".svs":
         return { route: "tiff", ext: ext, svs: true };
@@ -815,10 +828,11 @@
             r.directClass = r.directClass || null;
             return r;
           }, function () {
-            // 嗅探读失败：按暂时直传降级（服务端终审）
-            return { cls: CLS.TEMPORARY, directClass: DIRECT_CLASS.LEGACY,
+            // 读失败也保持 convert（普通图片绝不因嗅探失败降级为直传）；
+            // 运行器会在复制前给出「无法识别该图片」的类型化拒绝。
+            return { cls: CLS.CONVERT, directClass: null,
                      ext: routed.ext, bundle: false, svsJp2k: false,
-                     compression: 0 };
+                     compression: 0, raster: null, variant: false };
           });
       }
       // Unic TMAP06：只读前 8 字节按真实头部判定（TMAP06 → convert；

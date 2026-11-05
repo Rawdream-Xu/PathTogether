@@ -8,20 +8,22 @@
       "published": true,
       "components": {
         "histopilot": "0.4.10",
-        "pathtogether": "suite-20261106-storage-expansion"
+        "pathtogether": "suite-20261106"
       },
       "items": {
         "zh": [
           "新增付费存储扩容：每 10 GB 1,000 Credits / 年，注册赠送等任意来源的 Credit 都可支付。",
           "扩容默认自动续费；余额不足时进入 7 天宽限期，期间容量保留并持续重试，宽限结束仍失败则回到基础容量。已有文件不会被删除，只是不能继续上传。",
           "可同时持有最多 10 份扩容（合计 100 GB）；可随时关闭自动续费，关闭后当期到期即结束，到期前可重新打开。",
-          "在 Credit 页面的「存储扩容」区块选择份数并购买，账户弹层可查看有效容量、扩容用量与续费状态。"
+          "在 Credit 页面的「存储扩容」区块选择份数并购买，账户弹层可查看有效容量、扩容用量与续费状态。",
+          "上传 JPG / BMP 等普通图片时，统一先在浏览器中转换为标准切片格式再上传；浏览器无法完成转换时会说明原因与解决办法。"
         ],
         "en": [
           "Paid storage expansion is now available: 10 GB for 1,000 Credits per year, payable with any Credit balance including promotional grants.",
           "Expansion auto-renews by default. If the balance is insufficient, it enters a 7-day grace period with capacity retained and retries continuing; if renewal still fails, capacity returns to the base quota. Existing files are never deleted, only new uploads are blocked.",
           "You can hold up to 10 expansion units (100 GB total) at once, and turn auto-renew off at any time; the unit then ends at its current expiry and can be re-enabled before then.",
-          "Buy units in the Storage expansion section of the Credit page; the account panel shows effective capacity, expansion usage and renewal status."
+          "Buy units in the Storage expansion section of the Credit page; the account panel shows effective capacity, expansion usage and renewal status.",
+          "Ordinary images such as JPG and BMP are now always converted to the standard slide format in your browser before upload; if your browser cannot convert them, the panel explains why and what to do."
         ]
       }
     },

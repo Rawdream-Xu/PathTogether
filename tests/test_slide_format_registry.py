@@ -152,27 +152,32 @@ def test_raster_image_whitelist_synced():
     """普通图片族在上传受理集内：SUPPORTED_EXTS / ingestion 形态分派同步。
 
     U5（检查点 B）：app._upload_ext_allowed 已退役——受理判定经
-    _cos_ingestion_kind_for（注册表派生，bmp/jpg/jpeg → native）。"""
+    _cos_ingestion_kind_for（注册表派生）。
+
+    2026-11-05：原始 .bmp/.jpg/.jpeg 不再建 ingestion（422
+    raster_requires_conversion）；上传的是浏览器转换后的 OME-TIFF。"""
     import app
 
     assert {"bmp", "jpg", "jpeg"} <= app.SUPPORTED_EXTS
     with app.app.test_request_context("/"):
         for name in ("a.bmp", "a.JPG", "a.jpeg"):
             kind, err = app._cos_ingestion_kind_for(name.lower())
-            assert err is None and kind == "native", name
+            assert kind is None and err is not None, name
+            assert err[1] == 422, name
+            assert err[0].get_json()["code"] == "raster_requires_conversion", name
         # 大小写不敏感 + kfb/kfbf 走 convert-required 通道、未知仍拒绝
-        assert app._cos_ingestion_kind_for("a.BMP")[0] == "native"
+        assert app._cos_ingestion_kind_for("a.BMP")[0] is None
         assert app._cos_ingestion_kind_for("a.kfb")[0] == "conversion"
         assert app._cos_ingestion_kind_for("a.kfbf")[0] == "conversion"
         assert app._cos_ingestion_kind_for("a.png")[0] is None  # 未知仍拒绝
+        assert app._cos_ingestion_kind_for("a.tif")[0] == "native"
 
 
 def test_public_catalog_raster_image_row():
     """目录单列一条 raster-image：转换可用、可选上传、用户向短句（F8）。
 
-    直传仍开放（direct_import 行级字段），import_mode=convert 与
-    ndpi/vms/scn 的处理一致：转换器落地与直传关闭是两个独立决定。
-    """
+    2026-11-05：直传关闭（direct_import=closed）——普通图片必须先在本机
+    浏览器转换为 OME-TIFF，原始图片不进入平台受理集。"""
     rows = {item["id"]: item for item in reg.public_catalog()}
     item = rows["raster-image"]
     assert item["display_name"] == "普通图片（BMP / JPEG）"
@@ -182,9 +187,11 @@ def test_public_catalog_raster_image_row():
     assert item["bundle_required"] is False
     assert item["import_mode"] == "convert"
     assert item["browser_convert"] == "available"
-    assert item["direct_import"] == "open"
+    assert item["direct_import"] == "closed"
     assert item["selectable_for_upload"] is True
     assert item["limits"], "用户向短句必须非空"
+    assert "在本机浏览器中转换为 OME-TIFF 后上传" in "".join(item["limits"])
+    assert "不再直接导入" in "".join(item["limits"])
 
 
 def test_public_catalog_user_wording_no_internal_terms():
@@ -252,13 +259,11 @@ def test_public_catalog_direct_class_flags():
     assert rows["vms"]["import_mode"] == "convert"
     assert rows["vms"]["browser_convert"] == "available"
     assert rows["vms"]["direct_import"] == "open"
-    # F8：普通图片（BMP/JPEG）转换可用（未压缩 24/32 位 BMP、三分量基线
-    # JPEG），直传同样保持开放——RLE/位域/调色板位深 BMP 与渐进/灰度
-    # JPEG 在头级嗅探按 temporary 分流（同 ndpi/scn 的处理：转换器落地
-    # 与直传关闭是两个独立决定）
+    # F8 + 2026-11-05：普通图片（BMP/JPEG）转换可用且直传关闭——所有
+    # BMP/JPEG 变体先在浏览器解码归一化，再统一转成 OME-TIFF 上传。
     assert rows["raster-image"]["import_mode"] == "convert"
     assert rows["raster-image"]["browser_convert"] == "available"
-    assert rows["raster-image"]["direct_import"] == "open"
+    assert rows["raster-image"]["direct_import"] == "closed"
     # Ventana BIF 浏览器转换器已落地（重叠瓦片拼接重编码）；直传保持
     # 开放（转换器落地与直传关闭是两个独立决定）
     assert rows["bif"]["import_mode"] == "convert"
@@ -284,7 +289,8 @@ def test_public_catalog_direct_class_flags():
 def test_catalog_flag_derived_vocabularies():
     """catalog_rows_by_flag 派生两张词表（app 能力下发/关闭闸共用）。"""
     closed = reg.catalog_rows_by_flag("direct_import", "closed")
-    assert closed == {"svs", "mrxs", "kfb", "kfbf", "tmap"}
+    assert closed == {"svs", "mrxs", "kfb", "kfbf", "tmap",
+                      "bmp", "jpg", "jpeg"}
     # F5/F6/F8：tif/tiff、ndpi、vms 与 raster-image（bmp/jpg/jpeg）加入
     # browser_convert 集合（direct_import 仍 open）；TMAP06 转换可用且
     # 直传关闭
@@ -299,3 +305,21 @@ def test_vendor_names_corrected():
     assert rows["vms"]["display_name"].startswith("Hamamatsu")
     assert rows["vmu"]["display_name"].startswith("Hamamatsu")
     assert rows["svslide"]["display_name"].startswith("Sakura")
+
+
+def test_capability_vocabularies_exclude_raster_originals():
+    """2026-11-05：直传清单与 COS 受理词表都不再包含原始普通图片。
+
+    前端只据服务端下发的这两张清单决定直传/受理；OME-TIFF 产物仍照常
+    受理（.tif/.ome.tif），既有 raster 切片的读取不受影响。
+    """
+    import app
+
+    raster = {"bmp", "jpg", "jpeg"}
+    direct = app._direct_upload_formats()
+    accepted = app._cos_accepted_formats()
+    assert not (direct & raster)
+    assert not (accepted & raster)
+    assert {"tif", "tiff"} <= direct
+    assert "ome.tif" in direct
+    assert {"tif", "tiff"} <= accepted

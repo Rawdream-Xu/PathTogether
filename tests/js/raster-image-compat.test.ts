@@ -186,9 +186,10 @@ describe("Wave 3：文件选择器 accept 派生与静态 fallback", () => {
 		expect(raster).toBeTruthy();
 		expect(raster!.extensions).toEqual([".bmp", ".jpg", ".jpeg"]);
 		// F8：浏览器转换器已覆盖（未压缩 24/32 位 BMP / 三分量基线 JPEG）；
-		// 平台仍受理直接导入（direct_import 保持 open）
+		// 2026-11-05：普通图片一律先转 OME-TIFF，原图不再直接导入
 		expect(raster!.import_mode).toBe("convert");
-		expect(raster!.limits.join("")).toContain("可在本机浏览器转换为 OME-TIFF 后上传");
+		expect(raster!.limits.join("")).toContain("在本机浏览器中转换为 OME-TIFF 后上传");
+		expect(raster!.limits.join("")).toContain("不再直接导入");
 		// 静态 accept = 派生函数作用于 fallback 目录（契约：两者不漂移）
 		expect(h.hooks.formats.acceptFromCatalog(fallbackCatalog)).toBe(acceptFallback);
 		// 且包含 bmp/jpg/jpeg 与 .zip
@@ -252,12 +253,12 @@ describe("Wave 3：文件选择器 accept 派生与静态 fallback", () => {
 		expect(rasterRow).toBeTruthy();
 		expect(rasterRow![1]).toBe("True");
 		expect(rasterRow![0]).toMatch(/"\.bmp",\s*"\.jpg",\s*"\.jpeg"/);
-		// F8：browser_convert=available，import_mode=convert（直传开放状态
-		// 由 direct_import 行级字段单独声明——保持 open，不在本次改动关闭）
+		// F8 + 2026-11-05：browser_convert=available、import_mode=convert，
+		// 直传关闭（普通图片必须先在本机转换为 OME-TIFF）
 		expect(rasterRow![0]).toMatch(/"browser_convert":\s*"available"/);
-		expect(rasterRow![0]).toMatch(/"direct_import":\s*"open"/);
+		expect(rasterRow![0]).toMatch(/"direct_import":\s*"closed"/);
 		expect(rasterRow![0]).toMatch(/"import_mode":\s*"convert"/);
-		expect(rasterRow![0]).toContain("可在本机浏览器转换为 OME-TIFF 后上传");
+		expect(rasterRow![0]).toContain("在本机浏览器中转换为 OME-TIFF 后上传");
 	});
 });
 

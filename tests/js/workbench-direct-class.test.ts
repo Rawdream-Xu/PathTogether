@@ -193,6 +193,30 @@ function classicTiff(description: string): Uint8Array {
 	return out;
 }
 
+/// 最小基线 JPEG 头（SOF0 三分量）：classifyFile 走 raster 路由 (=convert)。
+function jpegHead(): Uint8Array {
+	return Uint8Array.from([
+		0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0,
+		1, 1, 0, 0, 1, 0, 1, 0, 0,
+		0xff, 0xc0, 0, 17, 8, 0x40, 0x20, 0x02, 0x58, 3,
+		1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1, 0xff, 0xda, 0, 4, 1, 0,
+	]);
+}
+
+/// 未压缩 24 位 BMP 头（512×320）。
+function bmpHead(): Uint8Array {
+	const head = new Uint8Array(54);
+	head[0] = 0x42; head[1] = 0x4d;
+	const dv = new DataView(head.buffer);
+	dv.setUint32(10, 54, true);
+	dv.setUint32(14, 40, true);
+	dv.setInt32(18, 512, true);
+	dv.setInt32(22, 320, true);
+	dv.setUint16(26, 1, true);
+	dv.setUint16(28, 24, true);
+	return head;
+}
+
 function fakeFile(name: string, bytes: Uint8Array) {
 	return {
 		name,
@@ -275,5 +299,36 @@ describe("工作台直传分流（阶段 1）", () => {
 		const btns = (row.children as Array<ReturnType<typeof el>>).filter(
 			(c) => (c as { _listeners?: Record<string, unknown[]> })._listeners?.click);
 		expect(btns.length).toBe(2);   // 重试 + 申请支持该格式
+	});
+
+	// 2026-11-05 产品裁决：普通图片一律先在本机转换为 OME-TIFF，绝不以
+	// 原始字节直传（回滚掉 ea88d6b6 的「转换器不可用就直传原图」）。
+	it("普通图片（.jpg/.jpeg/.bmp）→ 零 /api/ingestions，绝不直传原始字节", async () => {
+		const h = loadApp({ cos_upload: COS_CAPS });
+		const jpeg = jpegHead();
+		const bmp = bmpHead();
+		for (const [name, bytes] of [
+			["photo.jpg", jpeg], ["photo.JPEG", jpeg], ["photo.bmp", bmp],
+		] as const) {
+			h.up.uploadFile(fakeFile(name, bytes));
+			await flush(8);
+		}
+		// 没有任何创建请求（更没有任何原始字节分块 PUT）
+		expect(fetchCalls(h).filter((c) => c.url === "/api/ingestions")).toHaveLength(0);
+		expect(fetchCalls(h).filter((c) => c.method === "PUT")).toHaveLength(0);
+		// 每行都是「本机转换暂不可用」+ 重试/申请支持（面板关闭路径）
+		const rows = h.container.children as Array<ReturnType<typeof el>>;
+		expect(rows.length).toBeGreaterThanOrEqual(3);
+		for (const row of rows.slice(-3)) {
+			const text = String(
+				(row.children[2] as { textContent: string } | undefined)?.textContent || "");
+			expect(text).toContain("本机转换暂不可用");
+		}
+	});
+
+	it("回滚的直传回退不得回归（canDirectUploadRaster 已删除）", () => {
+		expect(appSrc).not.toContain("canDirectUploadRaster");
+		// 普通图片的任何直传声明都被 isRasterCls 截断（见 inline-convert 单测）
+		expect(appSrc).toContain("isBrowserConvertFile");
 	});
 });

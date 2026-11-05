@@ -75,6 +75,7 @@ import cos_config  # noqa: E402
 import cos_pool_store  # noqa: E402
 import ingestion_store as ist  # noqa: E402
 import pg_store  # noqa: E402
+import slide_format_registry  # noqa: E402
 import slide_io  # noqa: E402
 import slide_publish  # noqa: E402
 import slide_storage  # noqa: E402
@@ -1075,6 +1076,14 @@ def _validating_critical_section(job, state, cleanup_due):
                 _log.warning(
                     "内容级直传关闭命中（job=%s ext=%s）：JPEG 编码 Aperio "
                     "SVS 须在本机转换后上传", job_id, ext)
+                return None
+            # 2026-11-05：普通图片原图不再入库（创建闸已 422，这里兜住升级
+            # 窗口里仍在排队的旧任务）。只允许浏览器转换后的 OME-TIFF。
+            if slide_format_registry.is_raster_image_ext(
+                    job.get("filename") or job.get("safe_name") or entry):
+                _fail("raster_requires_conversion")
+                _log.warning("普通图片原图直传已关闭（job=%s ext=%s）："
+                             "须在本机转换后上传", job_id, ext)
                 return None
             try:
                 # open_slide 试开+关（app.py:_validate_slide_file 同口径；

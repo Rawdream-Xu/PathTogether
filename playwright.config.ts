@@ -136,9 +136,10 @@ export default defineConfig({
 		{
 			name: "chromium",
 			use: { browserName: "chromium" },
-			// 上传面板内转换 spec 需要 COS 基建（见下）；跑在专属 project，
-			// 免得其余 spec 也被它的长超时/夹具影响（设计 §9.4）。
-			testIgnore: /upload-inline-convert\.spec\.ts$/,
+			// 上传面板内转换 spec（含普通图片统一转 OME-TIFF 的
+			// upload-inline-convert-raster.spec.ts）需要 COS 基建（见下）；
+			// 跑在专属 project，免得其余 spec 也被它的长超时/夹具影响（设计 §9.4）。
+			testIgnore: /upload-inline-convert(-raster)?\.spec\.ts$/,
 		},
 		{
 			// docs/upload-inline-convert-design-20261015.md §9.4：真实 WASM +
@@ -149,7 +150,7 @@ export default defineConfig({
 			// webServer 仍是同一份 e2e_server.py：`E2E_INLINE_CONVERT=1` 经
 			// process.env 传入，未设时该 spec 自行 skip（绝不假装通过）。
 			name: "chromium-inline-convert",
-			testMatch: /upload-inline-convert\.spec\.ts$/,
+			testMatch: /upload-inline-convert(-raster)?\.spec\.ts$/,
 			use: { browserName: "chromium" },
 		},
 	],

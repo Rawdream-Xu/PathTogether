@@ -959,6 +959,49 @@ async function doCancel(fromMessage) {
 
 let currentJobId = null;
 
+// --------------------------------------------------------- wasm init --
+
+/// Load the core with a typed failure reason for every step, so the page can
+/// say what failed without waiting for a timeout:
+///   opfs_sync_unavailable — the worker has no FileSystemFileHandle sync
+///                           access handles (the core's only source/output/
+///                           scratch IO). Checked BEFORE the 1.4 MB download.
+///   wasm_fetch            — fetch/HTTP/body read failed (network, 404, …)
+///   wasm_instantiate      — compile/instantiate failed (bad bytes, OOM, …)
+async function loadWasmCore() {
+  const fail = (initReason, message) => {
+    const e = new Error(message);
+    e.initReason = initReason;
+    return e;
+  };
+  if (typeof FileSystemFileHandle === 'undefined' ||
+      typeof FileSystemFileHandle.prototype.createSyncAccessHandle !== 'function') {
+    throw fail('opfs_sync_unavailable',
+      '当前浏览器的工作线程不支持本地文件同步读写（FileSystemFileHandle.prototype.createSyncAccessHandle）');
+  }
+  const url = new URL('slide_transform_bg.wasm', import.meta.url);
+  let resp;
+  try {
+    resp = await fetch(url);
+  } catch (e) {
+    throw fail('wasm_fetch', `转换组件下载失败：${E.errText(e)}`);
+  }
+  if (!resp.ok) {
+    throw fail('wasm_fetch', `转换组件下载失败：HTTP ${resp.status}`);
+  }
+  let bytes;
+  try {
+    bytes = await resp.arrayBuffer();
+  } catch (e) {
+    throw fail('wasm_fetch', `转换组件下载中断：${E.errText(e)}`);
+  }
+  try {
+    return await init({ module_or_path: bytes });
+  } catch (e) {
+    throw fail('wasm_instantiate', `转换组件初始化失败：${E.errText(e)}`);
+  }
+}
+
 // ------------------------------------------------------------ dispatcher --
 
 const pending = new Map(); // id -> {resolve, reject}
@@ -967,13 +1010,26 @@ self.onmessage = async (ev) => {
   const m = ev.data;
   if (m.type === 'init') {
     testMode = !!m.testMode;
-    if (!wasm) {
-      wasm = await init(new URL('slide_transform_bg.wasm', import.meta.url));
+    // `booting` tells the runner the module itself loaded: the WASM download
+    // may now take as long as the network needs instead of counting against
+    // the module-load window.
+    post({ type: 'booting' });
+    try {
+      if (!wasm) wasm = await loadWasmCore();
+      installHosts(); // source/cancel callbacks are live from the start;
+                      // output/scratch callbacks only fire during convert
+      configure(1);
+      post({ type: 'ready', coreVersion: coreVersion() });
+    } catch (e) {
+      // A failed initialization is a Promise rejection the worker keeps to
+      // itself — never an `error` event — so it must be reported explicitly
+      // (otherwise the page waits for the full init timeout with no reason).
+      post({
+        type: 'init-failed',
+        reason: String((e && e.initReason) || 'internal'),
+        message: E.errText(e),
+      });
     }
-    installHosts(); // source/cancel callbacks are live from the start;
-                    // output/scratch callbacks only fire during convert
-    configure(1);
-    post({ type: 'ready', coreVersion: coreVersion() });
     return;
   }
   if (m.type === 'cancel') {

@@ -420,6 +420,87 @@ describe("inline-convert 纯函数", () => {
 		expect(I.directDeclaration(null, CAPS)).toBeNull();
 	});
 
+	it("isRasterCls / directDeclaration：普通图片永不声明 legacy-direct（C.3）", () => {
+		const I = IC() as ReturnType<typeof IC> & {
+			isRasterCls(cls: unknown): boolean;
+		};
+		expect(I.isRasterCls({ cls: "convert", ext: ".jpg", raster: "jpeg" })).toBe(true);
+		expect(I.isRasterCls({ cls: "convert", ext: ".bmp", raster: "bmp" })).toBe(true);
+		expect(I.isRasterCls({ cls: "convert", ext: ".JPEG" })).toBe(false);
+		expect(I.isRasterCls({ cls: "convert", ext: ".jpeg" })).toBe(true);
+		expect(I.isRasterCls({ cls: "convert", ext: ".kfb" })).toBe(false);
+		expect(I.isRasterCls(null)).toBe(false);
+		// 即使分类被伪装成 temporary/convert，也绝不声明直传
+		expect(I.directDeclaration({ cls: "convert", ext: ".jpg", raster: "jpeg",
+			directClass: "legacy-direct" }, CAPS)).toBeNull();
+		expect(I.directDeclaration({ cls: "temporary", ext: ".bmp",
+			directClass: "legacy-direct" }, CAPS)).toBeNull();
+	});
+
+	it("普通图片变体：引擎嗅探 unsupported 仍进入转换队列（浏览器归一化）", async () => {
+		const w = loadInline();
+		const I = w.HP_INLINE_CONVERT as ReturnType<typeof IC> & {
+			isRasterCls(cls: unknown): boolean;
+		};
+		const runner = fakeRunner();
+		const orch = I.createOrchestrator({
+			runner,
+			engine: engineStub({
+				// 渐进/灰度 JPEG：核心拒绝，但运行器会先归一化为 24 位 BMP
+				sniffRasterCapability: () => Promise.resolve({
+					supported: false, reason: "渐进 JPEG 不受支持",
+					detail: "raster_variant",
+				}),
+			}),
+			sniff: w.HP_SLIDE_SNIFF,
+			cos: fakeCos(),
+			caps: CAPS,
+			ui: { row() {}, setStage() {}, markError() {}, buttons() {},
+				toast() {}, refresh() {}, remove() {} },
+			account: () => "u1",
+			target: () => null,
+		});
+		// 最小基线 JPEG 头（SOF0 三分量）——classifyFile 走 raster 路由
+		const jpeg = Uint8Array.from([
+			0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0,
+			1, 1, 0, 0, 1, 0, 1, 0, 0,
+			0xff, 0xc0, 0, 17, 8, 0x40, 0x20, 0x02, 0x58, 3,
+			1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1, 0xff, 0xda, 0, 4, 1, 0,
+		]);
+		const e = orch.enqueue(fakeFile("photo.jpg", jpeg))!;
+		await flush();
+		expect(e.cls && (e.cls as { cls: string }).cls).toBe("convert");
+		expect(e.needsConvert).toBe(true);
+		expect(e.directClass == null).toBe(true);
+		// 进入转换（probe）而不是准备直传
+		expect(runner.calls.some((c) => c[0] === "probe" && c[1] === "photo.jpg")).toBe(true);
+		expect(["convert_queued", "converting", "done", "convert_failed"])
+			.toContain(e.state);
+	});
+
+	it("损坏的 JPEG：核心 unsupported_input 也落到「无法识别该图片」文案（C.2）", async () => {
+		const jpeg = Uint8Array.from([
+			0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0,
+			1, 1, 0, 0, 1, 0, 1, 0, 0,
+			0xff, 0xc0, 0, 17, 8, 0x40, 0x20, 0x02, 0x58, 3,
+			1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1, 0xff, 0xda, 0, 4, 1, 0,
+		]);
+		const h = mkOrch({
+			runner: {
+				probe: () => Promise.reject({
+					error: { code: "unsupported_input", message: "JPEG 数据截断" },
+				}),
+			},
+		});
+		const e = h.orch.enqueue(fakeFile("broken.jpg", jpeg))!;
+		await flush(20);
+		expect(e.state).toBe("convert_failed");
+		expect(e.error?.code).toBe("unsupported_input");
+		expect(e.error?.detail).toBe("raster_unrecognized");
+		expect(h.toasts.some((t) => t.indexOf("upload.inline.err.image") >= 0))
+			.toBe(true);
+	});
+
 	it("prefillFormatRequest：format_ext + 带机器码的 message（§7.1）", () => {
 		const I = IC();
 		const r = I.prefillFormatRequest({
@@ -435,6 +516,13 @@ describe("inline-convert 纯函数", () => {
 			error: { code: "engine_unsupported_variant", engineReason: "非常规变体" },
 		}, null);
 		expect(r2.message).toContain("engine_reason=非常规变体");
+		// B.4：申请必须带浏览器标识（截断 200）——服务端访问日志没有 UA 时
+		// 这是定位「哪类浏览器初始化失败」的唯一线索。
+		expect(r2.message).toContain("ua=");
+		expect(r2.message.length).toBeLessThan(2000);
+		const ua = String((globalThis as { navigator?: { userAgent?: string } })
+			.navigator?.userAgent || "");
+		if (ua) expect(r2.message).toContain("ua=" + ua.slice(0, 200));
 	});
 
 	it("failureStageKey：引擎/服务端码 → 文案键；未知码 null", () => {
@@ -446,6 +534,14 @@ describe("inline-convert 纯函数", () => {
 		expect(I.failureStageKey("validation_failed")).toBe("upload.cos.err.validation");
 		expect(I.failureStageKey("client_gone")).toBe("upload.cos.err.client_gone");
 		expect(I.failureStageKey("who_knows")).toBeNull();
+		// C.1/C.2：普通图片识别/尺寸失败的具体文案
+		expect(I.failureStageKey("unsupported_input", "raster_unrecognized"))
+			.toBe("upload.inline.err.image");
+		expect(I.failureStageKey("unsupported_input", "raster_decode_unavailable"))
+			.toBe("upload.inline.err.image");
+		expect(I.failureStageKey("unsupported_input", "raster_too_large"))
+			.toBe("upload.inline.err.imageTooLarge");
+		expect(I.failureStageKey("unsupported_input")).toBe("upload.inline.err.unsupported");
 	});
 
 	it("failureStageKey：覆盖三处真实词表（复核修复的覆盖面）", () => {

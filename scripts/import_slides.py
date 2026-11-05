@@ -123,6 +123,11 @@ def import_one(src: Path, upload_dir: Path, owner_user_id, requester_role,
         raise ValueError("ZIP/MRXS 请经 /api/ingestions 云直传上传 zip 包，本通道只收单文件 WSI：%s" % name)
     if ext not in app_mod.SUPPORTED_EXTS:
         raise ValueError("不支持的扩展名 .%s：%s" % (ext, name))
+    # 2026-11-05：普通图片原图不再入库（须先在本机浏览器转换为 OME-TIFF）。
+    if ext in ("bmp", "jpg", "jpeg"):
+        raise ValueError(
+            "普通图片需先在本机浏览器转换为 OME-TIFF 后上传："
+            "原始 .bmp / .jpg / .jpeg 不能直接导入")
 
     if dry_run:
         return None, None

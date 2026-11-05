@@ -856,3 +856,21 @@ def test_no_endpoint_accepts_paths(plugin, deliverable):
     assert r.status_code == 201, r.get_json()
     imp2 = pim.get_import(r.get_json()["import_id"])
     assert imp2["owner_user_id"] == plugin.env.uid
+
+
+# --------------------------------------------------------------------------- #
+# 2026-11-05：普通图片原图不再作为 producer 交付物（必须先转 OME-TIFF）
+# --------------------------------------------------------------------------- #
+def test_begin_rejects_raster_image_deliverable(plugin, deliverable):
+    """bmp/jpg/jpeg 交付物在 begin 即 422 raster_requires_conversion——
+    不建任务、不占预约（机器生产者也只能提交浏览器转换后的 OME-TIFF）。"""
+    for name, ext in (("raw.jpg", "jpg"), ("raw.jpeg", "jpeg"),
+                      ("raw.bmp", "bmp")):
+        payload = plugin.begin_payload(name, deliverable, format_ext=ext)
+        r = plugin.begin(payload, "idem-raster-%s" % ext)
+        assert r.status_code == 422, (name, r.get_json())
+        assert _err_code(r) == "raster_requires_conversion", name
+    rows = sql_one(
+        "SELECT count(*) AS n FROM producer_imports WHERE installation_id=%s",
+        (plugin.env.installation_id,))
+    assert rows["n"] == 0

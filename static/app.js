@@ -87,6 +87,12 @@
     // 2026-10-20 用户决定：独立转换器只做本地转换与保存；工作台上传不再
     // 跳转/弹窗交接——需要转换的文件在面板不可用时行内说明 + 重试/支持。
     "upload.kfb.unavailable": { zh: "该文件需要先转换后上传：本机转换暂不可用，可重试或申请支持该格式", en: "This file must be converted before upload: local conversion is unavailable right now — retry or request format support" },
+    "upload.inline.init.browser": { zh: "当前浏览器无法在本机转换图片（缺少必要的浏览器能力）。请用最新版 Chrome、Edge、Safari 或 Firefox 打开；360、QQ 等浏览器请切换到“极速模式”；无痕窗口可能不支持，请改用普通窗口。", en: "This browser cannot convert images locally (a required browser capability is missing). Please use the latest Chrome, Edge, Safari or Firefox; in 360/QQ browsers switch to “Speed mode”; private windows may not work — use a normal window." },
+    "upload.inline.init.wasm": { zh: "当前浏览器无法在本机转换图片（缺少 WebAssembly 支持）。请用最新版 Chrome、Edge、Safari 或 Firefox 打开；360、QQ 等浏览器请切换到“极速模式”；无痕窗口可能不支持，请改用普通窗口。", en: "This browser cannot convert images locally (WebAssembly is missing). Please use the latest Chrome, Edge, Safari or Firefox; in 360/QQ browsers switch to “Speed mode”; private windows may not work — use a normal window." },
+    "upload.inline.init.worker": { zh: "当前浏览器无法在本机转换图片（缺少模块 Web Worker 支持）。请用最新版 Chrome、Edge、Safari 或 Firefox 打开；360、QQ 等浏览器请切换到“极速模式”；无痕窗口可能不支持，请改用普通窗口。", en: "This browser cannot convert images locally (module Web Worker support is missing). Please use the latest Chrome, Edge, Safari or Firefox; in 360/QQ browsers switch to “Speed mode”; private windows may not work — use a normal window." },
+    "upload.inline.init.opfs": { zh: "当前浏览器无法在本机转换图片（缺少本地文件存储 OPFS）。请用最新版 Chrome、Edge、Safari 或 Firefox 打开；360、QQ 等浏览器请切换到“极速模式”；无痕窗口可能不支持，请改用普通窗口。", en: "This browser cannot convert images locally (local file storage OPFS is missing). Please use the latest Chrome, Edge, Safari or Firefox; in 360/QQ browsers switch to “Speed mode”; private windows may not work — use a normal window." },
+    "upload.inline.init.network": { zh: "转换组件加载失败或超时，请检查网络后点「重试」。", en: "The conversion component failed to load or timed out. Check your network and click “Retry”." },
+    "upload.inline.init.generic": { zh: "本机转换组件初始化失败，请点「重试」；如仍失败可申请支持该格式。", en: "The local conversion component could not initialize. Click “Retry”; if it keeps failing, request support for this format." },
     // 上传面板内转换（docs/upload-inline-convert-design-20261015.md；i18n.js 为主源，
     // 此处兜底：app.js 的 tt() 在无 HP_I18N 词条时回落到本表）
     "upload.stage.pct": { zh: "（{pct}%）", en: " ({pct}%)" },
@@ -132,7 +138,9 @@
     "upload.inline.err.disk": { zh: "磁盘空间预检未通过", en: "Disk space precheck failed" },
     "upload.inline.err.quota": { zh: "浏览器存储配额不足：请腾出空间，或改在转换器页转换后本地保存", en: "Browser storage quota is insufficient: free some space, or convert on the converter page and save locally" },
     "upload.inline.err.profile": { zh: "当前资源档位内存预算不足", en: "This resource profile's memory budget is too small" },
-    "upload.inline.err.unsupported": { zh: "该文件不支持本机转换（已按原样上传或见下方说明）", en: "This file cannot be converted on this machine (uploaded as-is or see the note below)" },
+    "upload.inline.err.unsupported": { zh: "该文件不支持本机转换（详见下方说明）", en: "This file cannot be converted on this machine (see the note below)" },
+    "upload.inline.err.image": { zh: "无法识别该图片（不是有效的 JPEG/BMP，或文件已损坏）：可申请支持该格式", en: "This image cannot be recognized (not a valid JPEG/BMP, or the file is damaged): you can request support for this format" },
+    "upload.inline.err.imageTooLarge": { zh: "图片尺寸超出本机转换上限（最多 5000 万像素、每边不超过 16384）：请缩小后重试", en: "The image exceeds the local conversion limit (max 50 megapixels, max 16384 px per side): resize it and retry" },
     "upload.inline.err.busy": { zh: "另一个标签页正在执行本机转换，请稍后重试", en: "Another tab is running a local conversion; please retry shortly" },
     "upload.inline.err.evicted": { zh: "本地任务目录已被浏览器清理，请重新选择文件", en: "The local job directory was evicted by the browser; please re-select the file" },
     "upload.inline.err.resume": { zh: "本地任务与当前设置不符，请重新选择文件后重试", en: "The local job no longer matches the current settings; please re-select the file" },
@@ -10724,11 +10732,23 @@
       name: displayName || (file && file.name) || "?",
       size: (file && file.size) || 0,
     });
-    row.setStage("upload.kfb.unavailable");
-    addRowButton(row, tt("upload.cos.retry"), retry);
+    // 计划 B.2：按初始化失败原因给具体说明（中英双语走 i18n）；没有具体
+    // 原因（开关关闭/未知错误）保留既有通用文案。
+    var reason = inlineInitFailure && inlineInitFailure.reason;
+    var stageKey = inlineFailureStageKey(reason);
+    if (!stageKey) stageKey = "upload.kfb.unavailable";
+    row.setStage(stageKey);
+    // 计划 B.3：「重试」先清掉失败的初始化（promise/运行器/模块缓存），
+    // 下一次 ensureInlineOrch 会重新 import 并新建 worker。
+    addRowButton(row, tt("upload.cos.retry"), function () {
+      resetInlineInit();
+      if (typeof retry === "function") retry();
+    });
     addRowButton(row, tt("upload.inline.action.requestSupport"), function () {
       openSupportForEntry({ name: displayName || (file && file.name) || "", file: file,
-        error: { code: "needs_conversion" } });
+        // 计划 B.4：把组件失败原因带进申请（ua 由 prefillFormatRequest 统一
+        // 追加），申请即可直接定位问题。
+        error: { code: "needs_conversion", engineReason: reason || "" } });
     });
     row.finish(60000);
   }
@@ -11493,6 +11513,52 @@
   var inlineEngine = null;        // engine.js 命名空间（懒 import）
   var inlineOrch = null;          // 面板编排器
   var inlineInitP = null;         // 初始化 promise（并发去重）
+  // 初始化失败原因（计划 B.1）：{reason, message}。失败后不再只写
+  // console.error——行内说明、申请支持预填与「重试」都据此给具体原因。
+  var inlineInitFailure = null;
+  // 重试计数：>0 时动态 import 附带一次性查询参数，绕开浏览器对**失败
+  // 模块**的映射缓存（计划 B.3 / A.5）。
+  var inlineImportNonce = 0;
+
+  /// 主线程能力预检（计划 A.4，与 runner.js missingBrowserCapabilities 同
+  /// 判据）：在动态 import 运行器（进而下载 1.4 MB WASM）之前完成。返回
+  /// 缺失项名称（'WebAssembly'|'Worker'|'OPFS'），空数组 = 可用。
+  function inlineCapabilityMissing() {
+    var missing = [];
+    var hasWasm = (typeof WebAssembly === "object" && WebAssembly !== null) ||
+      typeof WebAssembly === "function";
+    if (!hasWasm) missing.push("WebAssembly");
+    if (typeof Worker !== "function") missing.push("Worker");
+    var hasOpfs = false;
+    try {
+      hasOpfs = !!(typeof navigator !== "undefined" && navigator.storage &&
+        typeof navigator.storage.getDirectory === "function");
+    } catch (e) { hasOpfs = false; }
+    if (!hasOpfs) missing.push("OPFS");
+    return missing;
+  }
+
+  /// 初始化失败 → {reason, message}（计划 B.1）。typed 错误带 reason；
+  /// 动态 import 的网络/解析失败统一 module_load_failed。
+  function inlineInitFailureOf(e) {
+    if (e && e.error && e.error.code === "converter_unavailable" &&
+        e.error.reason) {
+      return { reason: String(e.error.reason),
+               message: String(e.error.message || e.error.reason) };
+    }
+    return { reason: "module_load_failed",
+             message: String((e && e.message) || e || "无法加载转换组件") };
+  }
+
+  /// 「重试」前的清理（计划 B.3）：丢掉失败的 promise/运行器，下一次
+  /// ensureInlineOrch 会重新 import（带 nonce 绕开失败缓存）并新建 worker。
+  function resetInlineInit() {
+    inlineInitP = null;
+    inlineRunner = null;
+    inlineOrch = null;
+    inlineInitFailure = null;
+    inlineImportNonce += 1;
+  }
 
   /// inline_convert 能力（app.py _inline_convert_payload 唯一权威）。
   function inlineConvertCaps() {
@@ -11516,8 +11582,20 @@
     if (inlineOrch) return Promise.resolve(inlineOrch);
     if (inlineInitP) return inlineInitP;
     if (!window.HP_INLINE_CONVERT) return Promise.resolve(null);
+    // 主线程预检（计划 A.4）：缺项直接失败并登记原因，绝不去下载 WASM。
+    var missing = inlineCapabilityMissing();
+    if (missing.length) {
+      inlineInitFailure = {
+        reason: "browser_unsupported:" + missing[0],
+        message: "当前浏览器无法在本机转换图片（缺少 " + missing[0] + "）",
+      };
+      return Promise.resolve(null);
+    }
+    var runnerUrl = inlineImportNonce
+      ? RUNNER_URL + "?retry=" + inlineImportNonce : RUNNER_URL;
+    inlineInitFailure = null;
     inlineInitP = Promise.all([
-      import(RUNNER_URL),
+      import(runnerUrl),
       import("/static/tools/slide-transform/engine.js"),
     ]).then(function (mods) {
       var runnerMod = mods[0];
@@ -11590,11 +11668,41 @@
       });
       return inlineOrch;
     }).catch(function (e) {
-      console.error("[inline-convert] 初始化失败（回退到弹窗交接）:", e);
+      // 计划 B.1：失败原因写进 inlineInitFailure（行内说明/申请预填/重试
+      // 都据此），console 只作排障辅助。
+      inlineInitFailure = inlineInitFailureOf(e);
+      console.error("[inline-convert] 初始化失败:", inlineInitFailure.reason,
+        inlineInitFailure.message);
       inlineInitP = null;
+      inlineRunner = null;
       return null;
     });
     return inlineInitP;
+  }
+
+  /// 初始化失败原因 → 行内文案键（计划 B.2）。null = 无具体原因（面板由
+  /// 能力开关关闭 / 未知错误）→ 既有通用文案。
+  function inlineFailureStageKey(reason) {
+    var r = String(reason || "");
+    if (r === "module_worker_unsupported" || r === "browser_unsupported:Worker") {
+      return "upload.inline.init.worker";
+    }
+    if (r === "browser_unsupported:WebAssembly") return "upload.inline.init.wasm";
+    if (r === "browser_unsupported:OPFS" || r === "opfs_unavailable" ||
+        r === "opfs_sync_unavailable") {
+      return "upload.inline.init.opfs";
+    }
+    if (r.indexOf("browser_unsupported:") === 0) {
+      return "upload.inline.init.browser";
+    }
+    if (r === "module_load_failed" || r === "wasm_fetch" ||
+        r === "init_timeout") {
+      return "upload.inline.init.network";
+    }
+    if (r === "wasm_instantiate" || r === "internal") {
+      return "upload.inline.init.generic";
+    }
+    return null;
   }
 
   function inlineCaps() {
@@ -13011,11 +13119,10 @@
       import_mode: "direct-temporary", limits: [] },
     { id: "raster-image", display_name: "普通图片（BMP / JPEG）",
       extensions: [".bmp", ".jpg", ".jpeg"], import_mode: "convert",
-      limits: ["可在本机浏览器转换为 OME-TIFF 后上传（识别未压缩 "
-             + "24/32 位 BMP 与三分量基线 JPEG；整图按瓦片重编码，"
-             + "无物理标尺）；RLE / 位域 / 调色板位深 BMP 与渐进 / "
-             + "灰度 JPEG 走暂时直传；平台当前仍受理 .bmp / .jpg / "
-             + ".jpeg 直接导入"] },
+      limits: ["在本机浏览器中转换为 OME-TIFF 后上传（识别未压缩 "
+             + "24/32 位 BMP 与三分量基线 JPEG；其余 BMP/JPEG 变体先"
+             + "在浏览器内统一转换为 24 位 BMP 再转换；整图按瓦片重编码，"
+             + "无物理标尺）；原始 .bmp / .jpg / .jpeg 不再直接导入"] },
     { id: "kfb-kfbf", display_name: "KFB / KFBF", extensions: [".kfb", ".kfbf"],
       import_mode: "convert",
       limits: ["在本机浏览器中转换后上传：KFB 转为 BigTIFF（明场），KFBF 转为多通道 OME-TIFF（荧光）"] },

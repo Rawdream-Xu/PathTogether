@@ -247,10 +247,9 @@ def test_slides_list_includes_raster_metadata():
 def test_slide_formats_endpoint_raster_image_row():
     """/api/slide-formats 含 raster-image 行：单文件、可选上传。
 
-    F8 起 browser_convert=available、import_mode=convert（未压缩 24/32 位
-    BMP 与三分量基线 JPEG 可本机转换）；direct_import 保持 open（直传
-    是否关闭由用户看报告后决定，与 ndpi/vms/scn 的处理一致），目录行级
-    无法区分编码变体（RLE/位域 BMP、渐进/灰度 JPEG 走暂时直传）。
+    F8 起 browser_convert=available、import_mode=convert；2026-11-05 起
+    direct_import=closed——普通图片必须先在本机浏览器转换为 OME-TIFF，
+    原始图片不再直接导入（所有 BMP/JPEG 变体在浏览器内归一化）。
     """
     c = _client()
     r = c.get("/api/slide-formats")
@@ -264,9 +263,10 @@ def test_slide_formats_endpoint_raster_image_row():
     assert it["bundle_required"] is False
     assert it["import_mode"] == "convert"
     assert it["browser_convert"] == "available"
-    assert it["direct_import"] == "open"
+    assert it["direct_import"] == "closed"
     assert it["selectable_for_upload"] is True
     assert any("无物理标尺" in lim for lim in it["limits"])  # 用户向短句
+    assert any("不再直接导入" in lim for lim in it["limits"])
 
 
 def test_slide_formats_endpoint_extension_vocab_no_drift():
@@ -349,19 +349,17 @@ def _publish_prepared(bundle):
 
 
 def test_zip_valid_bmp_member_promoted_with_real_validation():
-    """zip 内合法 BMP 成员：真实解包 + 逐成员真实验证后统一发布，字节一致
-    （P4-app 断言换新：产物在 objects/<slide_id>/data.bmp，不平铺）。"""
+    """zip 内合法 BMP 成员：2026-11-05 起整包拒绝（普通图片原图不再入库）。
+
+    必须先在本机浏览器转换为 OME-TIFF；拒绝发生在解包后识别/分组阶段，
+    零提升、零残留。"""
     bmp = _bmp_bytes(64, 48)
     z = _make_zip([("wire_zip.bmp", bmp)])
     result = upload_content.prepare_zip_bundle(z, upload_root=UPLOAD_DIR)
-    assert not isinstance(result, tuple), result
-    assert [i["key"] for i in result["items"]] == ["wire_zip.bmp"]
-    assert result["main"] == "wire_zip.bmp"
-    assert result["invalid"] == []
-    sids = _publish_prepared(result)
-    import slide_storage
-    obj = slide_storage.bundle_dir(sids["wire_zip.bmp"], root=UPLOAD_DIR)
-    assert (obj / "data.bmp").read_bytes() == bmp
+    assert isinstance(result, tuple), result
+    msg, status = result
+    assert status == 400
+    assert "普通图片" in msg and "OME-TIFF" in msg
     assert not (Path(UPLOAD_DIR) / "wire_zip.bmp").exists()
     assert _residue() == []
 
@@ -374,25 +372,21 @@ def test_zip_only_garbage_jpg_member_whole_rejected():
     assert isinstance(result, tuple)  # (error_message, http_status)
     msg, status = result
     assert status == 400
-    assert "未找到可打开的有效切片" in msg
+    assert "普通图片" in msg
     assert not (Path(UPLOAD_DIR) / "wire_bad.jpg").exists()
     assert _residue() == []
 
 
 def test_zip_mixed_valid_bmp_and_garbage_jpg():
-    """合法 + 无效混合（P4-app 断言换新）：无效 item 按 item 失败**剔除**
-    （failures 证据——不再「提升但不可见」），有效 item 照常发布。"""
+    """合法 BMP + 垃圾 JPG 混合：两者都是普通图片原图 → 整包拒绝。"""
     bmp = _bmp_bytes(32, 24)
     z = _make_zip([("wire_ok.bmp", bmp), ("wire_mixed_bad.jpg",
                                           b"\x00junk" * 16)])
     result = upload_content.prepare_zip_bundle(z, upload_root=UPLOAD_DIR)
-    assert not isinstance(result, tuple), result
-    assert [i["key"] for i in result["items"]] == ["wire_ok.bmp"]
-    assert [f["item"] for f in result["invalid"]] == ["wire_mixed_bad.jpg"]
-    sids = _publish_prepared(result)
-    import slide_storage
-    obj = slide_storage.bundle_dir(sids["wire_ok.bmp"], root=UPLOAD_DIR)
-    assert (obj / "data.bmp").read_bytes() == bmp
+    assert isinstance(result, tuple), result
+    msg, status = result
+    assert status == 400
+    assert "普通图片" in msg
     assert not (Path(UPLOAD_DIR) / "wire_ok.bmp").exists()
     assert not (Path(UPLOAD_DIR) / "wire_mixed_bad.jpg").exists()
     assert _residue() == []
@@ -402,8 +396,10 @@ def test_zip_mixed_valid_bmp_and_garbage_jpg():
 # 5. 本地导入（scripts/import_slides.py）：同一 open_slide 验证
 # =========================================================================== #
 def test_import_slides_raster_batch_ok_and_stable_failure(tmp_path, monkeypatch):
-    """普通图片经 _validate_slide_file（真实 open_slide）导入；垃圾 .jpg 按
-    稳定码进 failed 且不中断整批；非切片后缀维持既有拒绝。"""
+    """2026-11-05：普通图片原图不再经离线导入入库（必须先在本机转 OME-TIFF）。
+
+    整批不中断：每个栅格候选按稳定原因进 failed；非切片后缀/压缩包维持
+    既有拒绝；零资产、零残留。"""
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
     import import_slides as imp
 
@@ -412,36 +408,26 @@ def test_import_slides_raster_batch_ok_and_stable_failure(tmp_path, monkeypatch)
     monkeypatch.setattr(upload_guard, "UPLOAD_RESERVED_FREE_BYTES", 0)
     src = tmp_path / "incoming"
     src.mkdir()
-    bmp = _bmp_bytes(64, 48)
-    jpg = _jpeg_bytes(120, 40)
-    (src / "wire_imp.bmp").write_bytes(bmp)
-    (src / "wire_imp.jpg").write_bytes(jpg)
+    (src / "wire_imp.bmp").write_bytes(_bmp_bytes(64, 48))
+    (src / "wire_imp.jpg").write_bytes(_jpeg_bytes(120, 40))
     (src / "wire_imp_bad.jpg").write_bytes(b"\x00garbage-jpg" * 16)
     (src / "notes.txt").write_bytes(b"x")
     (src / "bundle.zip").write_bytes(b"PK")
 
     r = imp.run(src, upload_dir=upload)
-    assert sorted(r["ok"]) == ["wire_imp.bmp", "wire_imp.jpg"]  # 整批未中断
+    assert r["ok"] == []
     errs = {f["file"]: f["error"] for f in r["failed"]}
-    assert "code=invalid_slide" in errs["wire_imp_bad.jpg"]  # §4.5 稳定码
+    for name in ("wire_imp.bmp", "wire_imp.jpg", "wire_imp_bad.jpg"):
+        assert "转换为 OME-TIFF" in errs[name], name
     assert "不支持的扩展名" in errs["notes.txt"]
     assert "ZIP" in errs["bundle.zip"]
-    # P4-app：产物经统一发布（objects/<slide_id>/，原始字节保留；不平铺）
-    import slide_storage
     import slide_store
-    descs = {d.original_filename: d for d in slide_store.list_ready_descriptors()}
-    assert set(descs) == {"wire_imp.bmp", "wire_imp.jpg"}
-    for name, data in (("wire_imp.bmp", bmp), ("wire_imp.jpg", jpg)):
-        entry = slide_storage.resolve_descriptor_path(descs[name],
-                                                      root=upload)
-        assert entry.read_bytes() == data
-    assert not (upload / "wire_imp.bmp").exists()
-    assert not (upload / "wire_imp.jpg").exists()
+    assert slide_store.list_ready_descriptors() == []
 
 
 def test_import_slides_raster_truncated_rejected_not_promoted(tmp_path,
                                                               monkeypatch):
-    """截断 BMP：导入校验失败按稳定码拒绝，目标目录不留下无效文件。"""
+    """截断 BMP：原图导入已关闭，按稳定原因拒绝，目标目录不留下无效文件。"""
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
     import import_slides as imp
 
@@ -456,7 +442,7 @@ def test_import_slides_raster_truncated_rejected_not_promoted(tmp_path,
     r = imp.run(src_dir, upload_dir=upload)
     assert r["ok"] == []
     assert len(r["failed"]) == 1
-    assert "code=" in r["failed"][0]["error"]
+    assert "转换为 OME-TIFF" in r["failed"][0]["error"]
     assert not (upload / "wire_cut.bmp").exists()
 
 
