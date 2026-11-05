@@ -430,6 +430,17 @@ def prepare_zip_bundle(src_zip: Path, reservation=None, task_id=None,
         _cleanup_all()
         return ("压缩包包含无法归组的成员（%s）——伴侣目录必须与同 stem "
                 "切片同包" % ", ".join(sorted(ungroupable)[:8])), 400
+    # 2026-11-05：普通图片（.bmp/.jpg/.jpeg）原图不再作为新切片入库——zip 里
+    # 的顶层普通图片同样拒绝（必须先在本机浏览器转换为 OME-TIFF）。VMS/MRXS
+    # 包内同 stem 目录里的 JPEG 瓦片是**伴侣成员**（不是 item 入口），不受影响。
+    raster_items = [it["key"] for it in items
+                    if it.get("ext") in
+                    {e.lstrip(".") for e in
+                     slide_format_registry.RASTER_IMAGE_EXTS}]
+    if raster_items:
+        _cleanup_all()
+        return ("压缩包内含普通图片（%s）——普通图片需先在本机浏览器转换为 "
+                "OME-TIFF 后上传" % ", ".join(sorted(raster_items)[:8])), 400
 
     # 提升前磁盘水位（docs §3.4-5；配额已在解压前补占；目标冲突预检拆除
     # ——每 item 预分配 slide_id，objects/<sid> 唯一）。

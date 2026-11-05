@@ -126,6 +126,20 @@ _FORMATS = {
 #: 归档扩展名：不是切片格式，解压后按成员再查注册表（zip 上传解包用）
 ARCHIVE_EXTS = frozenset({".zip"})
 
+#: 普通图片族（BMP/JPEG）：2026-11-05 产品裁决——必须先在本机浏览器转换为
+#: OME-TIFF 再上传；原始图片不再进入任何新建入口（COS ingestion / zip 成员 /
+#: 百度导入 / producer 导入）。既有 raster 切片的读取不受影响
+#: （raster_slide.RasterSlide 保留）。
+RASTER_IMAGE_EXTS = frozenset({".bmp", ".jpg", ".jpeg"})
+
+
+def is_raster_image_ext(name):
+    """文件名是否普通图片族（.bmp/.jpg/.jpeg，大小写不敏感）。"""
+    s = "" if name is None else str(name)
+    base = s.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    i = base.rfind(".")
+    return i >= 0 and base[i:] in RASTER_IMAGE_EXTS
+
 
 def lookup(filename):
     """按文件名（basename/路径均可）查询格式能力。
@@ -358,13 +372,13 @@ _CATALOG_DISPLAY = (
         "canonical_format": None,
         "bundle_required": False,
         "browser_convert": "available",
-        "direct_import": "open",
+        "direct_import": "closed",
         "import_mode": "convert",
-        "limits": ["可在本机浏览器转换为 OME-TIFF 后上传（识别未压缩 "
-                   "24/32 位 BMP 与三分量基线 JPEG；整图按瓦片重编码，"
-                   "无物理标尺）；RLE / 位域 / 调色板位深 BMP 与渐进 / "
-                   "灰度 JPEG 走暂时直传；平台当前仍受理 .bmp / .jpg / "
-                   ".jpeg 直接导入"],
+        "limits": ["在本机浏览器中转换为 OME-TIFF 后上传（识别未压缩 "
+                   "24/32 位 BMP 与三分量基线 JPEG；其余 BMP/JPEG 变体先"
+                   "在浏览器内统一转换为 24 位 BMP 再转换；整图按瓦片"
+                   "重编码，无物理标尺）；原始 .bmp / .jpg / .jpeg 不再"
+                   "直接导入"],
         "selectable_for_upload": True,
     },
     {

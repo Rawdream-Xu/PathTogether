@@ -551,6 +551,12 @@ def ingest_staging(*, owner_user_id, original_name, staging_path,
         raise IngestError("unsupported_format")
     if cap == slide_format_registry.CAP_NATIVE_BUNDLE:
         raise IngestError("baidu_bundle_unsupported")
+    if slide_format_registry.is_raster_image_ext(name):
+        # 2026-11-05：普通图片原图不再入库（必须先转 OME-TIFF）。筛选层
+        # 已不可选；这里兜住升级窗口/直接调用的绕过。
+        raise IngestError(
+            "convert_in_browser_first",
+            "普通图片请先在本机浏览器转换为 OME-TIFF 后再上传")
 
     if cap == slide_format_registry.CAP_CONVERT_REQUIRED:
         # 先转换后上传阶段 1：KFB/KFBF 维持不转换——_ingest_convert 从此

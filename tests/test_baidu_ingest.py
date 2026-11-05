@@ -566,3 +566,19 @@ def test_batch_kfb_candidates_not_selectable(tmp_path, monkeypatch):
     assert ei.value.code == "candidate_not_selectable"
     assert fake.transfers == []
     assert _count_jobs() == 0
+
+
+def test_raster_original_rejected_at_ingest(tmp_path):
+    """2026-11-05：普通图片原图不再入库——绕过筛选层直接调 ingest_staging
+    也拒绝（convert_in_browser_first），不分配资产、不落盘。"""
+    import baidu_ingest
+
+    for name in ("raw.jpg", "raw.JPEG", "raw.bmp"):
+        staging = _stage_file(tmp_path, name, b"\xff\xd8\xff\xe0junk")
+        with pytest.raises(baidu_ingest.IngestError) as ei:
+            baidu_ingest.ingest_staging(
+                owner_user_id=OWNER, original_name=name,
+                staging_path=str(staging), source_sha256=None, source_size=0)
+        assert ei.value.code == "convert_in_browser_first", name
+    assert not any((Path(UPLOAD_DIR) / "objects").glob("sld_*")
+                   if (Path(UPLOAD_DIR) / "objects").exists() else [])

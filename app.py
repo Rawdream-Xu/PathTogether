@@ -3270,14 +3270,27 @@ def _cos_accepted_formats():
     """COS 统一上传受理词表（U2 §3.2）：从格式注册表派生——原生单文件 +
     归档 zip（+ convert-required，仅当服务端转换仍开放）；裸 bundle（.mrxs）
     不在直传集（需打包 zip）。后端权威下发（capability payload），前端不再
-    维护第二份词表。"""
+    维护第二份词表。
+
+    2026-11-05：普通图片（.bmp/.jpg/.jpeg）不再受理原始字节——必须先在本机
+    浏览器转换为 OME-TIFF，上调上传的是 .tif 产物。"""
     exts = set(slide_format_registry.capability_exts(
         slide_format_registry.CAP_NATIVE_SINGLE_FILE))
     if SERVER_CONVERSION_CREATION:
         exts |= _browser_convert_formats()
     exts.add("zip")
     exts.discard("mrxs")
+    exts -= {e.lstrip(".") for e in slide_format_registry.RASTER_IMAGE_EXTS}
     return exts
+
+
+def _raster_requires_conversion():
+    """普通图片的原图直传拒绝形态（2026-11-05 产品裁决）。"""
+    return (jsonify(
+        error="普通图片需先在本机浏览器转换为 OME-TIFF 后上传："
+              "原始 .bmp / .jpg / .jpeg 不能直接导入",
+        code="raster_requires_conversion",
+        tools_url=BROWSER_CONVERT_URL), 422)
 
 
 def _cos_ingestion_kind_for(safe):
@@ -3285,10 +3298,13 @@ def _cos_ingestion_kind_for(safe):
 
     native=原生单文件；zip=归档包；conversion=convert-required（KFB 族）。
     裸 bundle（.mrxs）与未登记格式拒绝并说明原因——不推荐另一后端
-    （U2 §4：删除 fallback 语义）。"""
+    （U2 §4：删除 fallback 语义）。普通图片（.bmp/.jpg/.jpeg）一律 422
+    raster_requires_conversion：只接收浏览器转换后的 OME-TIFF。"""
     ext = safe.rsplit(".", 1)[-1].lower() if "." in safe else ""
     if ext == "zip":
         return "zip", None
+    if slide_format_registry.is_raster_image_ext(safe):
+        return None, _raster_requires_conversion()
     cap = slide_format_registry.lookup(safe)["capability"]
     if cap == slide_format_registry.CAP_NATIVE_SINGLE_FILE:
         return "native", None
@@ -24209,6 +24225,14 @@ def plugin_v1_imports_begin():
         format_ext = slide_store.normalize_format_ext(format_ext)
     except ValueError as e:
         return _plugin_error(400, "invalid_request", "format_ext 非法：%s" % e)
+    # 2026-11-05：普通图片（bmp/jpg/jpeg）不再作为新建切片的交付物——机器
+    # 生产者必须先在浏览器转换为 OME-TIFF 再走生产者导入（原始图片只允许
+    # 读取既有切片）。失败在任何写入/预分配之前。
+    if slide_format_registry.is_raster_image_ext("x." + format_ext):
+        return _plugin_error(
+            422, "raster_requires_conversion",
+            "普通图片需先在本机浏览器转换为 OME-TIFF 后上传："
+            "原始 .bmp / .jpg / .jpeg 不能直接导入")
     try:
         declared_size = int(body.get("declared_size"))
         scratch_bytes = int(body.get("scratch_bytes") or 0)

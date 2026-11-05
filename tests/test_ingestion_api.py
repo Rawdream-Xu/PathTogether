@@ -181,13 +181,20 @@ def test_release_config_boundary_9p5e9(owner_client, monkeypatch):
 
 
 def test_format_acceptance_derived_from_registry(owner_client):
-    # U2（§3.2）：受理词表从注册表派生——原生单文件（含此前被 COS 白名单
-    # 排除的 bmp/jpg）、zip（包）均建任务；裸 bundle（.mrxs）与未登记格式
-    # 422 说明原因（无 fallback 指引）。
+    # U2（§3.2）：受理词表从注册表派生——原生单文件 + zip（包）均建任务；
+    # 裸 bundle（.mrxs）与未登记格式 422 说明原因（无 fallback 指引）。
+    # 2026-11-05：原始普通图片（.bmp/.jpg/.jpeg）不再建任务——422
+    # raster_requires_conversion（必须先在本机转 OME-TIFF）。
     for name in ("cosapi-a.mrxs", "cosapinoext", "cosapi-a.exe"):
         r = _create(owner_client, filename=name)
         assert r.status_code == 422, name
         assert r.get_json()["code"] == "cos_format_unsupported"
+    for name in ("cosapi-a.bmp", "cosapi-b.JPG", "cosapi-c.jpeg"):
+        r = _create(owner_client, filename=name)
+        assert r.status_code == 422, name
+        body = r.get_json()
+        assert body["code"] == "raster_requires_conversion", name
+        assert body["tools_url"] == "/tools/slides"
     # R1：convert-required（kfb）不再建后端转换任务，引导本机「转换并上传」；
     # 阶段 1 起统一错误码 convert_in_browser（旧码 conversion_moved_to_browser
     # 保留在 conversion retry 410 路径；闸的完整断言见
@@ -198,7 +205,7 @@ def test_format_acceptance_derived_from_registry(owner_client):
     assert body["code"] == "convert_in_browser"
     assert body["tools_url"] == "/tools/slides"
     accepted = {"cosapi-a.zip": "zip",
-                "cosapi-a.bmp": "native", "cosapi-c.tif": "native",
+                "cosapi-c.tif": "native",
                 "cosapi-d.ndpi": "native", "cosapi-e.ome.tif": "native"}
     for name, kind in accepted.items():
         r = _create(owner_client, filename=name, size=100_000)

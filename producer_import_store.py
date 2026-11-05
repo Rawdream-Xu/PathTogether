@@ -1613,6 +1613,14 @@ def probe_deliverable(path, format_ext, *, filename=None):
     ProducerImportError(format_unsupported, 422)。"""
     import slide_format_registry
     import slide_io
+    # 2026-11-05：普通图片原图不是可交付产物（必须先转 OME-TIFF）。begin
+    # 已拒绝，这里兜底升级前创建的任务。
+    if slide_format_registry.is_raster_image_ext(
+            filename or ("x." + str(format_ext))):
+        raise ProducerImportError(
+            "raster_requires_conversion",
+            "普通图片需先在本机浏览器转换为 OME-TIFF 后上传："
+            "原始 .bmp / .jpg / .jpeg 不能直接导入", 422)
     info = slide_format_registry.lookup(filename or ("x." + format_ext))
     if info["capability"] != slide_format_registry.CAP_NATIVE_SINGLE_FILE:
         raise ProducerImportError(
