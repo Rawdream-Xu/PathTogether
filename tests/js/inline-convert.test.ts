@@ -478,6 +478,29 @@ describe("inline-convert 纯函数", () => {
 			.toContain(e.state);
 	});
 
+	it("损坏的 JPEG：核心 unsupported_input 也落到「无法识别该图片」文案（C.2）", async () => {
+		const jpeg = Uint8Array.from([
+			0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0,
+			1, 1, 0, 0, 1, 0, 1, 0, 0,
+			0xff, 0xc0, 0, 17, 8, 0x40, 0x20, 0x02, 0x58, 3,
+			1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1, 0xff, 0xda, 0, 4, 1, 0,
+		]);
+		const h = mkOrch({
+			runner: {
+				probe: () => Promise.reject({
+					error: { code: "unsupported_input", message: "JPEG 数据截断" },
+				}),
+			},
+		});
+		const e = h.orch.enqueue(fakeFile("broken.jpg", jpeg))!;
+		await flush(20);
+		expect(e.state).toBe("convert_failed");
+		expect(e.error?.code).toBe("unsupported_input");
+		expect(e.error?.detail).toBe("raster_unrecognized");
+		expect(h.toasts.some((t) => t.indexOf("upload.inline.err.image") >= 0))
+			.toBe(true);
+	});
+
 	it("prefillFormatRequest：format_ext + 带机器码的 message（§7.1）", () => {
 		const I = IC();
 		const r = I.prefillFormatRequest({

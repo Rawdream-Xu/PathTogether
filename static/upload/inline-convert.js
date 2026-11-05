@@ -1196,6 +1196,11 @@
       var code = (err && (err.error ? err.error.code : err.code)) || "io_recoverable";
       var detail = (err && (err.error ? err.error.detail : err.detail)) || null;
       var reason = (err && (err.error ? err.error.message : err.message)) || null;
+      // 普通图片：核心拒绝（截断/损坏的 JPEG/BMP 等）也归「无法识别该图片」，
+      // 而不是泛化的 KFB 文案（计划 C.2）。归一化/嗅探失败本身已带 detail。
+      if (!detail && isRasterCls(e.cls) && code === "unsupported_input") {
+        detail = "raster_unrecognized";
+      }
       if (engine && engine.errCode) {
         var c2 = engine.errCode(err);
         if (c2) code = c2;
