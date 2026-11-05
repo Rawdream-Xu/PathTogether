@@ -320,6 +320,7 @@ def test_credits_wallet_shape(pay_env):
     assert wallet["reserved_units"] == "0"
     assert wallet["refund_pending_units"] == "0"
     assert wallet["available_units"] == str(20 * 10**9)
+    assert wallet["issued_units"] == str(20 * 10**9)
     assert wallet["composition"] == {
         "promotional_units": str(20 * 10**9),
         "legacy_grant_units": "0",
@@ -336,11 +337,28 @@ def test_credits_wallet_shape(pay_env):
     assert body["as_of"]
     # 金额一律十进制字符串
     for key in ("balance_units", "reserved_units", "refund_pending_units",
-                "available_units"):
+                "available_units", "issued_units"):
         assert isinstance(wallet[key], str)
         assert wallet[key].lstrip("-").isdigit()
     for value in wallet["composition"].values():
         assert isinstance(value, str)
+
+
+def test_wallet_issued_units_accumulates_grants_not_spends(pay_env):
+    """issued_units = 历史发放合计：新增批次会累加，消费只减 available。"""
+    user, account = _credits_user(20 * 10**9)
+    assert credit_store.wallet_snapshot(user["user_id"])["issued_units"] == \
+        20 * 10**9
+    _order, _lot = _issue_paid_lot(user, account, amount_fen=10)
+    _consume(user, account, 3 * 10**9)
+    snapshot = credit_store.wallet_snapshot(user["user_id"])
+    expected_issued = 20 * 10**9 + 10 * credit_store.UNITS_PER_FEN
+    assert snapshot["issued_units"] == expected_issued
+    assert snapshot["available_units"] == expected_issued - 3 * 10**9
+    client = _login(user)
+    body = client.get("/api/account/credits").get_json()
+    assert body["wallet"]["issued_units"] == str(expected_issued)
+    assert body["wallet"]["available_units"] == str(expected_issued - 3 * 10**9)
 
 
 def test_legacy_shape_has_no_wallet_and_cannot_topup(pay_env):

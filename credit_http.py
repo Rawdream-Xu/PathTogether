@@ -113,6 +113,7 @@ def _stringify_wallet(wallet):
         "reserved_units": _as_str(wallet.get("reserved_units")),
         "refund_pending_units": _as_str(wallet.get("refund_pending_units")),
         "available_units": _as_str(wallet.get("available_units")),
+        "issued_units": _as_str(wallet.get("issued_units")),
         "composition": {
             "promotional_units": _as_str(composition.get("promotional_units")),
             "legacy_grant_units": _as_str(composition.get("legacy_grant_units")),

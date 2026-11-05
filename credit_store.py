@@ -498,13 +498,24 @@ def _composition_tx(cur, account_id):
     return composition
 
 
+def _issued_units_tx(cur, account_id):
+    """账户累计发放 Credit（credit_lots.issued_units 合计，只读展示口径）。"""
+    cur.execute(
+        "SELECT COALESCE(SUM(issued_units), 0)::bigint AS issued "
+        "FROM credit_lots WHERE account_id = %s",
+        (account_id,))
+    row = cur.fetchone()
+    return int(row["issued"]) if row is not None else 0
+
+
 def wallet_snapshot(user_id):
     """钱包快照连接壳（只读；未开户 → None）。
 
     返回 ``{account_id, billing_backend, status, balance_units,
-    reserved_units, refund_pending_units, available_units, composition,
-    restricted_reason, migrated_at}``；composition 为各 kind 的 remaining
-    合计，restricted_reason 见 :func:`account_restriction_tx`。
+    reserved_units, refund_pending_units, available_units, issued_units,
+    composition, restricted_reason, migrated_at}``；composition 为各 kind 的
+    remaining 合计，issued_units 为累计发放（credit_lots.issued_units 合计），
+    restricted_reason 见 :func:`account_restriction_tx`。
     """
     conn = _connect()
     try:
@@ -522,6 +533,8 @@ def wallet_snapshot(user_id):
                     "refund_pending_units": int(
                         account["credit_refund_pending_units"]),
                     "available_units": _account_available(account),
+                    "issued_units": _issued_units_tx(
+                        cur, account["account_id"]),
                     "composition": _composition_tx(
                         cur, account["account_id"]),
                     "restricted_reason": account_restriction_tx(cur, account),
