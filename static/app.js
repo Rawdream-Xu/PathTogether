@@ -592,6 +592,9 @@
     acctDisplayUsername: acctDisplayUsername,
     acctCny: acctCny,
     acctCredits: acctCreditsUnit,
+    // 可用余额整数显示（tests/js/toolbar-account-upgrade.test.ts /
+    // credits-page.test.ts 锁向下取整与「不足 1」文案）
+    formatCreditsWhole: formatCreditsWhole,
   };
 
   // ---------- 修改我的密码（账户系统批次 A docs §7.1；owner/user 通用） ----------
@@ -14219,6 +14222,25 @@
     return s === null ? null : s + " Credits";
   }
 
+  // 可用余额取整显示（2026-11-05 产品决定）：向下取整到整数 Credit，
+  // 绝不显示多于用户实际持有的数。非零但不足 1 显示「不足 1」；0 与负值
+  // 均显示 0。BigInt 全程不经 Number，大数值不失真。仅用于可用余额大数字；
+  // 预留/退款冻结/明细仍用 4 位小数。
+  function formatCreditsWhole(v) {
+    if (v === null || v === undefined || v === "") return null;
+    var b;
+    try { b = BigInt(v); } catch (e) { return null; }
+    if (b <= 0n) return "0";
+    if (b < 10000000n) return t("acct.credits.less_than_one");
+    return acctGroupThousands((b / 10000000n).toString());
+  }
+  // 用量条副行取整：BigInt 整数 Credit（非法/负值按 0）；调用方保证非负数。
+  function acctWholeCredits(v) {
+    var b = acctBig(v);
+    if (b === null || b <= 0n) return 0n;
+    return b / 10000000n;
+  }
+
   // 规范化邮箱 @ 前的 local-part；非邮箱存量账号回退完整 login_id
   function acctDisplayUsername(username) {
     var s = String(username == null ? "" : username);
@@ -14430,8 +14452,10 @@
     if (els.acctPopScope) {
       els.acctPopScope.textContent = t("acct.credits.scope");
     }
-    acctSetAmount(formatCredits4(wallet.available_units));
-    // 大数字 = 可用；进度分母 = 累计发放（issued_units，缺失/0 时隐藏条与副行）
+    acctSetAmount(formatCreditsWhole(wallet.available_units));
+    // 大数字 = 可用（整数，向下取整）；进度分母 = 累计发放（issued_units，
+    // 缺失/0 时隐藏条与副行）。副行同样取整：used = issued_int - available_int，
+    // 保证屏上两个数字相加等于 issued_int。进度条仍用精确 BigInt。
     var available = acctBig(wallet.available_units);
     var issued = acctBig(wallet.issued_units);
     var used = null;
@@ -14442,9 +14466,12 @@
     if (used !== null && acctMeterPaint(
         els.acctPopUsage, els.acctPopUsageFill, used, issued)) {
       if (els.acctPopDetail) {
+        var issuedInt = acctWholeCredits(wallet.issued_units);
+        var availableInt = acctWholeCredits(wallet.available_units);
+        var usedInt = issuedInt > availableInt ? issuedInt - availableInt : 0n;
         els.acctPopDetail.textContent = t("acct.credits.used", {
-          used: formatCredits4(used),
-          issued: formatCredits4(issued),
+          used: acctGroupThousands(usedInt.toString()),
+          issued: acctGroupThousands(issuedInt.toString()),
         });
       }
     } else {
@@ -14498,19 +14525,24 @@
       }
       els.acctPopScope.textContent = scope;
     }
-    acctSetAmount(formatCredits4(data.remaining_nano_cny));
-    // legacy / owner 同口径：used = 已用 + 在途预留；分母 = 限额
+    acctSetAmount(formatCreditsWhole(data.remaining_nano_cny));
+    // legacy / owner 同口径：副行取整，used = 限额_int - 剩余_int（最小值 0；
+    // 屏上两数相加等于限额_int）；进度条仍用精确值 spent + reserved。
     var limit = acctBig(data.limit_nano_cny);
     var spent = acctBig(data.spent_nano_cny);
+    var remaining = acctBig(data.remaining_nano_cny);
     var reserved = acctBig(data.reserved_nano_cny) || 0n;
     if (els.acctPopDetail) els.acctPopDetail.textContent = "";
-    if (limit !== null && spent !== null && limit > 0n &&
+    if (limit !== null && spent !== null && remaining !== null && limit > 0n &&
         acctMeterPaint(els.acctPopUsage, els.acctPopUsageFill,
                        spent + reserved, limit)) {
       if (els.acctPopDetail) {
+        var limitInt = acctWholeCredits(data.limit_nano_cny);
+        var remainingInt = acctWholeCredits(data.remaining_nano_cny);
+        var usedInt = limitInt > remainingInt ? limitInt - remainingInt : 0n;
         els.acctPopDetail.textContent = t("acct.balance.used", {
-          used: formatCredits4(spent + reserved),
-          total: formatCredits4(limit),
+          used: acctGroupThousands(usedInt.toString()),
+          total: acctGroupThousands(limitInt.toString()),
         });
       }
     } else {

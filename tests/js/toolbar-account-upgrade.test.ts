@@ -247,6 +247,7 @@ function bootApp(opts: { width?: number } = {}) {
 			applyAuthInfo: (i: AuthInfo) => AuthInfo;
 			acctDisplayUsername: (u: string | null) => string;
 			acctCny: (v: string | null) => string | null;
+			formatCreditsWhole: (v: string | null) => string | null;
 		},
 	};
 }
@@ -367,6 +368,27 @@ describe("账户 popover 余额（GET /api/account/credits）", () => {
 		expect(h.HP_AUTH.acctCny("0")).toBe("0.00 CNY");
 		expect(h.HP_AUTH.acctCny("abc")).toBeNull();
 		expect(h.HP_AUTH.acctCny(null)).toBeNull();
+	});
+
+	it("可用余额整数显示：向下取整、不足 1 专用文案、BigInt 大数分组", () => {
+		const h = bootApp();
+		// 1.2345 Credits → 1（绝不显示多于持有）
+		expect(h.HP_AUTH.formatCreditsWhole("12345678")).toBe("1");
+		// 3,878.69 → 3,878
+		expect(h.HP_AUTH.formatCreditsWhole("38786900000")).toBe("3,878");
+		// 非零但 < 1 → i18n 键（t 的桩直接回传键名）
+		expect(h.HP_AUTH.formatCreditsWhole("5000000")).toBe(
+			"acct.credits.less_than_one");
+		expect(h.HP_AUTH.formatCreditsWhole("9999999")).toBe(
+			"acct.credits.less_than_one");
+		expect(h.HP_AUTH.formatCreditsWhole("10000000")).toBe("1");
+		expect(h.HP_AUTH.formatCreditsWhole("0")).toBe("0");
+		expect(h.HP_AUTH.formatCreditsWhole("-20000000")).toBe("0");
+		expect(h.HP_AUTH.formatCreditsWhole("abc")).toBeNull();
+		expect(h.HP_AUTH.formatCreditsWhole(null)).toBeNull();
+		// 大数值不经 Number：floor(12345678901234567890 / 1e7)
+		expect(h.HP_AUTH.formatCreditsWhole("12345678901234567890"))
+			.toBe("1,234,567,890,123");
 	});
 
 	it("壳模板：余额/存储用量条 progressbar 骨架（aria + i18n label）", () => {
@@ -892,6 +914,8 @@ describe("Beta 徽标 + i18n 新键（§3.4/§7）", () => {
 		expect(zh.t("acct.storage.full")).toContain("联系管理员");
 		expect(zh.t("acct.storage.bar.aria")).toBe("存储用量");
 		expect(zh.t("acct.credits.history")).toBe("Credit 明细");
+		expect(zh.t("acct.credits.less_than_one")).toBe("不足 1");
+		expect(zh.t("credit.balance.less_than_one")).toBe("不足 1");
 		expect(zh.t("acct.settings")).toBe("账户设置");
 
 		zh.setLang("en");
@@ -900,6 +924,8 @@ describe("Beta 徽标 + i18n 新键（§3.4/§7）", () => {
 		expect(zh.t("acct.balance.scope.month")).toBe("This month");
 		expect(zh.t("acct.storage.full")).toContain("Storage full");
 		expect(zh.t("acct.credits.history")).toBe("Credit history");
+		expect(zh.t("acct.credits.less_than_one")).toBe("less than 1");
+		expect(zh.t("credit.balance.less_than_one")).toBe("less than 1");
 		expect(zh.t("acct.balance.unavailable", { reason: "X" })).toBe("Balance info unavailable (X)");
 	});
 });

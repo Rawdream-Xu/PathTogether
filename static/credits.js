@@ -4,7 +4,8 @@
 
    约束：
    - 金额全程 BigInt；Credit 显示 = units / 10^7 截断到 4 位小数，非零但
-     < 0.0001 显示「小于 0.0001」；
+     < 0.0001 显示「小于 0.0001」；「可用余额」大数字例外：向下取整到整数
+     （非零但 < 1 显示「不足 1」），预留/冻结/流水/套餐/订单仍保留 4 位；
    - 建单幂等键每次「尝试」生成一次（crypto.getRandomValues），双击/重试复用；
    - 只有 https 且 host 为 alipay.com / alipaydev.com（含子域）才跳转 pay_url；
    - 订单页轮询 2s→10s 退避，终态或约 10 分钟后停止，回到前台立即恢复；
@@ -81,6 +82,20 @@
     var text = groupThousands(whole.toString()) +
       (fracText ? "." + fracText : "");
     return (negative ? "-" : "") + text;
+  }
+
+  /**
+   * credit_units → 整数 Credit 文本（向下取整，绝不显示多于实际持有）。
+   * 仅用于「可用余额」大数字；非零但不足 1 显示「不足 1」，负值按 0。
+   * 预留/退款冻结、流水、套餐与订单金额仍用 formatCreditsUnits（4 位小数）。
+   */
+  function formatCreditsWhole(units) {
+    if (units === null || units === undefined || units === "") return null;
+    var b;
+    try { b = BigInt(String(units)); } catch (e) { return null; }
+    if (b <= 0n) return "0";
+    if (b < UNITS_PER_CREDIT) return t("credit.balance.less_than_one");
+    return groupThousands((b / UNITS_PER_CREDIT).toString());
   }
 
   /** fen → ¥ 文本（两位小数，整数运算）。 */
@@ -277,7 +292,7 @@
       state.balanceUnits = (wallet.available_units === null ||
         wallet.available_units === undefined)
         ? null : BigInt(String(wallet.available_units));
-      var available = formatCreditsUnits(wallet.available_units);
+      var available = formatCreditsWhole(wallet.available_units);
       setText("credit-balance-available", available === null ? "—" : available);
       setText("credit-balance-unit", t("credit.balance.unit"));
       if (isNonZeroUnits(wallet.reserved_units)) {
@@ -882,6 +897,7 @@
   // 纯函数/状态机挂载点（tests/js/credits-page.test.ts 行为契约）
   window.HP_CREDITS = {
     formatCreditsUnits: formatCreditsUnits,
+    formatCreditsWhole: formatCreditsWhole,
     formatCnyFen: formatCnyFen,
     formatCnyNano: formatCnyNano,
     formatSignedUnits: formatSignedUnits,

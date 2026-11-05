@@ -3,7 +3,8 @@
  *
  * 加载真实 static/credits.js 与 static/app.js（最小 DOM + fetch stub），锁定：
  *   - Credit 单位格式化：units / 10^7 截断 4 位小数；非零但 < 0.0001 显示
- *     「小于 0.0001」；全程 BigInt，不经 Number；
+ *     「小于 0.0001」；可用余额大数字向下取整到整数（不足 1 显示「不足 1」）；
+ *     全程 BigInt，不经 Number；
  *   - CNY（分/nano）格式化与符号；
  *   - 订单状态文案键（等待付款/处理中/已到账/已关闭/不可用）；
  *   - 建单幂等键：同一次尝试（套餐/版本相同）双击复用，换套餐换新键；
@@ -40,6 +41,7 @@ function bootCreditsScript() {
 	expect(HP).toBeTruthy();
 	return HP as {
 		formatCreditsUnits: (v: string | null) => string | null;
+		formatCreditsWhole: (v: string | null) => string | null;
 		formatCnyFen: (v: string | null) => string | null;
 		formatCnyNano: (v: string | null) => string | null;
 		formatSignedUnits: (v: string | null) => string | null;
@@ -74,6 +76,21 @@ describe("Credit/CNY 格式化（BigInt，截断）", () => {
 		const HP = bootCreditsScript();
 		expect(HP.formatCreditsUnits("999")).toBe("credit.balance.less_than_min");
 		expect(HP.formatCreditsUnits("1")).toBe("credit.balance.less_than_min");
+	});
+
+	it("可用余额整数显示：向下取整 / 不足 1 / BigInt 大数", () => {
+		const HP = bootCreditsScript();
+		expect(HP.formatCreditsWhole("12345678")).toBe("1");
+		expect(HP.formatCreditsWhole("38786900000")).toBe("3,878");
+		expect(HP.formatCreditsWhole("9999999")).toBe(
+			"credit.balance.less_than_one");
+		expect(HP.formatCreditsWhole("10000000")).toBe("1");
+		expect(HP.formatCreditsWhole("0")).toBe("0");
+		expect(HP.formatCreditsWhole("-20000000")).toBe("0");
+		expect(HP.formatCreditsWhole("abc")).toBeNull();
+		expect(HP.formatCreditsWhole(null)).toBeNull();
+		expect(HP.formatCreditsWhole("12345678901234567890"))
+			.toBe("1,234,567,890,123");
 	});
 
 	it("分/纳元格式化为两位小数", () => {
@@ -386,13 +403,14 @@ describe("账户 popover：credits/legacy/owner", () => {
 		}));
 		await openPopover(h);
 		await vi.waitFor(() => {
-			expect(h.els["acct-pop-remaining"].textContent).toBe("1.2345");
+			expect(h.els["acct-pop-remaining"].textContent).toBe("1");
 			expect(h.els["acct-pop-unit"].hidden).toBe(false);
 		});
 		expect(h.els["acct-pop-scope"].textContent).toBe("acct.credits.scope");
-		// issued 22,345,678 / available 12,345,678 → used 10,000,000（1.0 Credits）
+		// 大数字与副行均取整：issued 2.2345→2 / available 1.2345→1，
+		// used = 2 - 1 = 1（两数相加恒等于 issued 整数）
 		expect(h.els["acct-pop-detail"].textContent).toBe(
-			"acct.credits.used({\"used\":\"1\",\"issued\":\"2.2345\"})");
+			"acct.credits.used({\"used\":\"1\",\"issued\":\"2\"})");
 		expect(h.els["acct-pop-usage"].hidden).toBe(false);
 		const extra = h.els["acct-pop-extra"].textContent;
 		expect(extra).toContain("acct.credits.reserved");
@@ -400,6 +418,68 @@ describe("账户 popover：credits/legacy/owner", () => {
 		expect(extra).not.toContain("acct.credits.refund_pending");
 		expect(h.els["acct-topup-link"].hidden).toBe(false);
 		expect(h.els["acct-topup-link"].textContent).toBe("acct.credits.topup");
+	});
+
+	it("可用余额取整：3,878.69→3,878 且副行由整数差计算；不足 1 专用文案", async () => {
+		const h = bootApp();
+		h.HP_AUTH.applyAuthInfo(loggedIn());
+		h.routes.set("/api/account/credits", () => ({
+			status: 200,
+			body: {
+				subject: { username: "credit@x.com", display_username: "credit", role: "user", preview: false },
+				billing_backend: "credits",
+				wallet: {
+					balance_units: "38786900000",
+					reserved_units: "0",
+					refund_pending_units: "0",
+					available_units: "38786900000",
+					issued_units: "50002500000",
+					composition: { promotional_units: "0", legacy_grant_units: "0", paid_units: "38786900000" },
+					restricted_reason: null,
+					migrated_at: null,
+				},
+				can_topup: true,
+				topup_reason: null,
+				as_of: "2026-11-05T00:00:00Z",
+			},
+		}));
+		await openPopover(h);
+		await vi.waitFor(() => {
+			expect(h.els["acct-pop-remaining"].textContent).toBe("3,878");
+		});
+		// issued 5,000.25→5,000 / available 3,878.69→3,878 → used 1,122
+		expect(h.els["acct-pop-detail"].textContent).toBe(
+			"acct.credits.used({\"used\":\"1,122\",\"issued\":\"5,000\"})");
+
+		// 非零但 < 1：大数字显示专用文案，不显示 0
+		const tiny = bootApp();
+		tiny.HP_AUTH.applyAuthInfo(loggedIn());
+		tiny.routes.set("/api/account/credits", () => ({
+			status: 200,
+			body: {
+				subject: { username: "credit@x.com", display_username: "credit", role: "user", preview: false },
+				billing_backend: "credits",
+				wallet: {
+					balance_units: "5000000",
+					reserved_units: "0",
+					refund_pending_units: "0",
+					available_units: "5000000",
+					issued_units: "5000000",
+					composition: { promotional_units: "5000000", legacy_grant_units: "0", paid_units: "0" },
+					restricted_reason: null,
+					migrated_at: null,
+				},
+				can_topup: true,
+				topup_reason: null,
+				as_of: "2026-11-05T00:00:00Z",
+			},
+		}));
+		await openPopover(tiny);
+		await vi.waitFor(() => {
+			expect(tiny.els["acct-pop-remaining"].textContent).toBe(
+				"acct.credits.less_than_one");
+			expect(tiny.els["acct-pop-unit"].hidden).toBe(false);
+		});
 	});
 
 	it("legacy：一次性额度改以 Credits 呈现，无充值入口", async () => {
