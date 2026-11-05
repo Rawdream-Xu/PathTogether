@@ -69,8 +69,12 @@ LOT_KINDS = ("promotional", "legacy_grant", "paid")
 #: 分配策略版本（随授权写入 hold.metadata）
 ALLOCATION_POLICY = "v1"
 
-#: credits_v1 允许的流水 kind（cash_refund 仅 credits_v1）
-CREDIT_LEDGER_KINDS = ("grant", "topup", "usage_debit", "cash_refund")
+#: credits_v1 允许的流水 kind（cash_refund / storage_debit 仅 credits_v1）
+CREDIT_LEDGER_KINDS = ("grant", "topup", "usage_debit", "cash_refund",
+                       "storage_debit")
+
+#: 可经 :func:`debit_available_tx` 即时扣费的负向 kind（不经 hold 预占）
+AVAILABLE_DEBIT_KINDS = ("storage_debit", "usage_debit")
 
 #: 可在迁移/注册时发行的批次种类（paid 只能由充值订单发行）
 PROVISION_LOT_KINDS = ("promotional", "legacy_grant")
@@ -591,8 +595,8 @@ def append_credit_entry_tx(cur, *, account_id, kind, amount_units,
                            actor_user_id=None, metadata=None):
     """写一条 credits_v1 不可变流水（幂等）→ ``(entry, duplicate)``。
 
-    - kind ∈ grant/topup/usage_debit/cash_refund；正负号由数据库 CHECK 强制，
-      这里先做稳定 400（避免 SQLSTATE 冒成 500）；
+    - kind ∈ grant/topup/usage_debit/cash_refund/storage_debit；正负号由数据库
+      CHECK 强制，这里先做稳定 400（避免 SQLSTATE 冒成 500）；
     - ``INSERT ... ON CONFLICT (idempotency_key) DO NOTHING``，冲突时读原行并
       比对 account_id/kind/amount/ledger_scope/request_hash；
     - 调用方负责已锁账户并在同一事务内维护投影。
@@ -607,7 +611,8 @@ def append_credit_entry_tx(cur, *, account_id, kind, amount_units,
     if kind in ("grant", "topup") and amount_units <= 0:
         raise CreditInvalidRequestError("%s 流水金额必须为正" % kind,
                                         amount_units=amount_units)
-    if kind in ("usage_debit", "cash_refund") and amount_units >= 0:
+    if kind in ("usage_debit", "cash_refund", "storage_debit") \
+            and amount_units >= 0:
         raise CreditInvalidRequestError("%s 流水金额必须为负" % kind,
                                         amount_units=amount_units)
     _require_text(idempotency_key, "idempotency_key")
@@ -1013,6 +1018,106 @@ def settle_hold_charge_tx(cur, account, hold, *, charge_units, event_id,
             "released_units": total_released}
 
 
+def _available_debit_request_hash(*, account_id, kind, units, idempotency_key,
+                                  business_ref):
+    """debit_available_tx 缺省 request_hash 参与字段（金额与业务键）。"""
+    return canonical_request_hash({
+        "account_id": account_id,
+        "kind": kind,
+        "units": int(units),
+        "idempotency_key": idempotency_key,
+        "business_ref": business_ref,
+    })
+
+
+def debit_available_tx(cur, account, *, units, idempotency_key, business_ref,
+                       kind="storage_debit", reason="credit available debit",
+                       request_hash=None, metadata=None):
+    """不经预占的即时扣费（存储扩容购买/续费）→ 结果 dict。
+
+    只扣**可用部分**（批次 ``remaining − reserved − refund_pending``），按
+    消费顺序 ``promotional → legacy_grant → paid`` 锁批次分配；任何一步不足
+    都返回 ``{"outcome": "insufficient", "shortfall_units": n}`` 且**不写任何
+    行**（先算完整计划再落库）。成功写一条 ``-units`` 的 credits_v1 流水 +
+    每批次负向 ``credit_ledger_allocations``，并同事务扣减 ``lots.remaining``
+    与账户 ``credit_balance_units``。
+
+    - ``kind`` 只允许负向的即时扣费类型（``storage_debit`` / ``usage_debit``）；
+    - ``request_hash`` 缺省按 account_id/kind/units/idempotency_key/business_ref
+      生成；重放同一个幂等键时用 :func:`_check_entry_identity` 校验并返回原
+      流水（``duplicate=True``）；
+    - 调用方必须已锁账户行（本函数内部按 lot_id 顺序锁批次）。
+    """
+    _require_credits_account(account)
+    if kind not in AVAILABLE_DEBIT_KINDS:
+        raise CreditInvalidRequestError(
+            "debit_available_tx 不支持该流水 kind", kind=kind)
+    units = _require_units(units, "units")
+    _require_text(idempotency_key, "idempotency_key")
+    _require_text(business_ref, "business_ref")
+    account_id = account["account_id"]
+    if request_hash is None:
+        request_hash = _available_debit_request_hash(
+            account_id=account_id, kind=kind, units=units,
+            idempotency_key=idempotency_key, business_ref=business_ref)
+    _require_request_hash(request_hash)
+
+    existing = _fetch_entry_by_key_tx(cur, idempotency_key)
+    if existing is not None:
+        _check_entry_identity(
+            existing, account_id=account_id, kind=kind,
+            amount_units=-units, request_hash=request_hash,
+            idempotency_key=idempotency_key)
+        return {"outcome": "debited", "entry": existing, "duplicate": True,
+                "units": units, "shortfall_units": 0}
+
+    account_available = _account_available(account)
+    if units > account_available:
+        return {"outcome": "insufficient", "duplicate": False,
+                "units": units, "available_units": account_available,
+                "shortfall_units": units - account_available}
+
+    lots = _lock_account_lots_tx(cur, account_id)
+    plan = []
+    need = units
+    for lot in _consumption_order(lots):
+        if need == 0:
+            break
+        take = min(_lot_available_units(lot), need)
+        if take <= 0:
+            continue
+        plan.append((lot, take))
+        need -= take
+    if need > 0:
+        # 账户投影与批次投影漂移：按批次可用金额返回缺口，不写任何行。
+        return {"outcome": "insufficient", "duplicate": False,
+                "units": units, "available_units": units - need,
+                "shortfall_units": need}
+
+    entry, duplicate = append_credit_entry_tx(
+        cur, account_id=account_id, kind=kind, amount_units=-units,
+        idempotency_key=idempotency_key, reason=reason or "",
+        request_hash=request_hash, business_ref=business_ref,
+        metadata=metadata)
+    if duplicate:
+        # 账户锁下不应发生；保留防御性返回，避免重复投影。
+        return {"outcome": "debited", "entry": entry, "duplicate": True,
+                "units": units, "shortfall_units": 0}
+
+    for lot, take in plan:
+        _update_lot_tx(cur, lot["lot_id"], remaining_delta=-take)
+        cur.execute(
+            "INSERT INTO credit_ledger_allocations "
+            "(allocation_id, entry_id, account_id, lot_id, signed_units) "
+            "VALUES (%s,%s,%s,%s,%s) "
+            "ON CONFLICT (entry_id, lot_id) DO NOTHING",
+            (_ALLOCATION_ID_PREFIX + secrets.token_hex(12),
+             entry["entry_id"], account_id, lot["lot_id"], -take))
+    _apply_account_delta_tx(cur, account, balance_units=-units)
+    return {"outcome": "debited", "entry": entry, "duplicate": False,
+            "units": units, "shortfall_units": 0}
+
+
 def release_hold_tx(cur, account, hold):
     """释放 hold 的全部有效预占 → 释放 units（无分配 → 0）。
 
@@ -1403,7 +1508,12 @@ def reconcile_report(now=None):
       - paid 超过 10 分钟仍未 credited；
       - 超过 24 小时未处置的 pending_reconciliation；
       - 迁移账户 ``credit_migration.legacy_grant_units`` 与 legacy_grant
-        批次发行合计一致；迁移后迟到的 legacy usage_debit 逐条列出。
+        批次发行合计一致；迁移后迟到的 legacy usage_debit 逐条列出；
+      - 存储扩容：``upload_user_quotas.extra_quota_bytes`` = 该用户
+        active + grace 扩容 ``units × unit_bytes`` 合计；每行
+        ``created_entry_id`` 存在、kind 为 ``storage_debit`` 且金额等于
+        ``-units × price_units_per_unit``（分配金额的通用检查已覆盖所有
+        credits_v1 流水，含 storage_debit）。
 
     差异项形状 ``{"kind", "account_id", "ref", "expected", "actual"}``；
     ``ok = not discrepancies``。只读事务使用 REPEATABLE READ 保证同一快照。
@@ -1429,7 +1539,7 @@ def _reconcile_report_tx(cur, *, paid_uncredited_cutoff,
     discrepancies = []
     summary = {"accounts": 0, "lots": 0, "ledger_entries": 0,
                "allocations": 0, "credit_topup_orders": 0,
-               "refunded_credit_refunds": 0}
+               "refunded_credit_refunds": 0, "storage_expansions": 0}
 
     cur.execute("SELECT " + _ACCOUNT_COLUMNS +
                 " FROM billing_accounts WHERE billing_backend = %s "
@@ -1735,9 +1845,55 @@ def _reconcile_report_tx(cur, *, paid_uncredited_cutoff,
                     "late_legacy_usage_debit", account_id,
                     row["entry_id"], None, "legacy_usage_debit"))
 
+    # 存储扩容：有效 extra 配额 = active + grace 扩容 units × unit_bytes，
+    # 且购买流水存在、种类/金额与扩容行一致。FULL JOIN 覆盖「有扩容但没有
+    # 配额行」与「有配额行但没有扩容」两种漂移。
+    cur.execute(
+        "SELECT COALESCE(q.user_id, e.user_id) AS user_id, "
+        "       COALESCE(q.extra_quota_bytes, 0)::bigint AS actual, "
+        "       COALESCE(SUM(CASE WHEN e.status IN ('active', 'grace') "
+        "                         THEN e.units * e.unit_bytes ELSE 0 END), 0)"
+        "         ::bigint AS expected, "
+        "       COUNT(*)::bigint AS expansion_count "
+        "  FROM upload_user_quotas q "
+        "  FULL JOIN storage_expansions e ON e.user_id = q.user_id "
+        " GROUP BY 1, 2 ORDER BY 1")
+    for row in cur.fetchall():
+        summary["storage_expansions"] += int(row["expansion_count"])
+        if int(row["actual"]) != int(row["expected"]):
+            discrepancies.append(_discrepancy(
+                "storage_extra_quota_mismatch", None, row["user_id"],
+                int(row["expected"]), int(row["actual"])))
+
+    cur.execute(
+        "SELECT e.expansion_id, e.account_id, e.units, "
+        "       e.price_units_per_unit, e.created_entry_id, "
+        "       l.entry_id AS found_entry_id, l.kind, l.amount_nano_cny "
+        "  FROM storage_expansions e "
+        "  LEFT JOIN billing_ledger_entries l "
+        "    ON l.entry_id = e.created_entry_id "
+        "   AND l.account_id = e.account_id "
+        " ORDER BY e.expansion_id")
+    for row in cur.fetchall():
+        account_id = row["account_id"]
+        expansion_id = row["expansion_id"]
+        if row["found_entry_id"] is None:
+            discrepancies.append(_discrepancy(
+                "storage_expansion_created_entry_missing", account_id,
+                expansion_id, row["created_entry_id"], None))
+            continue
+        expected_amount = (-int(row["units"])
+                           * int(row["price_units_per_unit"]))
+        if row["kind"] != "storage_debit" \
+                or int(row["amount_nano_cny"]) != expected_amount:
+            discrepancies.append(_discrepancy(
+                "storage_expansion_created_entry_amount", account_id,
+                expansion_id, expected_amount,
+                {"kind": row["kind"],
+                 "amount_units": int(row["amount_nano_cny"])}))
+
     return {"ok": not discrepancies, "discrepancies": discrepancies,
             "summary": summary}
-
 
 # --------------------------------------------------------------------------- #
 # §4.5 待核对处置（管理员）
