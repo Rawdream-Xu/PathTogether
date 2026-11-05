@@ -81,8 +81,9 @@ describe("normalizeRasterToBmp（浏览器解码归一化）", () => {
 	it("解码 → 24 位 BMP，产物名保留 stem；像素无损", async () => {
 		const pixelData = rgba3x2();
 		(g as { createImageBitmap?: unknown }).createImageBitmap =
-			async (_file: unknown, opts: { imageOrientation?: string }) => {
+			async (_file: unknown, opts: { imageOrientation?: string; colorSpaceConversion?: string }) => {
 				expect(opts.imageOrientation).toBe("none"); // 不应用 EXIF 方向
+				expect(opts.colorSpaceConversion).toBe("none"); // 不做 ICC 转换（与核心 baseline 路径一致）
 				return { width: 3, height: 2, close() {} };
 			};
 		class FakeCanvas {

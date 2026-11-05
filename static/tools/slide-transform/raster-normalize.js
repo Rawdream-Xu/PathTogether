@@ -11,7 +11,10 @@
 // The decoder is the browser's own (createImageBitmap), so a file the browser
 // cannot decode is reported as "unrecognized image" before anything is read
 // into OPFS. EXIF orientation is NOT applied (imageOrientation:'none'): the
-// core and the server-side raster reader work in stored pixel order.
+// core and the server-side raster reader work in stored pixel order. Embedded
+// ICC profiles are NOT applied either (colorSpaceConversion:'none'): the core
+// decodes baseline JPEG without colour management, so every ordinary image
+// keeps its stored values whichever path it takes.
 //
 // Pixel caps: the server's existing RasterSlide limit (50 MP) unless the
 // caller passes a capability-provided maxPixels. Canvas limits (axis length
@@ -126,8 +129,12 @@ export async function normalizeRasterToBmp(file, opts = {}) {
   }
   let bitmap;
   try {
-    // imageOrientation:'none' — the core reads stored pixels, never EXIF.
-    bitmap = await createImageBitmap(file, { imageOrientation: 'none' });
+    // Stored pixels only: no EXIF orientation, no ICC conversion (the core's
+    // baseline-JPEG path applies neither).
+    bitmap = await createImageBitmap(file, {
+      imageOrientation: 'none',
+      colorSpaceConversion: 'none',
+    });
   } catch (e) {
     throw decodeFailure(e);
   }
