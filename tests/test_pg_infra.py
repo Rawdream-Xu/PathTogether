@@ -368,7 +368,7 @@ def test_schema_migrations_recorded(conn):
         # 新提交在 HTTP 层要求证据）。
         "0090_format_request_evidence.sql",
         # 早期真实用户存储配额提到 50 GiB（无行预建、旧默认 20 GiB 行
-        # 上调；自定义值与 dogfood 不动）；新用户沿用默认 20 GiB。
+        # 上调；自定义值与 dogfood 不动）；新用户沿用默认 10 GiB。
         "0091_upload_user_quota_tiers.sql",
     ]
 

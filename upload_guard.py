@@ -70,12 +70,12 @@ def _env_int(name, default):
 #: 注意：边缘代理（frp/nginx）的 body 上限必须与此值一致（docs §3.3-1）。
 UPLOAD_MAX_REQUEST_BYTES = _env_int("UPLOAD_MAX_REQUEST_BYTES", 10 * 1024 ** 3)
 
-#: 每用户空间配额字节上限（PG 权威，仅 role=user）。默认 20 GiB：新用户
+#: 每用户空间配额字节上限（PG 权威，仅 role=user）。默认 10 GiB：新用户
 #: 默认值；早期真实用户由 0091 迁移提到 50 GiB（2026-11-05 产品决定，先不
 #: 过度限制）。[测] 按 deploy-host 可用磁盘与单用户合理保有量复核。
 #: owner 不受本配额限制；管理员可经 admin API 为单个用户单独调高（硬边界见
 #: ``UPLOAD_USER_QUOTA_MIN_BYTES`` / ``UPLOAD_USER_QUOTA_MAX_BYTES``）。
-UPLOAD_USER_QUOTA_BYTES = _env_int("UPLOAD_USER_QUOTA_BYTES", 20 * 1024 ** 3)
+UPLOAD_USER_QUOTA_BYTES = _env_int("UPLOAD_USER_QUOTA_BYTES", 10 * 1024 ** 3)
 
 #: 管理员调整单用户配额时的硬边界（字节）。下限 0 = 立即冻结该用户的新上传
 #: （已有文件不删除、used_bytes 不清零）；上限 1 TiB = 平台单用户合理保有量
@@ -1091,7 +1091,7 @@ DEFAULTS_RATIONALE = {
         "的极大 specimen；上线前按真实分布 P99 收紧，且边缘代理 body 上限"
         "必须同步同值"),
     "UPLOAD_USER_QUOTA_BYTES": (
-        "20 GiB：新用户默认；早期真实用户由 0091 迁移提到 50 GiB。管理员"
+        "10 GiB：新用户默认；早期真实用户由 0091 迁移提到 50 GiB。管理员"
         "可经 admin API 按用户调高（硬顶 1 TiB）"),
     "UPLOAD_RESERVED_FREE_BYTES": (
         "20 GiB：为 PG 数据目录、日志与解压暂存保留的余量；按磁盘规格与"

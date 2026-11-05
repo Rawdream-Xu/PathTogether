@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""普通用户存储配额（新用户 20 GiB、早期真实用户 50 GiB）+ 管理员单独调整。
+"""普通用户存储配额（新用户 10 GiB、早期真实用户 50 GiB）+ 管理员单独调整。
 
 覆盖：
-  - 应用默认值 UPLOAD_USER_QUOTA_BYTES = 20 GiB；
+  - 应用默认值 UPLOAD_USER_QUOTA_BYTES = 10 GiB；
   - 迁移 0091：早期真实用户提到 50 GiB（无行者预建、旧默认行上调），自定义
     值与 dogfood 不动；重跑幂等；used > quota 时 reserve 正常拒绝
     （不崩溃、不下溢）；
@@ -31,7 +31,9 @@ import upload_guard  # noqa: E402
 import user_store  # noqa: E402
 
 GiB = 1024 ** 3
-DEFAULT = 20 * GiB
+DEFAULT = 10 * GiB
+# 0091 迁移匹配的历史默认值；该迁移已应用，不能改 SQL。
+OLD_DEFAULT = 20 * GiB
 EARLY_REAL = 50 * GiB
 
 
@@ -100,9 +102,9 @@ def _run_migration():
 # --------------------------------------------------------------------------- #
 # 默认值 + 迁移
 # --------------------------------------------------------------------------- #
-def test_default_quota_is_20_gib():
+def test_default_quota_is_10_gib():
     assert upload_guard.UPLOAD_USER_QUOTA_BYTES == DEFAULT
-    assert "20 GiB" in upload_guard.DEFAULTS_RATIONALE["UPLOAD_USER_QUOTA_BYTES"]
+    assert "10 GiB" in upload_guard.DEFAULTS_RATIONALE["UPLOAD_USER_QUOTA_BYTES"]
     _, user = _make_users()
     row = upload_guard.get_quota_row(user["user_id"])
     assert row["quota_bytes"] == DEFAULT
@@ -116,8 +118,8 @@ def test_migration_0091_raises_existing_real_users_to_50_gib():
     user_store.set_user_account_kind(dogfood["user_id"], "dogfood")
     dogfood_row = user_store.create_user("dogfood2@x.com", "userpass1234567")
     user_store.set_user_account_kind(dogfood_row["user_id"], "dogfood")
-    # 旧默认行：已用 12 GiB + 1 GiB 预占
-    _insert_quota(old["user_id"], DEFAULT, used=12 * GiB, reserved=GiB)
+    # 旧默认行（0091 匹配的 20 GiB）：已用 12 GiB + 1 GiB 预占
+    _insert_quota(old["user_id"], OLD_DEFAULT, used=12 * GiB, reserved=GiB)
     # 管理员手工值：保持原样
     _insert_quota(custom["user_id"], 5 * GiB, used=2 * GiB)
     # dogfood 旧默认行：不处理
@@ -136,7 +138,7 @@ def test_migration_0091_raises_existing_real_users_to_50_gib():
     assert _quota(no_row["user_id"]) == {
         "quota_bytes": EARLY_REAL, "used_bytes": 0, "reserved_bytes": 0}
     assert _quota(owner["user_id"]) is None
-    # dogfood 测试账号不处理：无行者首次上传按默认 20 GiB，已有行不动
+    # dogfood 测试账号不处理：无行者首次上传按默认 10 GiB，已有行不动
     assert _quota(dogfood["user_id"]) is None
     assert upload_guard.get_quota_row(dogfood["user_id"])["quota_bytes"] == DEFAULT
     assert _quota(dogfood_row["user_id"])["quota_bytes"] == DEFAULT
@@ -147,7 +149,7 @@ def test_migration_0091_raises_existing_real_users_to_50_gib():
     assert _quota(custom["user_id"])["quota_bytes"] == 5 * GiB
     assert _quota(no_row["user_id"])["quota_bytes"] == EARLY_REAL
 
-    # 迁移之后注册的新用户按应用默认 20 GiB 惰性建行
+    # 迁移之后注册的新用户按应用默认 10 GiB 惰性建行
     newcomer = user_store.create_user("newcomer@x.com", "userpass1234567")
     assert upload_guard.get_quota_row(newcomer["user_id"])["quota_bytes"] == DEFAULT
 
@@ -230,7 +232,7 @@ def test_admin_storage_quota_get_set_restore_and_audit():
     with pytest.raises(upload_guard.QuotaExceeded):
         upload_guard.reserve_upload(uid, 1)
 
-    # 恢复默认：配额回 20 GiB，已用保留
+    # 恢复默认：配额回 10 GiB，已用保留
     restored = client.post(base + "/restore-default")
     assert restored.status_code == 200
     assert restored.get_json()["quota_bytes"] == DEFAULT
