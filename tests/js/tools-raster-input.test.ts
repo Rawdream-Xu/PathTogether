@@ -271,16 +271,24 @@ describe("slide-sniff：普通图片分流（F8）", () => {
 		expect(S.classifyRasterHead(bmpBytes({ bpp: 24 })).cls).toBe("convert");
 		expect(S.classifyRasterHead(bmpBytes({ bpp: 32 })).cls).toBe("convert");
 		expect(S.classifyRasterHead(bmpBytes({ dib: 12, bpp: 24 })).cls).toBe("convert");
-		// 变体：RLE / 位域 / 调色板位深 / 未知 DIB → temporary（legacy-direct）
-		expect(S.classifyRasterHead(bmpBytes({ compression: 1 })).cls).toBe("temporary");
-		expect(S.classifyRasterHead(bmpBytes({ bpp: 4 })).cls).toBe("temporary");
-		expect(S.classifyRasterHead(bmpBytes({ dib: 999 })).cls).toBe("temporary");
-		// JPEG：三分量基线 → convert；灰度/渐进 → temporary
+		// 变体：RLE / 位域 / 调色板位深 / 未知 DIB → 仍 convert（浏览器解码
+		// 归一化后转换；绝不 temporary/直传）
+		for (const head of [bmpBytes({ compression: 1 }), bmpBytes({ bpp: 4 }),
+			bmpBytes({ dib: 999 })]) {
+			const r = S.classifyRasterHead(head) as { cls: string; variant?: boolean; directClass: string | null };
+			expect(r.cls).toBe("convert");
+			expect(r.variant).toBe(true);
+			expect(r.directClass).toBeNull();
+		}
+		// JPEG：三分量基线 → convert；灰度/渐进 → convert（归一化）
 		expect(S.classifyRasterHead(jpegBytes()).cls).toBe("convert");
-		expect(S.classifyRasterHead(jpegBytes({ ncomp: 1 })).cls).toBe("temporary");
-		expect(S.classifyRasterHead(jpegBytes({ progressive: true })).cls).toBe("temporary");
-		// 魔数不符 → temporary
-		expect(S.classifyRasterHead(new Uint8Array([0x49, 0x49, 42, 0])).cls).toBe("temporary");
+		expect(S.classifyRasterHead(jpegBytes({ ncomp: 1 })).cls).toBe("convert");
+		expect(S.classifyRasterHead(jpegBytes({ progressive: true })).cls).toBe("convert");
+		// 魔数不符 → 仍 convert（不直传；运行器给「无法识别该图片」）
+		const notImage = S.classifyRasterHead(
+			new Uint8Array([0x49, 0x49, 42, 0])) as { cls: string; raster?: string | null };
+		expect(notImage.cls).toBe("convert");
+		expect(notImage.raster).toBeNull();
 	});
 
 	it("转换器产物词表与 engine/服务端同源（plain-image-bmp-jpeg）", () => {

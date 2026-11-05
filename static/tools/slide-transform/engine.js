@@ -21,6 +21,11 @@ export const ERROR_CODES = {
   SOURCE_CHANGED: 'source_changed_refuse_resume',
   UNSUPPORTED_INPUT: 'unsupported_input',
   CANCELLED: 'cancelled',
+  // 转换组件本身无法启动（浏览器能力不足 / WASM 加载失败 / 初始化超时）。
+  // error.reason 携带细分原因（browser_unsupported:*、module_worker_unsupported、
+  // module_load_failed、wasm_fetch、wasm_instantiate、opfs_*、init_timeout），
+  // 页面据此给具体说明与「重试」。
+  CONVERTER_UNAVAILABLE: 'converter_unavailable',
   // C4：上传进行中（分块传输/等待服务端阶段）拒绝删除任务——本地产物在
   // 上传收口前必须可继续读取，删除即丢失唯一副本。
   UPLOAD_ACTIVE: 'upload_active',
@@ -900,9 +905,16 @@ export async function sniffTiffSlideCapability(file) {
 ///   await sniffRasterCapability(file)
 ///     → { supported: true, modality: 'brightfield',
 ///         format: RASTER_SOURCE_ADAPTER, adapter: RASTER_SOURCE_ADAPTER }
-///     | { supported: false, modality: null, reason: '<typed reason>' }
+///     | { supported: false, modality: null, reason: '<typed reason>',
+///         detail: 'raster_variant'|'raster_too_large'|'raster_unrecognized' }
+///
+/// `detail` lets the runner decide what to do: a recognized variant is handed
+/// to the browser-decode normalization (raster-normalize.js); an unrecognized
+/// header or an over-cap image is refused before any decode/copy.
 export async function sniffRasterCapability(file) {
-  const bad = (reason) => ({ supported: false, modality: null, reason });
+  const bad = (reason, detail = 'raster_variant') =>
+    ({ supported: false, modality: null, reason, detail });
+  const unrecognized = (reason) => bad(reason, 'raster_unrecognized');
   const readAt = async (off, len) =>
     new Uint8Array(await file.slice(off, off + len).arrayBuffer());
   const overCap = (w, h) =>
@@ -915,13 +927,13 @@ export async function sniffRasterCapability(file) {
     // PROBE_LIMIT 同窗）
     head = await readAt(0, 64);
   } catch (e) {
-    return bad(`无法读取文件头：${errText(e)}`);
+    return unrecognized(`无法读取文件头：${errText(e)}`);
   }
-  if (head.length < 2) return bad('文件太小，不是 BMP/JPEG');
+  if (head.length < 2) return unrecognized('文件太小，不是 BMP/JPEG');
 
   // ---- BMP ------------------------------------------------------------- //
   if (head[0] === 0x42 && head[1] === 0x4D) {
-    if (head.length < 16) return bad('BMP 头不完整');
+    if (head.length < 16) return unrecognized('BMP 头不完整');
     const u16 = (b, at) => b[at] | (b[at + 1] << 8);
     const u32 = (b, at) =>
       (b[at] | (b[at + 1] << 8) | (b[at + 2] << 16) | (b[at + 3] << 24)) >>> 0;
@@ -931,19 +943,19 @@ export async function sniffRasterCapability(file) {
     }
     let w, hRaw, bpp, compression = 0;
     if (dib === 12) {
-      if (head.length < 26) return bad('BITMAPCOREHEADER 不完整');
+      if (head.length < 26) return unrecognized('BITMAPCOREHEADER 不完整');
       w = u16(head, 18);
       hRaw = u16(head, 20);
       bpp = u16(head, 24);
     } else {
-      if (head.length < 34) return bad('BITMAPINFOHEADER 不完整');
+      if (head.length < 34) return unrecognized('BITMAPINFOHEADER 不完整');
       w = u32(head, 18);
       hRaw = u32(head, 22) | 0; // signed: negative = top-down rows
       bpp = u16(head, 28);
       compression = u32(head, 30);
     }
     const h = Math.abs(hRaw);
-    if (w === 0 || h === 0) return bad('BMP 宽/高为 0：不是合法图片');
+    if (w === 0 || h === 0) return unrecognized('BMP 宽/高为 0：不是合法图片');
     if (dib !== 12 && compression !== 0) {
       const why =
         compression === 1 || compression === 2 ? 'RLE 行程编码'
@@ -957,7 +969,7 @@ export async function sniffRasterCapability(file) {
       return bad(`BMP 位深 ${bpp} 不在支持集（只支持未压缩 24/32 位）`);
     }
     if (w > RASTER_MAX_SIDE || h > RASTER_MAX_SIDE || w * h > RASTER_MAX_PIXELS) {
-      return bad(overCap(w, h));
+      return bad(overCap(w, h), 'raster_too_large');
     }
     return {
       supported: true,
@@ -974,21 +986,21 @@ export async function sniffRasterCapability(file) {
     try {
       buf = await readAt(0, SNIFF);
     } catch (e) {
-      return bad(`无法读取文件头：${errText(e)}`);
+      return unrecognized(`无法读取文件头：${errText(e)}`);
     }
     let i = 2;
     let sof = null;
     while (i + 4 <= buf.length) {
-      if (buf[i] !== 0xFF) return bad('JPEG 标记流错位');
+      if (buf[i] !== 0xFF) return unrecognized('JPEG 标记流错位');
       while (i < buf.length && buf[i] === 0xFF) i += 1;
       if (i >= buf.length) break;
       const m = buf[i];
       i += 1;
       if (m === 0xD9) break;
       if (m === 0x01 || (m >= 0xD0 && m <= 0xD7)) continue;
-      if (i + 2 > buf.length) return bad('JPEG 头在有界探测范围内截断');
+      if (i + 2 > buf.length) return unrecognized('JPEG 头在有界探测范围内截断');
       const segLen = (buf[i] << 8) | buf[i + 1];
-      if (segLen < 2 || i + segLen > buf.length) return bad('JPEG 头在有界探测范围内截断');
+      if (segLen < 2 || i + segLen > buf.length) return unrecognized('JPEG 头在有界探测范围内截断');
       if (
         m === 0xC2 || m === 0xC3 ||
         (m >= 0xC5 && m <= 0xC7) ||
@@ -1005,16 +1017,16 @@ export async function sniffRasterCapability(file) {
       i += segLen;
     }
     if (!sof) {
-      return bad('JPEG 头范围内没有基线 SOF（不是基线 JPEG 或头超出有界探测范围）');
+      return unrecognized('JPEG 头范围内没有基线 SOF（不是基线 JPEG 或头超出有界探测范围）');
     }
     const h = (sof[1] << 8) | sof[2];
     const w = (sof[3] << 8) | sof[4];
     const ncomp = sof[5];
     if (ncomp === 1) return bad('JPEG 是单分量（灰度）：普通图片转换输出 RGB 明场，灰度流不在支持集');
     if (ncomp !== 3) return bad(`JPEG 分量数 ${ncomp} 不在支持集（需要 3 分量 RGB/YCbCr）`);
-    if (w === 0 || h === 0) return bad('JPEG SOF 尺寸为 0');
+    if (w === 0 || h === 0) return unrecognized('JPEG SOF 尺寸为 0');
     if (w > RASTER_MAX_SIDE || h > RASTER_MAX_SIDE || w * h > RASTER_MAX_PIXELS) {
-      return bad(overCap(w, h));
+      return bad(overCap(w, h), 'raster_too_large');
     }
     return {
       supported: true,
@@ -1023,7 +1035,7 @@ export async function sniffRasterCapability(file) {
       adapter: RASTER_SOURCE_ADAPTER,
     };
   }
-  return bad('不是 BMP/JPEG（魔数不符）');
+  return unrecognized('不是 BMP/JPEG（魔数不符）');
 }
 
 // ------------------------------------------------- MRXS bundle input (F3) --

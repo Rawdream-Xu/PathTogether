@@ -163,6 +163,9 @@ const locks = {
 class FakeWorker {
 	static instances: FakeWorker[] = [];
 	static autoReply: ((w: FakeWorker, m: any) => any) | null = null;
+	/// init 行为：'ready'（默认）| 'init-failed' | 'error' | 'silent'
+	static initBehavior: "ready" | "init-failed" | "error" | "silent" = "ready";
+	static startWithBoot = false;
 	handlers: Record<string, Array<(ev: any) => void>> = {};
 	posted: any[] = [];
 	starts: any[] = [];
@@ -174,7 +177,18 @@ class FakeWorker {
 	postMessage(m: any) {
 		this.posted.push(m);
 		if (m.type === "init") {
-			queueMicrotask(() => this.emit({ type: "ready", coreVersion: "test-core" }));
+			const behavior = FakeWorker.initBehavior;
+			queueMicrotask(() => {
+				if (FakeWorker.startWithBoot) this.emit({ type: "booting" });
+				if (behavior === "ready") {
+					this.emit({ type: "ready", coreVersion: "test-core" });
+				} else if (behavior === "init-failed") {
+					this.emit({ type: "init-failed", reason: "wasm_fetch",
+						message: "转换组件下载失败：HTTP 0" });
+				} else if (behavior === "error") {
+					this.emitError("Failed to fetch dynamically imported module");
+				}
+			});
 			return;
 		}
 		if (m.type === "start") this.starts.push(m);
@@ -230,6 +244,8 @@ beforeEach(() => {
 	locksHeld = new Set<string>();
 	FakeWorker.instances = [];
 	FakeWorker.autoReply = null;
+	FakeWorker.initBehavior = "ready";
+	FakeWorker.startWithBoot = false;
 });
 
 afterAll(() => {
@@ -711,5 +727,84 @@ describe("recoverable failed jobs (bug 6)", () => {
 		const res = await started.done;
 		expect(res.ok).toBe(true);
 		expect((await runner.getJob("job-resume")).state).toBe("ready");
+	});
+});
+
+// --------------------------------------------------------------------------- //
+// 2026-11-05 计划 A：转换器初始化快速失败、带原因、可真正重试
+// --------------------------------------------------------------------------- //
+describe("converter init fast-fail", () => {
+	it("init-failed → 立即 converter_unavailable + reason（不等 20s），worker 被终止", async () => {
+		FakeWorker.initBehavior = "init-failed";
+		const t0 = Date.now();
+		const err: any = await Runner.SlideToolsRunner.create()
+			.catch((e: any) => e);
+		expect(Date.now() - t0).toBeLessThan(2000); // 绝不是超时路径
+		expect(err.error.code).toBe("converter_unavailable");
+		expect(err.error.reason).toBe("wasm_fetch");
+		expect(FakeWorker.last().terminated).toBe(true);
+	});
+
+	it("初始化期间 worker error → module_load_failed（立即）", async () => {
+		FakeWorker.initBehavior = "error";
+		const t0 = Date.now();
+		const err: any = await Runner.SlideToolsRunner.create()
+			.catch((e: any) => e);
+		expect(Date.now() - t0).toBeLessThan(2000);
+		expect(err.error.code).toBe("converter_unavailable");
+		expect(err.error.reason).toBe("module_load_failed");
+	});
+
+	it("booting 之后仍正常收到 ready（慢网络窗口重置）", async () => {
+		FakeWorker.startWithBoot = true;
+		const runner = await Runner.SlideToolsRunner.create();
+		expect(runner.coreVersion).toBe("test-core");
+	});
+
+	it("失败后重试：新建 worker（旧实例已终止）并成功", async () => {
+		FakeWorker.initBehavior = "init-failed";
+		const runner = new Runner.SlideToolsRunner();
+		const first: any = await runner._init().catch((e: any) => e);
+		expect(first.error.reason).toBe("wasm_fetch");
+		expect(FakeWorker.instances).toHaveLength(1);
+		expect(runner.worker).toBeNull();
+
+		FakeWorker.initBehavior = "ready";
+		await runner._init();
+		expect(FakeWorker.instances).toHaveLength(2);
+		expect(FakeWorker.instances[0].terminated).toBe(true);
+		expect(FakeWorker.instances[1].terminated).toBe(false);
+		expect(runner.coreVersion).toBe("test-core");
+	});
+
+	it("缺 OPFS（navigator.storage.getDirectory）→ browser_unsupported:OPFS，且不创建 worker", async () => {
+		const saved = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+		Object.defineProperty(globalThis, "navigator", {
+			configurable: true,
+			value: { storage: {}, locks },
+		});
+		const before = FakeWorker.instances.length;
+		const err: any = await Runner.SlideToolsRunner.create()
+			.catch((e: any) => e);
+		expect(err.error.code).toBe("converter_unavailable");
+		expect(err.error.reason).toBe("browser_unsupported:OPFS");
+		expect(FakeWorker.instances.length).toBe(before); // 未下载/未启动 worker
+		if (saved) Object.defineProperty(globalThis, "navigator", saved);
+	});
+
+	it("缺 WebAssembly → browser_unsupported:WebAssembly", async () => {
+		const saved = (globalThis as any).WebAssembly;
+		Object.defineProperty(globalThis, "WebAssembly", {
+			configurable: true, value: undefined, writable: true,
+		});
+		try {
+			const err: any = await Runner.SlideToolsRunner.create()
+				.catch((e: any) => e);
+			expect(err.error.reason).toBe("browser_unsupported:WebAssembly");
+		} finally {
+			Object.defineProperty(globalThis, "WebAssembly", {
+				configurable: true, value: saved, writable: true,
+			});
+		}
 	});
 });

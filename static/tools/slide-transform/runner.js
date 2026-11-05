@@ -72,8 +72,39 @@
 // copy. Resume therefore needs no re-selected file, only a verified copy.
 
 import * as E from './engine.js';
+import { normalizeRasterToBmp, NORMALIZE_MAX_PIXELS, NORMALIZE_MAX_SIDE } from './raster-normalize.js';
 
 const LOCK_HEAVY = 'slide-transform:heavy';
+
+/// 普通图片族：一律先在本机转换为 OME-TIFF，绝不以原始字节直传。
+const RASTER_EXTS = /\.(bmp|jpg|jpeg)$/i;
+
+/// 主线程能力预检（计划 A.4）：任何一项缺失都在 import 运行器/下载 WASM
+/// 之前失败——1.4 MB 的组件不会先去下载。返回缺失项（空数组 = 可用）。
+export function missingBrowserCapabilities() {
+  const missing = [];
+  const hasWasm = (typeof WebAssembly === 'object' && WebAssembly !== null) ||
+    typeof WebAssembly === 'function';
+  if (!hasWasm) missing.push('WebAssembly');
+  if (typeof Worker !== 'function') missing.push('Worker');
+  let hasOpfs = false;
+  try {
+    hasOpfs = !!(typeof navigator !== 'undefined' && navigator.storage &&
+      typeof navigator.storage.getDirectory === 'function');
+  } catch { hasOpfs = false; }
+  if (!hasOpfs) missing.push('OPFS');
+  return missing;
+}
+
+function converterUnavailable(reason, message) {
+  return E.stError(E.ERROR_CODES.CONVERTER_UNAVAILABLE, message, { reason });
+}
+
+/// 初始化时限（计划 A.2）：模块本身 15 s 内要跑起来（发 `booting`），之后
+/// WASM 下载/实例化再给 60 s——慢网络能成功，但任何明确失败都立即带原因
+/// 返回，绝不等满时限。
+const INIT_BOOT_TIMEOUT_MS = 15000;
+const INIT_WASM_TIMEOUT_MS = 60000;
 
 // This runner drives ONE compute worker with ONE synchronous wasm call at a
 // time. A second start/resume in the same tab while the first is in flight
@@ -184,8 +215,22 @@ export class SlideToolsRunner {
   get state() { return this._state; }
 
   async _init() {
-    await this._processPendingCleanups();
-    await this._sweepIncompleteStaging();
+    // 预检在任何 OPFS I/O 与 worker/WASM 下载之前：缺一项就带原因失败。
+    const missing = missingBrowserCapabilities();
+    if (missing.length) {
+      throw converterUnavailable(
+        `browser_unsupported:${missing[0]}`,
+        `当前浏览器无法在本机转换图片（缺少 ${missing[0]}）`);
+    }
+    try {
+      await this._processPendingCleanups();
+      await this._sweepIncompleteStaging();
+    } catch (e) {
+      // OPFS 不可用（getDirectory 被策略禁用/无痕模式/API 缺失）：后续
+      // 复制、读取与产物都无从谈起——立即给可行动的原因。
+      throw converterUnavailable('opfs_unavailable',
+        `浏览器本地文件存储不可用（OPFS）：${E.errText(e)}`);
+    }
     if (this.opts.spawnWorker !== false) {
       await this._spawnWorker(); // coreVersion known before any job
     }
@@ -196,28 +241,87 @@ export class SlideToolsRunner {
   _spawnWorker() {
     if (this.worker) return this.workerReady;
     const url = new URL('./worker.js', import.meta.url);
-    const w = new Worker(url, { type: 'module' });
+    let w;
+    try {
+      w = new Worker(url, { type: 'module' });
+    } catch (e) {
+      // 同步抛错 = 不支持模块 Worker（旧内核/严格策略）——不落到 20 s 超时
+      return Promise.reject(converterUnavailable('module_worker_unsupported',
+        `当前浏览器不支持模块 Worker：${E.errText(e)}`));
+    }
     this.worker = w;
     this.workerReady = new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('worker init timeout')), 20000);
+      let timer = null;
+      let settled = false;
+      const fail = (reason, message) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        timer = null;
+        this._dropWorker(w);
+        reject(converterUnavailable(reason, message));
+      };
+      const arm = (ms, reason, message) => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => fail(reason, message), ms);
+      };
+      arm(INIT_BOOT_TIMEOUT_MS, 'init_timeout',
+        '转换组件初始化超时（工作线程未启动）：请检查网络后点「重试」');
       w.addEventListener('message', (ev) => {
-        const m = ev.data;
+        const m = ev.data || {};
+        if (m.type === 'booting') {
+          // 模块已执行：WASM 下载重新计时（慢网络不再被模块加载时限挤掉）
+          arm(INIT_WASM_TIMEOUT_MS, 'init_timeout',
+            '转换组件初始化超时（组件下载未完成）：请检查网络后点「重试」');
+          return;
+        }
+        if (m.type === 'init-failed') {
+          fail(String(m.reason || 'internal'), String(m.message || '转换组件初始化失败'));
+          return;
+        }
         if (m.type === 'ready') {
-          clearTimeout(t);
+          if (settled) return;
+          settled = true;
+          if (timer) clearTimeout(timer);
+          timer = null;
           this.coreVersion = m.coreVersion;
           resolve(m);
         }
       });
+      // 初始化期间的 error/messageerror 立即失败；就绪之后同一事件仍走
+      // worker-loss 收口（转码中崩溃的既有语义不变）。
       w.addEventListener('error', (e) => {
+        if (!settled) {
+          fail('module_load_failed',
+            `转换组件模块加载失败：${(e && e.message) || 'error'}`);
+          return;
+        }
         this._onWorkerFailure(w, 'error', e && e.message).catch(() => { /* settled */ });
       });
       w.addEventListener('messageerror', () => {
+        if (!settled) {
+          fail('module_load_failed', '转换组件模块消息无法解析（messageerror）');
+          return;
+        }
         this._onWorkerFailure(w, 'messageerror', 'messageerror').catch(() => { /* settled */ });
       });
     });
     w.addEventListener('message', (ev) => this._onWorkerMessage(ev.data));
     w.postMessage({ type: 'init', testMode: this.testMode });
     return this.workerReady;
+  }
+
+  /// 丢弃一个（失败/死亡的）worker，让下一次 `_spawnWorker` 真正新建一个。
+  /// 只在该实例仍是当前实例时清空引用——迟到的旧事件不能拆掉新 worker。
+  _dropWorker(w) {
+    if (w) {
+      this._deadWorkers.add(w);
+      try { w.terminate(); } catch { /* already dead */ }
+    }
+    if (!w || this.worker === w) {
+      this.worker = null;
+      this.workerReady = null;
+    }
   }
 
   async _request(type, payload, timeoutMs = 15 * 60 * 1000) {
@@ -852,6 +956,10 @@ export class SlideToolsRunner {
     const tmapNamed = /\.tmap$/i.test(String(file.name || ''));
     const tmapVersion = E.tmapHeaderVersion(head);
     let sourceAdapter = null;
+    // 普通图片统一先转 OME-TIFF（计划 C）：核心只能直接吃三分量 baseline
+    // JPEG 与未压缩 24/32 位 BMP；其余变体先由浏览器解码并在内存里写成
+    // 未压缩 24 位 BMP（无损中间件），再交给现有转换器。原始字节绝不直传。
+    let sourceFile = file;
     if (tmapVersion !== null || tmapNamed) {
       // Unic TMAP06：识别只认真实头部（前 6 字节 'TMAP06'）。TMAP07/未知
       // 版本给稳定中文拒绝；.tmap 里装 TIFF/KFB 等改名文件同样拒绝——
@@ -873,11 +981,28 @@ export class SlideToolsRunner {
       // F8: 普通图片（BMP/JPEG）——复制前的同一批类型化拒绝（变体/像素
       // 上限），多 GiB 的超限输入不会进 OPFS
       const cap = await E.sniffRasterCapability(file);
-      if (!cap.supported) {
+      if (cap.supported) {
+        sourceAdapter = cap.adapter;
+      } else if (cap.detail === 'raster_variant') {
+        // 浏览器解码归一化（渐进/灰度 JPEG、RLE/位域/调色板 BMP…）。解码
+        // 与 BMP 编码都在内存里完成；产物名保留原文件 stem。
+        const norm = await normalizeRasterToBmp(file, {
+          maxPixels: opts.rasterMaxPixels || NORMALIZE_MAX_PIXELS,
+          maxSide: NORMALIZE_MAX_SIDE,
+        });
+        sourceFile = norm.file;
+        sourceAdapter = E.RASTER_SOURCE_ADAPTER;
+      } else {
         throw E.stError(E.ERROR_CODES.UNSUPPORTED_INPUT,
-          `不支持该图片文件：${cap.reason}`, { kind: 'raster-sniff' });
+          `不支持该图片文件：${cap.reason}`,
+          { kind: 'raster-sniff', detail: cap.detail || null });
       }
-      sourceAdapter = cap.adapter;
+    } else if (RASTER_EXTS.test(String(file.name || ''))) {
+      // .jpg/.jpeg/.bmp 名字但不是 JPEG/BMP 字节（改名的 PNG/WebP、损坏
+      // 文件）：明确说「无法识别该图片」，不猜、不直传。
+      throw E.stError(E.ERROR_CODES.UNSUPPORTED_INPUT,
+        '无法识别该图片：文件内容不是 JPEG 或 BMP（可能被改名或已损坏）',
+        { kind: 'raster-sniff', detail: 'raster_unrecognized' });
     } else if (!E.magicSupported(head)) {
       throw E.stError(E.ERROR_CODES.UNSUPPORTED_INPUT, '不是本工具支持的 KFB/KFBF 文件（文件头不符）');
     }
@@ -886,15 +1011,15 @@ export class SlideToolsRunner {
     const jobId = opts.jobId || E.newJobId();
     this.jobId = jobId;
     // before staging: the copy itself plus an output of about the same size
-    this._diskGate(E.checkDiskBudget({ output_upper_bound_bytes: file.size },
-      await navigator.storage.estimate(), { sourceBytes: file.size }), opts, 'pre-stage');
+    this._diskGate(E.checkDiskBudget({ output_upper_bound_bytes: sourceFile.size },
+      await navigator.storage.estimate(), { sourceBytes: sourceFile.size }), opts, 'pre-stage');
     await this._writeJobRecord(jobId, { state: 'staging', createdAt: E.nowIso(), updatedAt: E.nowIso() });
     let staged;
     let probeResult;
     let preparedEncoding;
     try {
       staged = await this._request('stage-source',
-        { jobId, file, faults: this.testMode ? (opts.faults || null) : null }, 60 * 60 * 1000);
+        { jobId, file: sourceFile, faults: this.testMode ? (opts.faults || null) : null }, 60 * 60 * 1000);
       probeResult = await this._request('probe', { jobId }, 60 * 60 * 1000);
       if (probeResult.error) throw probeResult;
       const estimate = probeResult.document.estimate || probeResult.estimate;
@@ -929,7 +1054,7 @@ export class SlideToolsRunner {
       state: 'prepared',
       // NOTE: the plain file name stays local (OPFS job record); reports
       // and logs must use aliases.
-      identity: { name: file.name, size: staged.size, lastModified: file.lastModified, sha256: staged.sha256 },
+      identity: { name: sourceFile.name, size: staged.size, lastModified: sourceFile.lastModified, sha256: staged.sha256 },
       core: this.coreVersion,
       estimate: doc.estimate || probeResult.estimate,
       modality: doc.modality,

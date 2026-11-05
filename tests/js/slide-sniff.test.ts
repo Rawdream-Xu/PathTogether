@@ -167,27 +167,39 @@ describe("slide-sniff：扩展名快路径（不读字节）", () => {
 		expect(S.classifyRasterHead(bmp24(40, 32)).cls).toBe("convert");
 		expect(S.classifyRasterHead(bmp24(124, 32)).cls).toBe("convert");
 		expect(S.classifyRasterHead(bmp24(12, 24)).cls).toBe("convert");
-		// 变体：RLE / 位域 / 调色板位深 → temporary
-		expect(S.classifyRasterHead(bmp24(40, 8, 1)).cls).toBe("temporary");
-		expect(S.classifyRasterHead(bmp24(40, 8, 3)).cls).toBe("temporary");
-		expect(S.classifyRasterHead(bmp24(40, 4)).cls).toBe("temporary");
-		expect(S.classifyRasterHead(bmp24(999, 24)).cls).toBe("temporary");
+		// 变体（RLE / 位域 / 调色板位深）：仍然是 convert——浏览器解码归一化
+		// 后再转换，绝不 temporary/直传（2026-11-05 产品裁决）
+		for (const head of [bmp24(40, 8, 1), bmp24(40, 8, 3),
+			bmp24(40, 4), bmp24(999, 24)]) {
+			const r = S.classifyRasterHead(head);
+			expect(r.cls).toBe("convert");
+			expect(r.variant).toBe(true);
+			expect(r.directClass).toBeNull();
+		}
 
-		// JPEG：三分量基线 → convert
+		// JPEG：三分量基线 → convert（核心直接可转，variant=false）
 		// 完整的最小 JFIF APP0（FF E0 00 10 'JFIF\0' 01 01 00 00 01 00 01 00 00）
 		const jfif = u8([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0,
 			1, 1, 0, 0, 1, 0, 1, 0, 0]);
 		const sof = [0xff, 0xc0, 0, 17, 8, 0x40, 0x20, 0x02, 0x58, 3,
 			1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1, 0xff, 0xda, 0, 4, 1, 0];
-		expect(S.classifyRasterHead(u8([...jfif, ...sof])).cls).toBe("convert");
-		// 灰度（1 分量）/ 渐进（SOF2）→ temporary
+		const okJpeg = S.classifyRasterHead(u8([...jfif, ...sof]));
+		expect(okJpeg.cls).toBe("convert");
+		expect(okJpeg.variant).toBe(false);
+		// 灰度（1 分量）/ 渐进（SOF2）→ convert + variant（归一化后转换）
 		const gray = [0xff, 0xc0, 0, 11, 8, 0x40, 0x20, 1, 1, 0x11, 0, 0xff, 0xda, 0, 4, 1, 0];
-		expect(S.classifyRasterHead(u8([...jfif, ...gray])).cls).toBe("temporary");
+		expect(S.classifyRasterHead(u8([...jfif, ...gray])).cls).toBe("convert");
+		expect(S.classifyRasterHead(u8([...jfif, ...gray])).variant).toBe(true);
 		const prog = [0xff, 0xc2, 0, 17, 8, 0x40, 0x20, 0x02, 0x58, 3,
 			1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1, 0xff, 0xda, 0, 4, 1, 0];
-		expect(S.classifyRasterHead(u8([...jfif, ...prog])).cls).toBe("temporary");
-		// 魔数不符 → temporary
-		expect(S.classifyRasterHead(u8([0x49, 0x49, 42, 0])).cls).toBe("temporary");
+		expect(S.classifyRasterHead(u8([...jfif, ...prog])).cls).toBe("convert");
+		expect(S.classifyRasterHead(u8([...jfif, ...prog])).variant).toBe(true);
+		// 魔数不符（改名的 PNG/WebP 等）：仍是 convert（绝不直传），
+		// raster=null 由运行器给「无法识别该图片」的类型化拒绝
+		const notImage = S.classifyRasterHead(u8([0x49, 0x49, 42, 0]));
+		expect(notImage.cls).toBe("convert");
+		expect(notImage.raster).toBeNull();
+		expect(notImage.directClass).toBeNull();
 	});
 
 	it("暂无浏览器转换器的格式/变体 → temporary（直传声明 legacy-direct）", () => {

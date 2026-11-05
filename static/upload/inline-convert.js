@@ -67,6 +67,16 @@
 
   // --------------------------------------------------------- 判定表（§4） --
 
+  /// 普通图片族（.jpg/.jpeg/.bmp）：一律先在本机转换为 OME-TIFF，绝不能
+  /// 以原始字节直传（2026-11-05 产品裁决；`cls.raster` 由 slide-sniff 的
+  /// 头判定给出，扩展名是兜底；不依赖嗅探是否成功）。
+  function isRasterCls(cls) {
+    if (!cls) return false;
+    if (cls.raster === "jpeg" || cls.raster === "bmp") return true;
+    var ext = String(cls.ext || "");
+    return ext === ".jpg" || ext === ".jpeg" || ext === ".bmp";
+  }
+
   /// 路由判定（纯函数；设计 §4.1 步 1/3）。
   ///   cls.bundle===true         → 'bundle'（整包形态由调用方分派：文件夹走
   ///                               prepareBundle；散文件缺伴随成员 → 'need-bundle'）
@@ -106,6 +116,8 @@
     if (cls.cls === "ome-tiff") return "ome-tiff";
     if (cls.cls === "converter-bigtiff") return "converter-bigtiff";
     if (cls.svsJp2k) return "unconverted-variant:svs-jp2k";
+    // 计划 C.3：普通图片永不声明 legacy-direct（也不存在任何直传分支）。
+    if (isRasterCls(cls)) return null;
     if (cls.cls === "temporary") return cls.directClass || null;
     if (cls.cls === "convert" && engineRejectedPassthrough) {
       return cls.directClass || null;
@@ -155,7 +167,15 @@
     if (code === "disk_precheck_failed") return "upload.inline.err.disk";
     if (code === "quota_exceeded_recoverable") return "upload.inline.err.quota";
     if (code === "resource_profile_insufficient") return "upload.inline.err.profile";
-    if (code === "unsupported_input") return "upload.inline.err.unsupported";
+    if (code === "unsupported_input") {
+      // 普通图片归一化/识别失败（计划 C.1/C.2）：给可行动的具体说明。
+      if (detail === "raster_unrecognized" ||
+          detail === "raster_decode_unavailable") {
+        return "upload.inline.err.image";
+      }
+      if (detail === "raster_too_large") return "upload.inline.err.imageTooLarge";
+      return "upload.inline.err.unsupported";
+    }
     if (code === "conversion_output_too_large") return "upload.cos.err.too_large";
     if (code === "job_locked_other_tab") return "upload.inline.err.busy";
     if (code === "job_dir_missing") return "upload.inline.err.evicted";
@@ -242,6 +262,14 @@
       parts.push("engine_reason=" + String(e.error.engineReason).slice(0, 300));
     }
     if (e.error && e.error.detail) parts.push("fail_detail=" + e.error.detail);
+    // 计划 B.4：申请带上浏览器标识（截断 200 字符）——服务端访问日志没有
+    // UA 时，这条消息是定位「哪类浏览器初始化失败」的唯一线索。
+    var ua = "";
+    try {
+      ua = (typeof navigator !== "undefined" && navigator.userAgent)
+        ? String(navigator.userAgent) : "";
+    } catch (err) { ua = ""; }
+    if (ua) parts.push("ua=" + ua.slice(0, 200));
     if (caps && caps.inlineConvert && caps.inlineConvert.url) {
       parts.push("panel=" + caps.inlineConvert.url);
     }
@@ -863,6 +891,12 @@
           supported = cap ? cap.supported : null;
           e.engineCap = cap || null;
           var route = routeFor(cls, supported);
+          // 计划 C.2：.jpg/.jpeg/.bmp 永远走转换——核心直接可吃的变体走
+          // 原路径，其余由运行器做浏览器解码归一化（渐进/灰度 JPEG、
+          // RLE/位域/调色板 BMP）。绝不因引擎嗅探 unsupported 落回直传。
+          if (route !== "convert" && cls.cls === "convert" && isRasterCls(cls)) {
+            route = "convert";
+          }
           if (route === "convert") {
             e.needsConvert = true;
             e.state = "convert_queued";
@@ -2434,6 +2468,7 @@
     parseSwitch: parseSwitch,
     normalizeConfig: normalizeConfig,
     routeFor: routeFor,
+    isRasterCls: isRasterCls,
     artifactDeclaration: artifactDeclaration,
     directDeclaration: directDeclaration,
     artifactGate: artifactGate,
