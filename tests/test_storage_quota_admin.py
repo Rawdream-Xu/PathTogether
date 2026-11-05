@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""普通用户存储配额 10 GiB + 管理员单独调整（2026-11-04）。
+"""普通用户存储配额（新用户 20 GiB、早期真实用户 50 GiB）+ 管理员单独调整。
 
 覆盖：
-  - 应用默认值 UPLOAD_USER_QUOTA_BYTES = 10 GiB；
-  - 迁移 0091：存量普通用户统一保留 20 GiB（无行者预建），已有行与自定义值
-    不动；新用户 10 GiB；重跑幂等；used > quota 时 reserve 正常拒绝
+  - 应用默认值 UPLOAD_USER_QUOTA_BYTES = 20 GiB；
+  - 迁移 0091：早期真实用户提到 50 GiB（无行者预建、旧默认行上调），自定义
+    值与 dogfood 不动；重跑幂等；used > quota 时 reserve 正常拒绝
     （不崩溃、不下溢）；
   - admin API：GET/PUT/restore-default 的 owner 门控、参数边界、行惰性创建、
     used/reserved 保留、审计（upload.user_quota_update）；
@@ -31,8 +31,8 @@ import upload_guard  # noqa: E402
 import user_store  # noqa: E402
 
 GiB = 1024 ** 3
-OLD_DEFAULT = 20 * GiB
-NEW_DEFAULT = 10 * GiB
+DEFAULT = 20 * GiB
+EARLY_REAL = 50 * GiB
 
 
 @pytest.fixture(autouse=True)
@@ -93,68 +93,74 @@ def _quota(user_id):
 
 def _run_migration():
     sql = (pg_store.migrations_dir()
-           / "0091_upload_user_quota_10g.sql").read_text(encoding="utf-8")
+           / "0091_upload_user_quota_tiers.sql").read_text(encoding="utf-8")
     _sql(sql)
 
 
 # --------------------------------------------------------------------------- #
 # 默认值 + 迁移
 # --------------------------------------------------------------------------- #
-def test_default_quota_is_10_gib():
-    assert upload_guard.UPLOAD_USER_QUOTA_BYTES == NEW_DEFAULT
-    assert "10 GiB" in upload_guard.DEFAULTS_RATIONALE["UPLOAD_USER_QUOTA_BYTES"]
+def test_default_quota_is_20_gib():
+    assert upload_guard.UPLOAD_USER_QUOTA_BYTES == DEFAULT
+    assert "20 GiB" in upload_guard.DEFAULTS_RATIONALE["UPLOAD_USER_QUOTA_BYTES"]
     _, user = _make_users()
     row = upload_guard.get_quota_row(user["user_id"])
-    assert row["quota_bytes"] == NEW_DEFAULT
+    assert row["quota_bytes"] == DEFAULT
 
 
-def test_migration_0091_grandfathers_existing_users_at_20_gib():
+def test_migration_0091_raises_existing_real_users_to_50_gib():
     owner, old = _make_users()
     custom = user_store.create_user("custom@x.com", "userpass1234567")
     no_row = user_store.create_user("norow@x.com", "userpass1234567")
     dogfood = user_store.create_user("dogfood@x.com", "userpass1234567")
     user_store.set_user_account_kind(dogfood["user_id"], "dogfood")
+    dogfood_row = user_store.create_user("dogfood2@x.com", "userpass1234567")
+    user_store.set_user_account_kind(dogfood_row["user_id"], "dogfood")
     # 旧默认行：已用 12 GiB + 1 GiB 预占
-    _insert_quota(old["user_id"], OLD_DEFAULT, used=12 * GiB, reserved=GiB)
+    _insert_quota(old["user_id"], DEFAULT, used=12 * GiB, reserved=GiB)
     # 管理员手工值：保持原样
     _insert_quota(custom["user_id"], 5 * GiB, used=2 * GiB)
+    # dogfood 旧默认行：不处理
+    _insert_quota(dogfood_row["user_id"], DEFAULT)
     # no_row：迁移前注册、尚未上传，没有配额行
 
     _run_migration()
 
-    # 存量用户统一 20 GiB：已有行不动，无行用户预建 20 GiB；owner 不建行
+    # 早期真实用户：旧默认行提到 50 GiB（used/reserved 不动），无行者预建
+    # 50 GiB，手工值不动；owner 不建行
     assert _quota(old["user_id"]) == {
-        "quota_bytes": OLD_DEFAULT, "used_bytes": 12 * GiB,
+        "quota_bytes": EARLY_REAL, "used_bytes": 12 * GiB,
         "reserved_bytes": GiB}
     assert _quota(custom["user_id"]) == {
         "quota_bytes": 5 * GiB, "used_bytes": 2 * GiB, "reserved_bytes": 0}
     assert _quota(no_row["user_id"]) == {
-        "quota_bytes": OLD_DEFAULT, "used_bytes": 0, "reserved_bytes": 0}
+        "quota_bytes": EARLY_REAL, "used_bytes": 0, "reserved_bytes": 0}
     assert _quota(owner["user_id"]) is None
-    # dogfood 测试账号不预建，首次上传按新默认 10 GiB
+    # dogfood 测试账号不处理：无行者首次上传按默认 20 GiB，已有行不动
     assert _quota(dogfood["user_id"]) is None
-    assert upload_guard.get_quota_row(dogfood["user_id"])["quota_bytes"] == NEW_DEFAULT
+    assert upload_guard.get_quota_row(dogfood["user_id"])["quota_bytes"] == DEFAULT
+    assert _quota(dogfood_row["user_id"])["quota_bytes"] == DEFAULT
 
     # 幂等重跑：值不变、不报错
     _run_migration()
-    assert _quota(old["user_id"])["quota_bytes"] == OLD_DEFAULT
+    assert _quota(old["user_id"])["quota_bytes"] == EARLY_REAL
     assert _quota(custom["user_id"])["quota_bytes"] == 5 * GiB
-    assert _quota(no_row["user_id"])["quota_bytes"] == OLD_DEFAULT
+    assert _quota(no_row["user_id"])["quota_bytes"] == EARLY_REAL
 
-    # 迁移之后注册的新用户按应用默认 10 GiB 惰性建行
+    # 迁移之后注册的新用户按应用默认 20 GiB 惰性建行
     newcomer = user_store.create_user("newcomer@x.com", "userpass1234567")
-    assert upload_guard.get_quota_row(newcomer["user_id"])["quota_bytes"] == NEW_DEFAULT
+    assert upload_guard.get_quota_row(newcomer["user_id"])["quota_bytes"] == DEFAULT
 
 
 def test_reserve_refuses_when_used_already_exceeds_quota():
     """used > quota：合法性边界不阻断既有文件，但新预占拒绝且账面不变。"""
     _, user = _make_users()
-    _insert_quota(user["user_id"], NEW_DEFAULT, used=12 * GiB)
+    _insert_quota(user["user_id"], DEFAULT, used=25 * GiB)
     with pytest.raises(upload_guard.QuotaExceeded):
         upload_guard.reserve_upload(user["user_id"], 1)
     row = _quota(user["user_id"])
-    assert row["quota_bytes"] == NEW_DEFAULT
-    assert row["used_bytes"] == 12 * GiB
+    assert row["quota_bytes"] == DEFAULT
+    assert row["used_bytes"] == 25 * GiB
     assert row["reserved_bytes"] == 0
     # 预占表不得留下任何行
     rows = _sql("SELECT COUNT(*)::int AS n FROM upload_reservations "
@@ -173,7 +179,7 @@ def test_admin_storage_quota_requires_owner():
         "/api/admin/v1/users/%s/storage-quota" % user["user_id"]).status_code == 403
     assert client.put(
         "/api/admin/v1/users/%s/storage-quota" % user["user_id"],
-        json={"quota_bytes": NEW_DEFAULT}).status_code == 403
+        json={"quota_bytes": DEFAULT}).status_code == 403
 
 
 def test_admin_storage_quota_get_set_restore_and_audit():
@@ -189,11 +195,11 @@ def test_admin_storage_quota_get_set_restore_and_audit():
     assert body == {
         "user_id": uid,
         "quota_applies": True,
-        "quota_bytes": NEW_DEFAULT,
+        "quota_bytes": DEFAULT,
         "used_bytes": 0,
         "reserved_bytes": 0,
-        "remaining_bytes": NEW_DEFAULT,
-        "default_quota_bytes": NEW_DEFAULT,
+        "remaining_bytes": DEFAULT,
+        "default_quota_bytes": DEFAULT,
         "min_quota_bytes": 0,
         "max_quota_bytes": 1024 ** 4,
     }
@@ -224,10 +230,10 @@ def test_admin_storage_quota_get_set_restore_and_audit():
     with pytest.raises(upload_guard.QuotaExceeded):
         upload_guard.reserve_upload(uid, 1)
 
-    # 恢复默认：配额回 10 GiB，已用保留
+    # 恢复默认：配额回 20 GiB，已用保留
     restored = client.post(base + "/restore-default")
     assert restored.status_code == 200
-    assert restored.get_json()["quota_bytes"] == NEW_DEFAULT
+    assert restored.get_json()["quota_bytes"] == DEFAULT
     assert restored.get_json()["used_bytes"] == 1 * GiB
 
     audit = _sql(
@@ -243,7 +249,7 @@ def test_admin_storage_quota_get_set_restore_and_audit():
     assert audit[0]["detail"]["new_quota_bytes"] == 3 * GiB
     assert audit[1]["detail"]["new_quota_bytes"] == 512 * 1024 ** 2
     assert audit[2]["detail"]["op"] == "restore_user_quota_default"
-    assert audit[2]["detail"]["new_quota_bytes"] == NEW_DEFAULT
+    assert audit[2]["detail"]["new_quota_bytes"] == DEFAULT
     assert audit[2]["detail"]["used_bytes"] == 1 * GiB
 
 
@@ -269,7 +275,7 @@ def test_admin_storage_quota_rejects_owner_and_missing_user():
     _login(client, owner)
     owner_base = "/api/admin/v1/users/%s/storage-quota" % owner["user_id"]
     assert client.get(owner_base).status_code == 400
-    assert client.put(owner_base, json={"quota_bytes": NEW_DEFAULT}).status_code == 400
+    assert client.put(owner_base, json={"quota_bytes": DEFAULT}).status_code == 400
     assert client.post(owner_base + "/restore-default").status_code == 400
     assert client.get(
         "/api/admin/v1/users/usr_missing/storage-quota").status_code == 404
@@ -288,7 +294,7 @@ def test_account_storage_for_user_returns_actual_quota_without_creating_row():
     assert first.headers.get("Cache-Control") == "no-store"
     body = first.get_json()
     assert body["quota_applies"] is True
-    assert body["quota_bytes"] == NEW_DEFAULT
+    assert body["quota_bytes"] == DEFAULT
     assert body["used_bytes"] == 0
     # 只读：不因为点开账户页而建配额行
     assert _quota(uid) is None
@@ -324,7 +330,7 @@ def test_attach_ingestion_quota_uses_actual_row():
         "quota_bytes": 6 * GiB,
         "used_bytes": 5 * GiB,
         "reserved_bytes": 512 * 1024 ** 2,
-        "default_quota_bytes": NEW_DEFAULT,
+        "default_quota_bytes": DEFAULT,
     }
     # owner 不附加（不受配额限制）
     body = {}

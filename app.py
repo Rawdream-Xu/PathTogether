@@ -12935,7 +12935,7 @@ def admin_v1_users_storage_quota_set(user_id):
 @app.route("/api/admin/v1/users/<user_id>/storage-quota/restore-default",
            methods=["POST"])
 def admin_v1_users_storage_quota_restore(user_id):
-    """恢复单用户存储配额为当前 env 默认（10 GiB；admin:users:write）。
+    """恢复单用户存储配额为当前 env 默认（20 GiB；admin:users:write）。
 
     与设置同款权限/事务/审计；used/reserved 不动。
     """
