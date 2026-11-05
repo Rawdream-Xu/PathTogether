@@ -8,7 +8,7 @@
       "published": true,
       "components": {
         "histopilot": "0.4.10",
-        "pathtogether": "suite-20261105-jpeg-fallback"
+        "pathtogether": "suite-20261105-credit-wallet"
       },
       "items": {
         "zh": [
@@ -16,16 +16,14 @@
           "存储容量调整：新注册用户为 10 GB，此前注册的用户提升到 50 GB；容量用完时请联系管理员扩容。",
           "账户页面新增存储用量展示，可随时查看已用空间。",
           "AI 读片助手更节省上下文，同样的余额可以完成更多轮分析。",
-          "账户弹层改用用量条显示 AI 额度与存储空间，余额统一以 Credits 显示。",
-          "修复部分浏览器无法初始化转换器时，普通 JPEG 或 BMP 图片无法上传的问题。"
+          "账户弹层改用用量条显示 AI 额度与存储空间，余额统一以 Credits 显示。"
         ],
         "en": [
           "AI balances are now denominated in Credits: ¥1 = 100 Credits. Your existing remaining allowance has been converted automatically — no action needed.",
           "Storage quota update: new accounts start at 10 GB, and earlier accounts now have 50 GB. Contact the administrator if you run out of space.",
           "The account page now shows your storage usage so you can check it anytime.",
           "The AI reading assistant now uses context more economically, so the same balance goes further.",
-          "The account panel now shows AI allowance and storage as usage bars, with all balances in Credits.",
-          "Fixed uploads of ordinary JPEG and BMP images when the browser converter cannot initialize."
+          "The account panel now shows AI allowance and storage as usage bars, with all balances in Credits."
         ]
       }
     },
