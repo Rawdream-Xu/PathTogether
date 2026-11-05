@@ -317,10 +317,12 @@ def collect(cur, upload_dir):
                 unknown_dirs.append(name)
 
     cur.execute(
-        "SELECT user_id, quota_bytes, used_bytes, reserved_bytes,"
-        " used_bytes + reserved_bytes - quota_bytes AS over FROM"
-        " upload_user_quotas WHERE used_bytes + reserved_bytes >"
-        " quota_bytes ORDER BY user_id")
+        "SELECT user_id, quota_bytes AS base_quota_bytes,"
+        " extra_quota_bytes, quota_bytes + extra_quota_bytes AS quota_bytes,"
+        " used_bytes, reserved_bytes,"
+        " used_bytes + reserved_bytes - quota_bytes - extra_quota_bytes"
+        " AS over FROM upload_user_quotas WHERE used_bytes + reserved_bytes >"
+        " quota_bytes + extra_quota_bytes ORDER BY user_id")
     over_quota = [dict(r) for r in cur.fetchall()]
 
     # R14-2：逐用户双向核对账本——quota.reserved_bytes 必须等于该用户

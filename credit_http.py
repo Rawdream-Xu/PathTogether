@@ -35,6 +35,7 @@ import credit_payments
 import credit_store
 import pg_store
 import spend_store
+import storage_expansion
 import user_store
 
 _LOG = logging.getLogger("credit_http")
@@ -239,6 +240,9 @@ def _billing_error(exc):
     reason = ctx.get("reason")
     if reason is not None:
         payload["reason"] = reason
+    shortfall = ctx.get("shortfall_units")
+    if shortfall is not None:
+        payload["shortfall_units"] = int(shortfall)
     return payload, status
 
 
@@ -344,6 +348,12 @@ def _ledger_item(entry):
         label_key = "credit.ledger.usage"
     elif kind == "cash_refund":
         label_key = "credit.ledger.cash_refund"
+    elif kind == "storage_debit":
+        metadata = entry.get("metadata") or {}
+        renewal = isinstance(metadata, dict) and bool(
+            metadata.get("renewal"))
+        label_key = ("credit.ledger.storage_renewal" if renewal
+                     else "credit.ledger.storage")
     else:
         label_key = "credit.ledger.other"
     return {
@@ -535,6 +545,83 @@ def get_topup(identity, order_id, return_url):
         _LOG.exception("credit topup read failed")
         return _err(_CREDIT_ERROR_MESSAGES["credits_unavailable"],
                     "credits_unavailable", 503)
+
+
+def _validate_storage_purchase_body(body):
+    """body 必须恰好是 {units: int}（1..上限由 storage_expansion 判定）。"""
+    if not isinstance(body, dict):
+        return None
+    if set(body.keys()) != {"units"}:
+        raise credit_store.CreditInvalidRequestError(
+            "body 只允许 units")
+    units = body.get("units")
+    if not isinstance(units, int) or isinstance(units, bool):
+        raise credit_store.CreditInvalidRequestError("units 需为整数")
+    if units < 1:
+        raise credit_store.CreditInvalidRequestError("units 需为正整数")
+    return {"units": units}
+
+
+def create_storage_expansion(identity, body, idempotency_key, *, preview=False):
+    """POST /api/account/storage/expansions → ``{expansion, duplicate}``。
+
+    body 形状 / Idempotency-Key 在 HTTP 层先校验（400 invalid_request）；
+    余额不足 / 超出份数上限 / 受限 / legacy / owner / 预览态由
+    storage_expansion 抛出并按 code/http_status 映射。
+    """
+    ident = identity or {}
+    uid = str(ident.get("user_id") or "")
+    if not isinstance(idempotency_key, str) or \
+            not IDEMPOTENCY_KEY_RE.match(idempotency_key):
+        return _err("Idempotency-Key 缺失或格式不正确（8–128 位 "
+                    "A-Za-z0-9_-）", "invalid_request", 400)
+    try:
+        parsed = _validate_storage_purchase_body(body)
+        if parsed is None:
+            return _err("请求体需为 JSON 对象", "invalid_request", 400)
+        result = storage_expansion.purchase(
+            uid, parsed["units"], idempotency_key,
+            preview=bool(preview), actor_user_id=uid)
+        return {"expansion": result["expansion"],
+                "duplicate": bool(result.get("duplicate"))}, 200
+    except billing_store.BillingError as exc:
+        return _billing_error(exc)
+    except Exception:
+        _LOG.exception("storage expansion purchase failed")
+        return _err("存储扩容购买失败，请稍后重试",
+                    "storage_unavailable", 503)
+
+
+def _validate_auto_renew_body(body):
+    """body 必须恰好是 {enabled: bool}。"""
+    if not isinstance(body, dict):
+        return None
+    if set(body.keys()) != {"enabled"}:
+        raise credit_store.CreditInvalidRequestError(
+            "body 只允许 enabled")
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        raise credit_store.CreditInvalidRequestError("enabled 需为布尔值")
+    return {"enabled": enabled}
+
+
+def set_storage_expansion_auto_renew(identity, expansion_id, body):
+    """POST /api/account/storage/expansions/<id>/auto-renew → ``{expansion}``。"""
+    ident = identity or {}
+    uid = str(ident.get("user_id") or "")
+    try:
+        parsed = _validate_auto_renew_body(body)
+        if parsed is None:
+            return _err("请求体需为 JSON 对象", "invalid_request", 400)
+        item = storage_expansion.set_auto_renew(
+            uid, expansion_id, parsed["enabled"])
+        return {"expansion": item}, 200
+    except billing_store.BillingError as exc:
+        return _billing_error(exc)
+    except Exception:
+        _LOG.exception("storage expansion auto-renew update failed")
+        return _err("自动续费设置失败，请稍后重试",
+                    "storage_unavailable", 503)
 
 
 def notify(params):

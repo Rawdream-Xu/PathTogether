@@ -142,6 +142,9 @@ import spend_store
 import crop_guard
 import upload_guard
 import upload_task_store
+# 付费存储扩容（docs/storage-expansion-plan-20261105.md）：购买/续费/自动续费
+# 开关与状态读取；HTTP 错误码映射在 credit_http.storage_expansion*。
+import storage_expansion
 # COS direct upload (Phase 1–3, contract docs/cos-direct-upload-audit-plan.md, ruling
 # A-presign-parts): cos_config/cos_pool_store/ingestion_store are pure data-layer + state machine;
 # cos_client has only presign_upload_part in this file (purely local computation, no network) —— network
@@ -6353,55 +6356,73 @@ def api_account_balance():
 
 @app.route("/api/account/storage", methods=["GET"])
 def api_account_storage():
-    """只读自助存储用量（2026-11-04；账户弹层「存储」行 / 超限文案取数）。
+    """只读自助存储用量（2026-11-04；2026-11-06 付费扩容）。
 
     subject 只取 current_identity()（预览态 = effective subject；与
     /api/account/balance 同口径），不接受 user_id 参数。role=user 返回其
     实际配额与用量（配额行不存在时返回 env 默认值，**不建行**）；owner /
     本地免登录 / 非 PG 后端 → quota_applies=false（owner 不受存储配额限制）。
     字节数为整数（< 2^53，JS 安全）；Cache-Control: no-store。
+
+    0092 起 ``quota_bytes`` 是**有效配额**（基础 + 付费扩容）；
+    ``base_quota_bytes`` / ``extra_quota_bytes`` 分列，``expansion`` 给出
+    每份价格、已购份数、可购买性与扩容列表（owner 无此块 → null）。
     """
     guard = _require_own_active_account_or_none()
     if guard is not None:
         return guard
-    ident = current_identity()
-    uid = str(ident.get("user_id") or "")
-    role = ident.get("role") or user_store.ROLE_USER
-    quota_applies = (role == user_store.ROLE_USER and bool(uid)
-                     and upload_guard.quota_features_available())
-    default_quota = int(upload_guard.UPLOAD_USER_QUOTA_BYTES)
-    if not quota_applies:
-        resp = jsonify(
-            subject={"user_id": uid or None, "role": role},
-            quota_applies=False,
-            quota_bytes=None,
-            used_bytes=None,
-            reserved_bytes=None,
-            remaining_bytes=None,
-            default_quota_bytes=default_quota,
-        )
-        resp.headers["Cache-Control"] = "no-store"
-        return resp
     try:
-        row = upload_guard.peek_quota_row(uid)
+        body = _account_storage_payload(current_identity())
     except Exception:
         app.logger.exception("account storage 读取失败")
         return jsonify(error="存储用量读取暂时不可用，请稍后重试",
                        code="storage_unavailable"), 503
-    quota = int(row["quota_bytes"]) if row else default_quota
-    used = int(row["used_bytes"]) if row else 0
-    reserved = int(row["reserved_bytes"]) if row else 0
-    resp = jsonify(
-        subject={"user_id": uid, "role": role},
-        quota_applies=True,
-        quota_bytes=quota,
-        used_bytes=used,
-        reserved_bytes=reserved,
-        remaining_bytes=max(0, quota - used - reserved),
-        default_quota_bytes=default_quota,
-    )
+    resp = jsonify(body)
     resp.headers["Cache-Control"] = "no-store"
     return resp
+
+
+def _account_storage_payload(ident):
+    """存储用量 + 扩容状态（GET /api/account/storage 与写接口共用）。"""
+    uid = str(ident.get("user_id") or "")
+    role = ident.get("role") or user_store.ROLE_USER
+    preview = _preview_subject() is not None
+    quota_applies = (role == user_store.ROLE_USER and bool(uid)
+                     and upload_guard.quota_features_available())
+    default_quota = int(upload_guard.UPLOAD_USER_QUOTA_BYTES)
+    if not quota_applies:
+        return {
+            "subject": {"user_id": uid or None, "role": role,
+                        "preview": preview},
+            "quota_applies": False,
+            "base_quota_bytes": None,
+            "extra_quota_bytes": None,
+            "quota_bytes": None,
+            "used_bytes": None,
+            "reserved_bytes": None,
+            "remaining_bytes": None,
+            "default_quota_bytes": default_quota,
+            "expansion": None,
+        }
+    row = upload_guard.peek_quota_row(uid)
+    base = int(row["base_quota_bytes"]) if row else default_quota
+    extra = int(row["extra_quota_bytes"]) if row else 0
+    quota = base + extra
+    used = int(row["used_bytes"]) if row else 0
+    reserved = int(row["reserved_bytes"]) if row else 0
+    return {
+        "subject": {"user_id": uid, "role": role, "preview": preview},
+        "quota_applies": True,
+        "base_quota_bytes": base,
+        "extra_quota_bytes": extra,
+        "quota_bytes": quota,
+        "used_bytes": used,
+        "reserved_bytes": reserved,
+        "remaining_bytes": max(0, quota - used - reserved),
+        "default_quota_bytes": default_quota,
+        "expansion": storage_expansion.state_for_user(
+            uid, preview=preview),
+    }
 
 
 def _require_own_active_account_or_none():
@@ -6442,6 +6463,8 @@ _CREDITS_PAGE_CSP = (
 CREDIT_NOTIFY_MAX_BYTES = 16 * 1024
 #: 订单号形态（ct + 24 hex；与 credit_payments 一致）
 _CREDIT_ORDER_ID_RE = re.compile(r"^ct[0-9a-f]{24}$")
+#: 存储扩容号形态（sxp_ + 24 hex；与 0092 CHECK 一致）
+_STORAGE_EXPANSION_ID_RE = re.compile(r"^sxp_[0-9a-f]{24}$")
 
 
 def _credit_return_url():
@@ -6603,6 +6626,55 @@ def api_account_credit_topup_get(order_id):
         return error
     payload, status = credit_http.get_topup(
         current_identity(), order_id, return_url)
+    return _credit_json_pair(payload, status)
+
+
+def _storage_payload_attached(payload):
+    """写接口成功后附加最新存储状态；读失败不清空已提交的写结果。"""
+    try:
+        payload["storage"] = _account_storage_payload(current_identity())
+    except Exception:
+        app.logger.exception("storage expansion response state failed")
+        payload["storage"] = None
+    return payload
+
+
+@app.route("/api/account/storage/expansions", methods=["POST"])
+def api_account_storage_expansion_create():
+    """购买付费存储扩容：登录 + CSRF + Idempotency-Key（预览态全局 403）。
+
+    body ``{units}``；返回 ``{expansion, duplicate, storage}``。CSRF/同源由
+    全局 _csrf_protect 收口，预览写由 _preview_write_guard 先行拒绝。
+    """
+    guard = _require_own_active_account_or_none()
+    if guard is not None:
+        return guard
+    import credit_http
+    payload, status = credit_http.create_storage_expansion(
+        actor_identity(), request.get_json(silent=True),
+        request.headers.get("Idempotency-Key"),
+        preview=_preview_subject() is not None)
+    if status == 200:
+        payload = _storage_payload_attached(payload)
+    return _credit_json_pair(payload, status)
+
+
+@app.route("/api/account/storage/expansions/<expansion_id>/auto-renew",
+           methods=["POST"])
+def api_account_storage_expansion_auto_renew(expansion_id):
+    """打开/关闭本人某份扩容的自动续费（body ``{enabled: bool}``）。"""
+    guard = _require_own_active_account_or_none()
+    if guard is not None:
+        return guard
+    if not _STORAGE_EXPANSION_ID_RE.match(expansion_id or ""):
+        return _credit_json_pair(
+            {"error": "扩容不存在", "code": "storage_expansion_not_found"},
+            404)
+    import credit_http
+    payload, status = credit_http.set_storage_expansion_auto_renew(
+        actor_identity(), expansion_id, request.get_json(silent=True))
+    if status == 200:
+        payload = _storage_payload_attached(payload)
     return _credit_json_pair(payload, status)
 
 
@@ -12865,12 +12937,14 @@ def admin_v1_users_account_kind(user_id):
 
 @app.route("/api/admin/v1/users/<user_id>/storage-quota", methods=["GET"])
 def admin_v1_users_storage_quota_get(user_id):
-    """读取单用户存储配额（2026-11-04；admin:users:read）。
+    """读取单用户存储配额（2026-11-04；2026-11-06 扩容字段；admin:users:read）。
 
-    响应：quota_bytes / used_bytes / reserved_bytes / remaining_bytes /
-    quota_applies / default_quota_bytes / 硬边界。配额行不存在时按当前 env
-    默认惰性创建（与首次上传预占同语义），因此返回的 quota_bytes 恒为具体
-    数值。owner 不适用存储配额 → 400（与总额度端点的 owner 互斥形态一致）。
+    响应：base_quota_bytes / extra_quota_bytes / quota_bytes（有效配额 =
+    基础 + 扩容）/ used_bytes / reserved_bytes / remaining_bytes /
+    quota_applies / default_quota_bytes / 硬边界 / expansions（只读）。
+    配额行不存在时按当前 env 默认惰性创建（与首次上传预占同语义），因此返回
+    的 quota_bytes 恒为具体数值。owner 不适用存储配额 → 400（与总额度端点
+    的 owner 互斥形态一致）。
     """
     auth = _require_owner_admin_v1()
     if auth:
@@ -12886,10 +12960,12 @@ def admin_v1_users_storage_quota_get(user_id):
             "存储配额仅适用于 role=user（owner 不受存储配额限制）")
     try:
         row = upload_guard.get_quota_row(user_id)
+        expansions = storage_expansion.list_for_user(user_id)
     except Exception:
         app.logger.exception("admin v1 storage quota 读取失败")
         return _admin_v1_error(500, "internal", "存储配额读取失败")
-    return jsonify(_admin_v1_storage_quota_out(row))
+    return jsonify(_admin_v1_storage_quota_out(
+        row, expansions=expansions))
 
 
 @app.route("/api/admin/v1/users/<user_id>/storage-quota", methods=["PUT"])
@@ -12962,22 +13038,33 @@ def admin_v1_users_storage_quota_restore(user_id):
     return jsonify(_admin_v1_storage_quota_out(row))
 
 
-def _admin_v1_storage_quota_out(row):
-    """存储配额响应出口（字节一律 int；remaining 不会为负）。"""
-    quota = int(row["quota_bytes"])
+def _admin_v1_storage_quota_out(row, *, expansions=None):
+    """存储配额响应出口（字节一律 int；remaining 不会为负）。
+
+    ``quota_bytes`` 是有效配额（基础 + 付费扩容）；``base_quota_bytes`` /
+    ``extra_quota_bytes`` 分列。``expansions`` 只读（GET 附带；PUT /
+    restore-default 只反映配额行）。
+    """
+    base = int(row["base_quota_bytes"])
+    extra = int(row["extra_quota_bytes"])
     used = int(row["used_bytes"])
     reserved = int(row["reserved_bytes"])
-    return {
+    out = {
         "user_id": row["user_id"],
         "quota_applies": True,
-        "quota_bytes": quota,
+        "base_quota_bytes": base,
+        "extra_quota_bytes": extra,
+        "quota_bytes": base + extra,
         "used_bytes": used,
         "reserved_bytes": reserved,
-        "remaining_bytes": max(0, quota - used - reserved),
+        "remaining_bytes": max(0, base + extra - used - reserved),
         "default_quota_bytes": int(upload_guard.UPLOAD_USER_QUOTA_BYTES),
         "min_quota_bytes": int(upload_guard.UPLOAD_USER_QUOTA_MIN_BYTES),
         "max_quota_bytes": int(upload_guard.UPLOAD_USER_QUOTA_MAX_BYTES),
     }
+    if expansions is not None:
+        out["expansions"] = expansions
+    return out
 
 
 @app.route("/api/admin/v1/users/<user_id>/password-reset", methods=["POST"])
@@ -15586,7 +15673,10 @@ _INGESTION_QUOTA_FAIL_CODES = frozenset({
 
 
 def _attach_ingestion_quota(body, job):
-    """配额类终态附加 quota_bytes/used_bytes/reserved_bytes（只读不建行）。"""
+    """配额类终态附加 base/extra/quota/used/reserved（只读不建行）。
+
+    ``quota_bytes`` 为有效配额（基础 + 付费扩容）；前端超限文案仍取它。
+    """
     uid = job.get("owner_user_id") or ""
     if not uid or (job.get("owner_role") or "") != user_store.ROLE_USER:
         return
@@ -15597,12 +15687,15 @@ def _attach_ingestion_quota(body, job):
     except Exception:
         app.logger.exception("ingestion quota 读取失败：%s", uid)
         return
-    quota = int(row["quota_bytes"]) if row \
-        else int(upload_guard.UPLOAD_USER_QUOTA_BYTES)
-    body["quota_bytes"] = quota
+    default_quota = int(upload_guard.UPLOAD_USER_QUOTA_BYTES)
+    base = int(row["base_quota_bytes"]) if row else default_quota
+    extra = int(row["extra_quota_bytes"]) if row else 0
+    body["base_quota_bytes"] = base
+    body["extra_quota_bytes"] = extra
+    body["quota_bytes"] = base + extra
     body["used_bytes"] = int(row["used_bytes"]) if row else 0
     body["reserved_bytes"] = int(row["reserved_bytes"]) if row else 0
-    body["default_quota_bytes"] = int(upload_guard.UPLOAD_USER_QUOTA_BYTES)
+    body["default_quota_bytes"] = default_quota
 
 
 def _ingestion_state_body(job, *, queue_position=None):
@@ -17634,9 +17727,13 @@ def _plugin_quota_error_details(user_id):
         app.logger.exception("plugin quota details 读取失败：%s", user_id)
         return None
     if row is None:
-        return {"quota_bytes": int(upload_guard.UPLOAD_USER_QUOTA_BYTES),
+        return {"base_quota_bytes": int(upload_guard.UPLOAD_USER_QUOTA_BYTES),
+                "extra_quota_bytes": 0,
+                "quota_bytes": int(upload_guard.UPLOAD_USER_QUOTA_BYTES),
                 "used_bytes": 0, "reserved_bytes": 0}
-    return {"quota_bytes": int(row["quota_bytes"]),
+    return {"base_quota_bytes": int(row["base_quota_bytes"]),
+            "extra_quota_bytes": int(row["extra_quota_bytes"]),
+            "quota_bytes": int(row["quota_bytes"]),
             "used_bytes": int(row["used_bytes"]),
             "reserved_bytes": int(row["reserved_bytes"])}
 

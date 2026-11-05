@@ -340,10 +340,18 @@ def reservation_holder_matches(out, holder_kind, holder_id) -> bool:
 
 
 def _quota_out(row):
-    """配额行 → 统一 dict（字节数一律 int）。"""
+    """配额行 → 统一 dict（字节数一律 int）。
+
+    0092 起 ``quota_bytes`` 保持为**有效配额**（基础 + 付费扩容）以兼容既有
+    前端/文案；同时给出 ``base_quota_bytes`` 与 ``extra_quota_bytes``。
+    """
+    base = int(row["quota_bytes"])
+    extra = int(row.get("extra_quota_bytes") or 0)
     return {
         "user_id": row["user_id"],
-        "quota_bytes": int(row["quota_bytes"]),
+        "base_quota_bytes": base,
+        "extra_quota_bytes": extra,
+        "quota_bytes": base + extra,
         "used_bytes": int(row["used_bytes"]),
         "reserved_bytes": int(row["reserved_bytes"]),
     }
@@ -360,7 +368,8 @@ def get_quota_row(user_id):
                     "VALUES (%s, %s) ON CONFLICT (user_id) DO NOTHING",
                     (user_id, UPLOAD_USER_QUOTA_BYTES))
                 cur.execute(
-                    "SELECT user_id, quota_bytes, used_bytes, reserved_bytes "
+                    "SELECT user_id, quota_bytes, extra_quota_bytes, "
+                    "used_bytes, reserved_bytes "
                     "FROM upload_user_quotas WHERE user_id = %s", (user_id,))
                 row = cur.fetchone()
         return _quota_out(row) if row else None
@@ -372,13 +381,15 @@ def peek_quota_row(user_id):
     """只读读取配额行；不存在返回 None（**不建行**，用于自助展示）。
 
     自助用量接口不应因为用户点开账户页就产生配额行；真正需要行时由
-    reserve/set 路径惰性创建。
+    reserve/set 路径惰性创建。``quota_bytes`` 为有效配额（基础 + 扩容），
+    另附 ``base_quota_bytes`` / ``extra_quota_bytes``。
     """
     conn = _connect()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT user_id, quota_bytes, used_bytes, reserved_bytes "
+                "SELECT user_id, quota_bytes, extra_quota_bytes, "
+                "used_bytes, reserved_bytes "
                 "FROM upload_user_quotas WHERE user_id = %s", (user_id,))
             row = cur.fetchone()
         return _quota_out(row) if row else None
@@ -409,14 +420,19 @@ def _lock_or_create_quota_row(cur, user_id):
         "VALUES (%s, %s) ON CONFLICT (user_id) DO NOTHING",
         (user_id, UPLOAD_USER_QUOTA_BYTES))
     cur.execute(
-        "SELECT user_id, quota_bytes, used_bytes, reserved_bytes "
-        "FROM upload_user_quotas WHERE user_id = %s FOR UPDATE", (user_id,))
+        "SELECT user_id, quota_bytes, extra_quota_bytes, used_bytes, "
+        "reserved_bytes FROM upload_user_quotas WHERE user_id = %s "
+        "FOR UPDATE", (user_id,))
     return cur.fetchone()
 
 
 def _write_quota_update(cur, user_id, quota_bytes, *, op, actor_user_id,
                         updated_by, audit_detail=None):
-    """锁内写入配额 + 同事务审计（set / restore-default 共用）。"""
+    """锁内写入配额 + 同事务审计（set / restore-default 共用）。
+
+    只改基础容量 ``quota_bytes``；``extra_quota_bytes``（付费扩容）保持
+    不变，因此返回的 ``quota_bytes`` 仍是有效配额。
+    """
     import share_store_pg
 
     before = _lock_or_create_quota_row(cur, user_id)
@@ -424,7 +440,8 @@ def _write_quota_update(cur, user_id, quota_bytes, *, op, actor_user_id,
     cur.execute(
         "UPDATE upload_user_quotas SET quota_bytes=%s, updated_at=now() "
         "WHERE user_id=%s "
-        "RETURNING user_id, quota_bytes, used_bytes, reserved_bytes",
+        "RETURNING user_id, quota_bytes, extra_quota_bytes, used_bytes, "
+        "reserved_bytes",
         (quota_bytes, user_id))
     out = _quota_out(cur.fetchone())
     detail = dict(audit_detail or {})
@@ -432,7 +449,8 @@ def _write_quota_update(cur, user_id, quota_bytes, *, op, actor_user_id,
         "op": op,
         "user_id": user_id,
         "previous_quota_bytes": previous,
-        "new_quota_bytes": out["quota_bytes"],
+        "new_quota_bytes": int(quota_bytes),
+        "extra_quota_bytes": out["extra_quota_bytes"],
         "used_bytes": out["used_bytes"],
         "reserved_bytes": out["reserved_bytes"],
         "updated_by": updated_by or actor_user_id,
@@ -448,7 +466,8 @@ def set_user_quota(user_id, quota_bytes, *, actor_user_id=None,
                    updated_by=None):
     """管理员设置单用户存储配额（绝对值，字节；行不存在则创建）。
 
-    只改 quota_bytes：used_bytes / reserved_bytes 一律不动。调低到低于已用
+    只改 quota_bytes（基础容量）：used_bytes / reserved_bytes 与
+    ``extra_quota_bytes``（付费扩容）一律不动。调低到低于已用
     时既有文件不删除、不受影响；后续 reserve/topup 的不等式
     ``used + reserved + nbytes <= quota`` 自然拒绝新增上传。边界见
     ``UPLOAD_USER_QUOTA_MIN_BYTES`` / ``UPLOAD_USER_QUOTA_MAX_BYTES``。
@@ -513,13 +532,15 @@ def reserve_upload_locked(cur, user_id, nbytes, *, inflight_limit=None,
         "INSERT INTO upload_user_quotas (user_id, quota_bytes) "
         "VALUES (%s, %s) ON CONFLICT (user_id) DO NOTHING",
         (user_id, UPLOAD_USER_QUOTA_BYTES))
-    # 锁配额行：同用户并发 reserve 串行化（docs §3.3-3）
+    # 锁配额行：同用户并发 reserve 串行化（docs §3.3-3）；有效配额 =
+    # 基础容量 + 付费扩容（0092）。
     cur.execute(
-        "SELECT quota_bytes, used_bytes, reserved_bytes "
+        "SELECT quota_bytes, extra_quota_bytes, used_bytes, reserved_bytes "
         "FROM upload_user_quotas WHERE user_id = %s FOR UPDATE",
         (user_id,))
     q = cur.fetchone()
-    quota, used, reserved = (int(q["quota_bytes"]),
+    quota, used, reserved = (int(q["quota_bytes"])
+                             + int(q["extra_quota_bytes"] or 0),
                              int(q["used_bytes"]),
                              int(q["reserved_bytes"]))
     # 惰性回收**未绑定**过期预占（准备期崩溃兜底；锁内执行防并发双扣）。
@@ -704,13 +725,14 @@ def topup_reservation(reservation_id, extra_bytes):
                 if r is None:
                     raise ReservationInvalid("预占不存在、已结算或已过期")
                 cur.execute(
-                    "SELECT quota_bytes, used_bytes, reserved_bytes "
-                    "FROM upload_user_quotas WHERE user_id=%s",
+                    "SELECT quota_bytes, extra_quota_bytes, used_bytes, "
+                    "reserved_bytes FROM upload_user_quotas WHERE user_id=%s",
                     (r["user_id"],))
                 q = cur.fetchone()
-                quota, used, reserved = (int(q["quota_bytes"]),
-                                         int(q["used_bytes"]),
-                                         int(q["reserved_bytes"]))
+                quota, used, reserved = (
+                    int(q["quota_bytes"]) + int(q["extra_quota_bytes"] or 0),
+                    int(q["used_bytes"]),
+                    int(q["reserved_bytes"]))
                 if used + reserved + extra_bytes > quota:
                     raise QuotaExceeded(
                         "用户存储配额不足（需补占 %d 字节）" % extra_bytes)
