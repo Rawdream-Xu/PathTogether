@@ -197,6 +197,8 @@ def test_admin_storage_quota_get_set_restore_and_audit():
     assert body == {
         "user_id": uid,
         "quota_applies": True,
+        "base_quota_bytes": DEFAULT,
+        "extra_quota_bytes": 0,
         "quota_bytes": DEFAULT,
         "used_bytes": 0,
         "reserved_bytes": 0,
@@ -204,6 +206,7 @@ def test_admin_storage_quota_get_set_restore_and_audit():
         "default_quota_bytes": DEFAULT,
         "min_quota_bytes": 0,
         "max_quota_bytes": 1024 ** 4,
+        "expansions": [],
     }
 
     # 参数边界/形状
@@ -329,6 +332,8 @@ def test_attach_ingestion_quota_uses_actual_row():
     app_mod._attach_ingestion_quota(
         body, {"owner_user_id": uid, "owner_role": "user"})
     assert body == {
+        "base_quota_bytes": 6 * GiB,
+        "extra_quota_bytes": 0,
         "quota_bytes": 6 * GiB,
         "used_bytes": 5 * GiB,
         "reserved_bytes": 512 * 1024 ** 2,

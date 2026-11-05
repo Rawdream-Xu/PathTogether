@@ -370,6 +370,9 @@ def test_schema_migrations_recorded(conn):
         # 早期真实用户存储配额提到 50 GiB（无行预建、旧默认 20 GiB 行
         # 上调；自定义值与 dogfood 不动）；新用户沿用默认 10 GiB。
         "0091_upload_user_quota_tiers.sql",
+        # 付费存储扩容（2026-11-06）：storage_debit 流水 + storage_expansions
+        # + upload_user_quotas.extra_quota_bytes。
+        "0092_storage_expansions.sql",
     ]
 
 

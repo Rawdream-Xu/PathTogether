@@ -258,6 +258,9 @@ _BUSINESS_TABLES = (
     "credit_payment_events",
     "credit_refunds",
     "credit_topup_orders",
+    # 0092 起：付费存储扩容（users 外键 CASCADE 已覆盖，显式列出防跨用例
+    # 残留扩容行干扰 extra_quota_bytes / sweep 断言）
+    "storage_expansions",
 )
 
 @pytest.fixture(scope="session")
