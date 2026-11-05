@@ -893,6 +893,17 @@ export async function sniffTiffSlideCapability(file) {
 
 // ------------------------------------------------- raster input (F8) --
 
+/// SOF segment dimensions (segment length field at `at`): Lf(2) P(1) Y(2) X(2).
+/// Used only to pre-check the normalization cap before decoding; null when the
+/// segment is outside the bounded sniff window.
+function jpegSofDims(buf, at, segLen) {
+  if (at + 2 + 5 > buf.length || segLen < 7) return null;
+  const p = at + 2;
+  const h = (buf[p + 1] << 8) | buf[p + 2];
+  const w = (buf[p + 3] << 8) | buf[p + 4];
+  return (w > 0 && h > 0) ? { width: w, height: h } : null;
+}
+
 /// Bounded pre-copy capability probe of a plain image (BMP / baseline
 /// JPEG) BEFORE staging — same contract as sniffTiffSlideCapability: reads
 /// at most RASTER_SNIFF_WINDOW_BYTES = 256 KiB (BMP header ≤ 138 B; JPEG
@@ -906,14 +917,17 @@ export async function sniffTiffSlideCapability(file) {
 ///     → { supported: true, modality: 'brightfield',
 ///         format: RASTER_SOURCE_ADAPTER, adapter: RASTER_SOURCE_ADAPTER }
 ///     | { supported: false, modality: null, reason: '<typed reason>',
-///         detail: 'raster_variant'|'raster_too_large'|'raster_unrecognized' }
+///         detail: 'raster_variant'|'raster_too_large'|'raster_unrecognized',
+///         width?, height? }
 ///
 /// `detail` lets the runner decide what to do: a recognized variant is handed
 /// to the browser-decode normalization (raster-normalize.js); an unrecognized
-/// header or an over-cap image is refused before any decode/copy.
+/// header or an over-cap image is refused before any decode/copy. When the
+/// header carried usable dimensions they are returned so the normalizer can
+/// enforce the 50 MP server cap BEFORE decoding.
 export async function sniffRasterCapability(file) {
-  const bad = (reason, detail = 'raster_variant') =>
-    ({ supported: false, modality: null, reason, detail });
+  const bad = (reason, detail = 'raster_variant', dims = null) =>
+    ({ supported: false, modality: null, reason, detail, ...(dims || {}) });
   const unrecognized = (reason) => bad(reason, 'raster_unrecognized');
   const readAt = async (off, len) =>
     new Uint8Array(await file.slice(off, off + len).arrayBuffer());
@@ -956,6 +970,7 @@ export async function sniffRasterCapability(file) {
     }
     const h = Math.abs(hRaw);
     if (w === 0 || h === 0) return unrecognized('BMP 宽/高为 0：不是合法图片');
+    const dims = { width: w, height: h };
     if (dib !== 12 && compression !== 0) {
       const why =
         compression === 1 || compression === 2 ? 'RLE 行程编码'
@@ -963,13 +978,15 @@ export async function sniffRasterCapability(file) {
         : compression === 4 ? 'JPEG-in-BMP'
         : compression === 5 ? 'PNG-in-BMP'
         : '未登记的压缩编码';
-      return bad(`BMP 压缩编码 ${compression}（${why}）不在支持集：只支持未压缩 BI_RGB`);
+      return bad(`BMP 压缩编码 ${compression}（${why}）不在支持集：只支持未压缩 BI_RGB`,
+        'raster_variant', dims);
     }
     if (bpp !== 24 && bpp !== 32) {
-      return bad(`BMP 位深 ${bpp} 不在支持集（只支持未压缩 24/32 位）`);
+      return bad(`BMP 位深 ${bpp} 不在支持集（只支持未压缩 24/32 位）`,
+        'raster_variant', dims);
     }
     if (w > RASTER_MAX_SIDE || h > RASTER_MAX_SIDE || w * h > RASTER_MAX_PIXELS) {
-      return bad(overCap(w, h), 'raster_too_large');
+      return bad(overCap(w, h), 'raster_too_large', dims);
     }
     return {
       supported: true,
@@ -1008,7 +1025,8 @@ export async function sniffRasterCapability(file) {
         (m >= 0xCD && m <= 0xCF)
       ) {
         // 与核心同一 SOF 集合（0xC4 = DHT、0xC8 = JPG 不在内）
-        return bad(`渐进/分层/无损 JPEG 不受支持（SOF FF${m.toString(16).padStart(2, '0')}）`);
+        return bad(`渐进/分层/无损 JPEG 不受支持（SOF FF${m.toString(16).padStart(2, '0')}）`,
+          'raster_variant', jpegSofDims(buf, i, segLen));
       }
       if (m === 0xC8) return bad('JPG 扩展不受支持');
       if (m === 0xCC) return bad('算术编码不受支持');
@@ -1022,11 +1040,18 @@ export async function sniffRasterCapability(file) {
     const h = (sof[1] << 8) | sof[2];
     const w = (sof[3] << 8) | sof[4];
     const ncomp = sof[5];
-    if (ncomp === 1) return bad('JPEG 是单分量（灰度）：普通图片转换输出 RGB 明场，灰度流不在支持集');
-    if (ncomp !== 3) return bad(`JPEG 分量数 ${ncomp} 不在支持集（需要 3 分量 RGB/YCbCr）`);
+    const dims = { width: w, height: h };
+    if (ncomp === 1) {
+      return bad('JPEG 是单分量（灰度）：普通图片转换输出 RGB 明场，灰度流不在支持集',
+        'raster_variant', dims);
+    }
+    if (ncomp !== 3) {
+      return bad(`JPEG 分量数 ${ncomp} 不在支持集（需要 3 分量 RGB/YCbCr）`,
+        'raster_variant', dims);
+    }
     if (w === 0 || h === 0) return unrecognized('JPEG SOF 尺寸为 0');
     if (w > RASTER_MAX_SIDE || h > RASTER_MAX_SIDE || w * h > RASTER_MAX_PIXELS) {
-      return bad(overCap(w, h), 'raster_too_large');
+      return bad(overCap(w, h), 'raster_too_large', dims);
     }
     return {
       supported: true,

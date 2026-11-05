@@ -181,9 +181,17 @@ describe("raster sniff（有界 staging 前探测）", () => {
 		const prog = await E.sniffRasterCapability(fileOf(jpegBytes({ progressive: true })));
 		expect(prog.supported).toBe(false);
 		expect(String(prog.reason)).toContain("渐进");
+		// 变体拒绝带上头里的尺寸：归一化在解码前就能按 50 MP 上限拒绝
+		expect(prog.width).toBe(64);
+		expect(prog.height).toBe(48);
 		const gray = await E.sniffRasterCapability(fileOf(jpegBytes({ ncomp: 1 })));
 		expect(gray.supported).toBe(false);
 		expect(String(gray.reason)).toContain("灰度");
+		expect(gray.width).toBe(64);
+		expect(gray.height).toBe(48);
+		const rle = await E.sniffRasterCapability(fileOf(bmpBytes({ compression: 1 })));
+		expect(rle.width).toBe(512);
+		expect(rle.height).toBe(320);
 	});
 
 	it("魔数分派：isRasterHeader / magicModality / magicSupported", () => {

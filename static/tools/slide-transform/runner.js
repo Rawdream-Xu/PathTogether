@@ -989,6 +989,9 @@ export class SlideToolsRunner {
         const norm = await normalizeRasterToBmp(file, {
           maxPixels: opts.rasterMaxPixels || NORMALIZE_MAX_PIXELS,
           maxSide: NORMALIZE_MAX_SIDE,
+          // 头里已解析出尺寸：超限在解码/分配 canvas 之前拒绝。
+          width: cap.width,
+          height: cap.height,
         });
         sourceFile = norm.file;
         sourceAdapter = E.RASTER_SOURCE_ADAPTER;

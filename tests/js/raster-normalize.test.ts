@@ -116,6 +116,18 @@ describe("normalizeRasterToBmp（浏览器解码归一化）", () => {
 		expect(err.error.detail).toBe("raster_too_large");
 	});
 
+	it("头尺寸已解析时在解码前拒绝（不调用 createImageBitmap）", async () => {
+		let decoded = 0;
+		(g as { createImageBitmap?: unknown }).createImageBitmap =
+			async () => { decoded += 1; return { width: 1, height: 1, close() {} }; };
+		const err = await N.normalizeRasterToBmp(
+			{ name: "huge.jpg", size: 1 },
+			{ maxPixels: 50_000_000, width: 20000, height: 20000 })
+			.catch((e) => e);
+		expect(err.error.detail).toBe("raster_too_large");
+		expect(decoded).toBe(0);
+	});
+
 	it("浏览器无法解码（改名的 PNG/WebP/损坏文件）→ raster_unrecognized", async () => {
 		(g as { createImageBitmap?: unknown }).createImageBitmap =
 			async () => { throw new Error("InvalidStateError"); };

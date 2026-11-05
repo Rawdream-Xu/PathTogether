@@ -101,11 +101,25 @@ function makeCanvas(width, height) {
 /// `detail` = raster_unrecognized | raster_too_large | raster_decode_unavailable.
 ///
 ///   const { file, width, height } = await normalizeRasterToBmp(input, { maxPixels });
+///
+/// When the caller already parsed the header dimensions (engine's raster sniff),
+/// pass `width`/`height` so an over-cap image is refused BEFORE decoding.
 export async function normalizeRasterToBmp(file, opts = {}) {
   const maxPixels = Number(opts.maxPixels) > 0
     ? Number(opts.maxPixels) : NORMALIZE_MAX_PIXELS;
   const maxSide = Number(opts.maxSide) > 0
     ? Number(opts.maxSide) : NORMALIZE_MAX_SIDE;
+  const tooLarge = (width, height) => normalizeFailure('raster_too_large',
+    `图片尺寸 ${width}×${height} 超出本机转换上限（每边 ≤ ${maxSide}，` +
+    `总数 ≤ ${Math.round(maxPixels / 1_000_000)} 百万像素）：请缩小后重试`);
+  // Header pre-check (no decode yet). Unknown dimensions fall through to the
+  // post-decode check.
+  const hdrW = Math.floor(Number(opts.width) || 0);
+  const hdrH = Math.floor(Number(opts.height) || 0);
+  if (hdrW > 0 && hdrH > 0 &&
+      (hdrW > maxSide || hdrH > maxSide || hdrW * hdrH > maxPixels)) {
+    throw tooLarge(hdrW, hdrH);
+  }
   if (typeof createImageBitmap !== 'function') {
     throw normalizeFailure('raster_decode_unavailable',
       '当前浏览器无法在本地解码图片（缺少 createImageBitmap）：请换用最新版浏览器');
@@ -124,9 +138,7 @@ export async function normalizeRasterToBmp(file, opts = {}) {
     if (width > maxSide || height > maxSide ||
         width * height > maxPixels ||
         width * height > NORMALIZE_MAX_CANVAS_PIXELS) {
-      throw normalizeFailure('raster_too_large',
-        `图片尺寸 ${width}×${height} 超出本机转换上限（每边 ≤ ${maxSide}，` +
-        `总数 ≤ ${Math.round(maxPixels / 1_000_000)} 百万像素）：请缩小后重试`);
+      throw tooLarge(width, height);
     }
     const canvas = makeCanvas(width, height);
     const ctx = canvas && canvas.getContext
