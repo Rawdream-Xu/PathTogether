@@ -901,13 +901,13 @@ describe("Beta 徽标 + i18n 新键（§3.4/§7）", () => {
 		expect(zh.t("tb.anno.label.name")).toBe("标注名称（可选）");
 		expect(zh.t("tb.anno.more")).toBe("标注选项");
 		expect(zh.t("acct.preview.tag")).toBe("管理员预览");
-		expect(zh.t("acct.balance.title")).toBe("AI 额度");
+		expect(zh.t("acct.balance.title")).toBe("Credit 余额");
 		expect(zh.t("acct.balance.scope.total")).toBe("一次性额度");
 		expect(zh.t("acct.balance.scope.month")).toBe("本月");
 		expect(zh.t("acct.balance.reset", { date: "11-30" })).toBe("11-30 重置");
 		expect(zh.t("acct.balance.used", { used: "147", total: "100,000" }))
 			.toBe("已用 147 / 100,000");
-		expect(zh.t("acct.balance.bar.aria")).toBe("AI 额度用量");
+		expect(zh.t("acct.balance.bar.aria")).toBe("Credit 用量");
 		expect(zh.t("acct.balance.unavailable", { reason: "X" })).toBe("额度信息暂不可用（X）");
 		expect(zh.t("acct.balance.reason.missing")).toBe("未设置总额度");
 		expect(zh.t("acct.storage.remaining", { remaining: "30.6 GB" })).toBe("剩余 30.6 GB");

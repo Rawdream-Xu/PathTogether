@@ -14654,8 +14654,13 @@
         if (!graceItem && item.status === "grace") graceItem = item;
       });
       if (els.acctPopStorageWarn && graceItem && graceItem.grace_until) {
+        // 与 Credit 页（credits.js formatDate）同一口径：本地日期 YYYY.MM.DD
+        var graceAt = new Date(graceItem.grace_until);
+        var pad2 = function (n) { return (n < 10 ? "0" : "") + n; };
         els.acctPopStorageWarn.textContent = t("acct.storage.grace_warn", {
-          date: String(graceItem.grace_until).slice(0, 10),
+          date: isNaN(graceAt.getTime()) ? String(graceItem.grace_until)
+            : graceAt.getFullYear() + "." + pad2(graceAt.getMonth() + 1) +
+              "." + pad2(graceAt.getDate()),
         });
         els.acctPopStorageWarn.hidden = false;
       }

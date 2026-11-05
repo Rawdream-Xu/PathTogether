@@ -157,7 +157,7 @@ function storageBody(overrides: Record<string, unknown> = {}) {
 					expansion_id: EXP_B, units: 2, status: "grace",
 					auto_renew: true, period_start: "2025-11-06T00:00:00Z",
 					period_end: "2026-11-06T00:00:00Z",
-					grace_until: "2026-11-13T00:00:00Z",
+					grace_until: "2026-11-13T12:00:00Z",
 				},
 				{
 					expansion_id: EXP_C, units: 1, status: "ended",
@@ -513,7 +513,7 @@ describe("账户弹层存储区（扩容）", () => {
 			.toBe('acct.storage.extra({"extra":"30 GB"})');
 		expect(h.els("acct-pop-storage-warn").hidden).toBe(false);
 		expect(h.els("acct-pop-storage-warn").textContent)
-			.toBe('acct.storage.grace_warn({"date":"2026-11-13"})');
+			.toBe('acct.storage.grace_warn({"date":"2026.11.13"})');
 		expect(h.els("acct-storage-link").hidden).toBe(false);
 		expect(h.els("acct-storage-link").textContent).toBe("acct.storage.expand");
 		expect(h.els("acct-storage-link").getAttribute("data-i18n"))
