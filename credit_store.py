@@ -1854,7 +1854,7 @@ def _reconcile_report_tx(cur, *, paid_uncredited_cutoff,
         "       COALESCE(SUM(CASE WHEN e.status IN ('active', 'grace') "
         "                         THEN e.units * e.unit_bytes ELSE 0 END), 0)"
         "         ::bigint AS expected, "
-        "       COUNT(*)::bigint AS expansion_count "
+        "       COUNT(e.expansion_id)::bigint AS expansion_count "
         "  FROM upload_user_quotas q "
         "  FULL JOIN storage_expansions e ON e.user_id = q.user_id "
         " GROUP BY 1, 2 ORDER BY 1")

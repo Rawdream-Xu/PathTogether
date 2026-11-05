@@ -539,6 +539,17 @@ def purchase(user_id, units, idempotency_key, *, preview=False, now=None,
                         "账户未启用 Credit 钱包", reason="wallet_not_credits")
                 account = credit_store.lock_account_tx(
                     cur, account["account_id"])
+                # 同一用户的购买由账户锁串行化：等锁期间并发同 key 请求可能
+                # 已完成落库，必须在锁内重查（否则会撞 user_id+key 唯一约束）。
+                existing = _fetch_expansion_by_user_key_tx(
+                    cur, user_id, idempotency_key)
+                if existing is not None:
+                    if existing["request_hash"] != request_hash:
+                        raise credit_store.CreditIdempotencyConflictError(
+                            "同一幂等键的扩容购买请求内容不一致",
+                            idempotency_key=idempotency_key,
+                            user_id=user_id, units=units)
+                    return {"expansion": _item(existing), "duplicate": True}
                 restriction = credit_store.account_restriction_tx(
                     cur, account)
                 if restriction:
@@ -713,12 +724,60 @@ def set_auto_renew(user_id, expansion_id, enabled, *, now=None):
 # --------------------------------------------------------------------------- #
 # 到期扫描（credit_payments.sweep 每 2 分钟调用）
 # --------------------------------------------------------------------------- #
+def _renewal_restriction(cur, account):
+    """续费前限制原因（无限制 → None）：非 credits 后端或账户受限。
+
+    受限账户不扣续费（例如冻结/待核对/停用），按「扣费失败」进入宽限；
+    宽限期照常推进，解除限制后下一轮 sweep 再重试。
+    """
+    if account.get("billing_backend") != credit_store.BACKEND_CREDITS:
+        return "wallet_not_credits"
+    return credit_store.account_restriction_tx(cur, account)
+
+
+def _record_renewal_failure_tx(cur, row, now, error, *, shortfall=None):
+    """记录一次续费失败（不扣款）。
+
+    active → grace（``grace_until = period_end + grace_days``）；
+    grace → 只记录重试时间/原因；``grace_days <= 0`` 时 active 直接结束。
+    """
+    expansion_id = row["expansion_id"]
+    if row["status"] == STATUS_ACTIVE:
+        days = grace_days()
+        if days <= 0:
+            _end_expansion_tx(cur, row, END_REASON_RENEWAL_FAILED, now)
+            return "ended"
+        grace_until = row["period_end"] + timedelta(days=days)
+        cur.execute(
+            "UPDATE storage_expansions SET status = 'grace', "
+            "grace_until = %s, last_renew_attempt_at = %s, "
+            "last_renew_error = %s, updated_at = %s, "
+            "version = version + 1 WHERE expansion_id = %s",
+            (grace_until, now, error, now, expansion_id))
+        return "entered_grace"
+    if shortfall is not None:
+        error = "%s (shortfall=%d)" % (error, shortfall)
+    cur.execute(
+        "UPDATE storage_expansions SET last_renew_attempt_at = %s, "
+        "last_renew_error = %s, updated_at = %s, version = version + 1 "
+        "WHERE expansion_id = %s",
+        (now, error, now, expansion_id))
+    return None
+
+
 def _renew_expansion_tx(cur, account, row, now):
     """尝试为一行 active/grace 扩容扣下一年费用 → 结果词。
 
-    返回 ``"renewed"`` / ``"entered_grace"`` / ``None``（grace 仍不足）。
-    成功时周期从**原 period_end** 起算（grace 恢复也不会白送宽限时间）。
+    返回 ``"renewed"`` / ``"entered_grace"`` / ``"ended"`` / ``None``
+    （grace 仍失败）。成功时周期从**原 period_end** 起算（grace 恢复也不会
+    白送宽限时间）。受限账户不扣款，按扣费失败处理（active → grace；
+    grace 只记录本次尝试），宽限超时仍由调用方结束。
     """
+    restriction = _renewal_restriction(cur, account)
+    if restriction:
+        return _record_renewal_failure_tx(
+            cur, row, now, "account_restricted:%s" % restriction)
+
     renewal_no = int(row["renewals"]) + 1
     price_units = int(row["units"]) * int(row["price_units_per_unit"])
     expansion_id = row["expansion_id"]
@@ -740,29 +799,9 @@ def _renew_expansion_tx(cur, account, row, now):
         })
 
     if debit["outcome"] == "insufficient":
-        shortfall = int(debit["shortfall_units"])
-        if row["status"] == STATUS_ACTIVE:
-            days = grace_days()
-            if days <= 0:
-                _end_expansion_tx(
-                    cur, row, END_REASON_RENEWAL_FAILED, now)
-                return "ended"
-            grace_until = row["period_end"] + timedelta(days=days)
-            cur.execute(
-                "UPDATE storage_expansions SET status = 'grace', "
-                "grace_until = %s, last_renew_attempt_at = %s, "
-                "last_renew_error = %s, updated_at = %s, "
-                "version = version + 1 WHERE expansion_id = %s",
-                (grace_until, now, "credits_insufficient", now,
-                 expansion_id))
-            return "entered_grace"
-        cur.execute(
-            "UPDATE storage_expansions SET last_renew_attempt_at = %s, "
-            "last_renew_error = %s, updated_at = %s, version = version + 1 "
-            "WHERE expansion_id = %s",
-            (now, "credits_insufficient (shortfall=%d)" % shortfall, now,
-             expansion_id))
-        return None
+        return _record_renewal_failure_tx(
+            cur, row, now, "credits_insufficient",
+            shortfall=int(debit["shortfall_units"]))
 
     period_start = row["period_end"]
     period_end = add_one_calendar_year(period_start)
