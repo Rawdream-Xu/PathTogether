@@ -997,7 +997,11 @@ def test_admin_manifest_plugin_version_bumped_with_hashes():
     #（用户详情抽屉新增 admin.users.storageQuota.get/set/restoreDefault，
     # 读 users:read、写 users:write，不扩权限域）；hashes/pin 按最终 bundle
     # 重算。
-    assert data["pluginVersion"] == "0.4.22"  # hashes/pin 同步
+    # 0.4.23 = 付费存储扩容可视化（2026-11-06）：用户详情抽屉显示有效容量
+    #（基础 + 扩容）与扩容记录（active/grace/ended、周期、自动续费、最近
+    # 续费失败原因，只读）；存储编辑器文案明确 PUT 只改基础容量；hashes/pin
+    # 按最终 bundle 重算。
+    assert data["pluginVersion"] == "0.4.23"  # hashes/pin 同步
     assert "admin:settings:read" in data["adminPermissions"]
     assert "admin:settings:write" in data["adminPermissions"]
     assert "admin:slides:read" in data["adminPermissions"]

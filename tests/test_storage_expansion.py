@@ -473,6 +473,10 @@ def test_sweep_failure_enters_grace_then_recovers():
     assert row["status"] == "grace"
     assert row["grace_until"] == period_end + timedelta(days=7)
     assert _quota_row(user["user_id"])["extra_quota_bytes"] == UNIT_BYTES
+    # 管理台只读列表带出最近一次失败原因（wire 形状）
+    listed = se.list_for_user(user["user_id"])[0]
+    assert listed["last_renew_error"].startswith("credits_insufficient")
+    assert listed["unit_bytes"] == UNIT_BYTES
 
     ch.issue_lot(_account["account_id"],
                  kind="promotional", units=1000 * CREDIT,
@@ -731,7 +735,9 @@ def test_http_admin_storage_quota_includes_base_extra_and_expansions():
         upload_guard.UPLOAD_USER_QUOTA_BYTES + UNIT_BYTES
     assert len(body["expansions"]) == 1
     assert body["expansions"][0]["units"] == 1
+    assert body["expansions"][0]["unit_bytes"] == UNIT_BYTES
     assert body["expansions"][0]["status"] == "active"
+    assert body["expansions"][0]["last_renew_error"] is None
 
 
 def test_ledger_labels_distinguish_purchase_and_renewal():

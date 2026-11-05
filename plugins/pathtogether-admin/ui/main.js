@@ -1654,27 +1654,163 @@
     return whole.toString() + (frac ? "." + frac.toString() : "") + " GB";
   }
 
-  // ---- 存储容量编辑器（2026-11-04）----
-  // 用户抽屉内「查看 + 修改」入口：显示 已用 / 上限（GB），输入以 GB 为单位，
-  // 调用 admin.users.storageQuota.get/set/restoreDefault（字节绝对值；恢复
-  // 默认 = 当前 env 默认 10 GiB）。只改上限，不清零已用/预占。
+  // ---- 付费存储扩容展示（2026-11-06；只读）----
+  // 每份容量由服务端 unit_bytes 给出（默认 10 GiB）；这里不做任何写操作，
+  // 扩容购买/续费/关闭全部走用户侧，管理台只展示审计事实。
+  var STORAGE_EXPANSION_UNIT_BYTES = 10n * GB_BYTES;
+  var EXPANSION_STATUS_TEXT = {
+    active: "生效中",
+    grace: "宽限中",
+    ended: "已结束",
+  };
+
+  function expansionDayText(value) {
+    if (value === null || value === undefined || value === "") return "—";
+    var text = fmtTs(value);
+    var match = /^([0-9]{4}-[0-9]{2}-[0-9]{2})/.exec(text);
+    return match ? match[1] : text;
+  }
+
+  function expansionCreditAmount(value) {
+    var text = creditUnitsText(value);
+    if (text === null || text === "小于 0.0001" || text.indexOf(".") < 0) {
+      return text;
+    }
+    return text.replace(/\.?0+$/, "");
+  }
+
+  // 续费失败原因是服务端稳定错误码（storage_expansion._record_renewal_failure_tx）。
+  // 已知码映射中文；未知码原样显示，避免吞掉新错误。
+  function expansionRenewErrorText(raw) {
+    if (raw === null || raw === undefined || raw === "") return null;
+    var text = String(raw);
+    var insufficient = /^credits_insufficient(?: \(shortfall=([0-9]+)\))?$/
+      .exec(text);
+    if (insufficient) {
+      var out = "Credits 余额不足";
+      if (insufficient[1]) {
+        var amount = expansionCreditAmount(insufficient[1]);
+        if (amount !== null) out += "（缺口 " + amount + " Credits）";
+      }
+      return out;
+    }
+    if (text === "account_restricted:wallet_not_credits") {
+      return "账户未启用 Credit 钱包";
+    }
+    if (text === "account_restricted:pending_reconciliation") {
+      return "账户有待核对的 Credit 预占";
+    }
+    var frozen = "account_restricted:frozen:";
+    if (text.indexOf(frozen) === 0) {
+      var frozenReason = text.slice(frozen.length);
+      return "账户 Credit 已冻结"
+        + (frozenReason ? "（" + frozenReason + "）" : "");
+    }
+    var status = "account_restricted:account_status_";
+    if (text.indexOf(status) === 0) {
+      var statusText = text.slice(status.length);
+      return "账户状态受限" + (statusText ? "（" + statusText + "）" : "");
+    }
+    return text;
+  }
+
+  function expansionCapacityText(item) {
+    var units = Number(item.units);
+    if (!Number.isSafeInteger(units) || units <= 0) return "—";
+    var unitBytes = STORAGE_EXPANSION_UNIT_BYTES;
+    if (item.unit_bytes !== null && item.unit_bytes !== undefined) {
+      try { unitBytes = BigInt(item.unit_bytes); } catch (e) {
+        unitBytes = STORAGE_EXPANSION_UNIT_BYTES;
+      }
+    }
+    return bytesToGbText(unitBytes * BigInt(units));
+  }
+
+  function expansionStatusText(item) {
+    var label = EXPANSION_STATUS_TEXT[item.status]
+      || (item.status ? String(item.status) : "未知");
+    if (item.status === "grace" && item.grace_until) {
+      label += "（宽限至 " + expansionDayText(item.grace_until) + "）";
+    }
+    return label;
+  }
+
+  function renderExpansionItem(item) {
+    item = item || {};
+    var row = document.createElement("div");
+    row.className = "adm-expansion-item"
+      + (item.status === "grace" ? " adm-expansion-item--grace" : "");
+    var units = Number(item.units);
+    var head = document.createElement("p");
+    head.className = "adm-expansion-head";
+    head.textContent = (Number.isSafeInteger(units) && units > 0
+      ? String(units) : "—") + " 份 · " + expansionCapacityText(item);
+
+    var statusLine = document.createElement("p");
+    statusLine.className = "adm-expansion-meta";
+    var status = document.createElement("span");
+    status.className = "adm-expansion-status adm-expansion-status--"
+      + (EXPANSION_STATUS_TEXT[item.status] ? item.status : "unknown");
+    status.textContent = expansionStatusText(item);
+    statusLine.appendChild(document.createTextNode("状态："));
+    statusLine.appendChild(status);
+
+    var period = document.createElement("p");
+    period.className = "adm-expansion-meta";
+    period.textContent = "周期：" + expansionDayText(item.period_start)
+      + " 至 " + expansionDayText(item.period_end);
+
+    var renew = document.createElement("p");
+    renew.className = "adm-expansion-meta";
+    renew.textContent = "自动续费：" + (item.auto_renew ? "开启" : "关闭");
+
+    row.appendChild(head);
+    row.appendChild(statusLine);
+    row.appendChild(period);
+    row.appendChild(renew);
+    var errorText = expansionRenewErrorText(item.last_renew_error);
+    if (errorText) {
+      var error = document.createElement("p");
+      error.className = "adm-expansion-meta adm-expansion-error";
+      error.textContent = "最近一次续费失败：" + errorText;
+      row.appendChild(error);
+    }
+    return row;
+  }
+
+  // ---- 存储容量编辑器（2026-11-04；2026-11-06 扩容只读展示）----
+  // 用户抽屉内「查看 + 修改」入口：显示 已用 / 有效容量（基础 + 扩容），
+  // 输入以 GB 为单位，调用 admin.users.storageQuota.get/set/restoreDefault。
+  // **PUT 只改基础容量**（服务端 quota_bytes 列），付费扩容 extra 不动；
+  // 因此标签/提示/成功文案一律写「基础容量」，避免误当成有效总量。
   function renderStorageQuotaEditor(u) {
     var wrap = document.createElement("div");
     wrap.className = "adm-drawer-override";
     var title = document.createElement("p");
     title.className = "adm-note";
-    title.textContent = "存储容量：查看该用户已用 / 上限，并可按需单独调整上限。"
-      + "调低到低于已用不会删除已有文件，只会拒绝新增上传。";
+    title.textContent = "存储容量：有效容量 = 基础容量 + 付费扩容。"
+      + "可单独调整基础容量；调低到低于已用不会删除已有文件，"
+      + "只会拒绝新增上传。";
     var usage = document.createElement("p");
     usage.className = "adm-status";
     usage.textContent = "存储用量读取中…";
+    var expansionSection = document.createElement("div");
+    expansionSection.className = "adm-expansion-section";
+    var expansionTitle = document.createElement("p");
+    expansionTitle.className = "adm-note";
+    expansionTitle.textContent = "付费存储扩容（只读）：有效容量 = 基础容量 + 付费扩容。";
+    var expansionList = document.createElement("div");
+    expansionList.className = "adm-expansion-list";
+    expansionList.textContent = "扩容记录读取中…";
+    expansionSection.appendChild(expansionTitle);
+    expansionSection.appendChild(expansionList);
     var field = document.createElement("div");
     field.className = "adm-field";
     var label = document.createElement("label");
     label.className = "adm-field-label";
     var inputId = "adm-storage-quota-input";
     label.htmlFor = inputId;
-    label.textContent = "存储上限（GB，必填）";
+    label.textContent = "基础容量（GB，必填）";
     var input = document.createElement("input");
     input.type = "text";
     input.id = inputId;
@@ -1685,7 +1821,8 @@
     help.className = "adm-field-help";
     help.id = "adm-storage-quota-help";
     help.textContent = "1 GB = 1024³ 字节；允许 0–1024 GB（0 = 禁止新增上传）。"
-      + "只改上限，已用/预占不清零。";
+      + "有效容量 = 基础容量 + 付费扩容；此处只改基础容量，"
+      + "已用/预占与扩容容量均不清零。";
     field.appendChild(label);
     field.appendChild(input);
     field.appendChild(help);
@@ -1700,23 +1837,56 @@
       setStatus("adm-users-status", text);
     }
 
+    function renderExpansions(items) {
+      expansionList.textContent = "";
+      if (!Array.isArray(items) || !items.length) {
+        var empty = document.createElement("p");
+        empty.className = "adm-status";
+        empty.textContent = "无付费扩容";
+        expansionList.appendChild(empty);
+        return;
+      }
+      items.forEach(function (item) {
+        expansionList.appendChild(renderExpansionItem(item));
+      });
+    }
+
     function renderUsage(res) {
       res = res || {};
       if (res.default_quota_bytes !== null && res.default_quota_bytes !== undefined) {
         defaultBytes = res.default_quota_bytes;
       }
-      usage.textContent = "已用 " + bytesToGbText(res.used_bytes) +
-        " / 上限 " + bytesToGbText(res.quota_bytes) +
-        (res.reserved_bytes ? "（在途预占 " + bytesToGbText(res.reserved_bytes) + "）" : "");
-      input.placeholder = "当前 " + bytesToGbText(res.quota_bytes);
+      var hasBase = res.base_quota_bytes !== null
+        && res.base_quota_bytes !== undefined;
+      var hasExtra = res.extra_quota_bytes !== null
+        && res.extra_quota_bytes !== undefined;
+      var base = hasBase ? res.base_quota_bytes : res.quota_bytes;
+      var usageText = "已用 " + bytesToGbText(res.used_bytes)
+        + " / 有效容量 " + bytesToGbText(res.quota_bytes);
+      if (hasExtra) {
+        usageText += "（基础 " + bytesToGbText(base)
+          + " + 付费扩容 " + bytesToGbText(res.extra_quota_bytes) + "）";
+      } else if (hasBase) {
+        usageText += "（基础 " + bytesToGbText(base) + "）";
+      }
+      if (res.reserved_bytes) {
+        usageText += "（在途预占 " + bytesToGbText(res.reserved_bytes) + "）";
+      }
+      usage.textContent = usageText;
+      input.placeholder = "当前基础 " + bytesToGbText(base);
+      // PUT / restore-default 只回配额行（无 expansions）：保留已加载的
+      // 扩容记录，避免一次保存把只读列表清空。
+      if (Array.isArray(res.expansions)) renderExpansions(res.expansions);
     }
 
     function loadQuota() {
       usage.textContent = "存储用量读取中…";
+      expansionList.textContent = "扩容记录读取中…";
       request("admin.users.storageQuota.get", { user_id: u.user_id })
         .then(renderUsage)
         .catch(function (err) {
           usage.textContent = "存储配额读取失败：" + errText(err);
+          expansionList.textContent = "扩容记录读取失败：" + errText(err);
           showError(err && err.code, err && err.message);
         });
     }
@@ -1727,17 +1897,18 @@
       editorStatus(message);
     }
 
-    var saveBtn = actionBtn("设置存储容量", function () {
+    var saveBtn = actionBtn("设置基础容量", function () {
       var text = (input.value || "").trim();
       var bytes = text ? gbToBytes(text) : null;
       if (!text || bytes === null) {
-        markInvalid("存储上限非法（GB，最多两位小数，范围 0–1024）");
+        markInvalid("基础容量非法（GB，最多两位小数，范围 0–1024）");
         return;
       }
       clearInvalid(input);
       askConfirm($("adm-drawer-confirm"),
-        "确认把 " + identityText(u) + " 的存储上限定为 " + text +
-        " GB（" + bytes + " 字节）？只改上限：已用/预占不清零；"
+        "确认把 " + identityText(u) + " 的基础容量定为 " + text +
+        " GB（" + bytes + " 字节）？有效容量 = 基础容量 + 付费扩容；"
+        + "此处只改基础容量：已用/预占不清零；"
         + "调低到低于已用后，已有文件保留、后续新增上传被拒。",
         function () {
           editorStatus("保存中…");
@@ -1745,8 +1916,12 @@
             user_id: u.user_id,
             quota_bytes: bytes,
           }).then(function (res) {
-            editorStatus("已设置存储上限 " + bytesToGbText(res.quota_bytes)
-              + "（已用/预占保留）");
+            var base = res.base_quota_bytes !== null
+              && res.base_quota_bytes !== undefined
+              ? res.base_quota_bytes : res.quota_bytes;
+            editorStatus("已设置基础容量 " + bytesToGbText(base)
+              + "（有效容量 " + bytesToGbText(res.quota_bytes)
+              + "；已用/预占保留）");
             input.value = "";
             renderUsage(res);
           }).catch(function (err) {
@@ -1756,18 +1931,22 @@
         });
     }, "primary");
 
-    var restoreBtn = actionBtn("恢复默认", function () {
+    var restoreBtn = actionBtn("恢复默认基础容量", function () {
       var defText = defaultBytes === null ? "默认值" : bytesToGbText(defaultBytes);
       askConfirm($("adm-drawer-confirm"),
-        "确认把 " + identityText(u) + " 的存储上限恢复为默认 " + defText +
-        "？已用/预占保留，不会清零。",
+        "确认把 " + identityText(u) + " 的基础容量恢复为默认 " + defText +
+        "？有效容量 = 基础容量 + 付费扩容；已用/预占保留，不会清零。",
         function () {
           editorStatus("保存中…");
           request("admin.users.storageQuota.restoreDefault", {
             user_id: u.user_id,
           }).then(function (res) {
-            editorStatus("已恢复默认存储上限 " + bytesToGbText(res.quota_bytes)
-              + "（已用/预占保留）");
+            var base = res.base_quota_bytes !== null
+              && res.base_quota_bytes !== undefined
+              ? res.base_quota_bytes : res.quota_bytes;
+            editorStatus("已恢复默认基础容量 " + bytesToGbText(base)
+              + "（有效容量 " + bytesToGbText(res.quota_bytes)
+              + "；已用/预占保留）");
             input.value = "";
             renderUsage(res);
           }).catch(function (err) {
@@ -1781,6 +1960,7 @@
     actions.appendChild(restoreBtn);
     wrap.appendChild(title);
     wrap.appendChild(usage);
+    wrap.appendChild(expansionSection);
     wrap.appendChild(field);
     wrap.appendChild(actions);
     wrap.appendChild(statusEl);

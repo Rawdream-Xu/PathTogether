@@ -522,6 +522,31 @@ body {
   margin-top: 14px; padding-top: 10px;
   border-top: 1px dashed var(--separator);
 }
+/* 付费存储扩容记录（2026-11-06，只读）：宽限中整行醒目提示续费失败风险 */
+.adm-expansion-section { margin-top: 10px; }
+.adm-expansion-list {
+  display: flex; flex-direction: column; gap: 8px; margin-top: 8px;
+}
+.adm-expansion-item {
+  border: 1px solid var(--separator); border-radius: 8px;
+  padding: 10px 12px; background: var(--card);
+}
+.adm-expansion-item--grace {
+  border-color: rgba(178, 80, 0, 0.45);
+  background: rgba(178, 80, 0, 0.06);
+}
+.adm-expansion-head {
+  font-size: 14px; font-weight: 600; margin-bottom: 2px;
+}
+.adm-expansion-meta {
+  font-size: 13px; color: var(--text-2); line-height: 1.7;
+}
+.adm-expansion-status { font-weight: 600; }
+.adm-expansion-status--active { color: var(--ok); }
+.adm-expansion-status--grace { color: var(--warn); }
+.adm-expansion-status--ended,
+.adm-expansion-status--unknown { color: var(--text-2); }
+.adm-expansion-error { color: var(--danger); }
 .adm-drawer-actions { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
 .adm-drawer-actions .adm-actions button { text-align: left; }
 /* P0-3：抽屉内页内确认条——固定在抽屉底部（body 内滚动之上），位于

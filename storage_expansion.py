@@ -268,15 +268,21 @@ def _expansion_out(row):
 
 
 def _item(row):
-    """wire 形状（时间 RFC3339 UTC；金额/容量整数；不含内部字段）。"""
+    """wire 形状（时间 RFC3339 UTC；金额/容量整数；不含内部字段）。
+
+    ``unit_bytes`` 供展示「份数 × 每份容量」；``last_renew_error`` 是最近
+    一次续费失败的稳定错误码（成功续费后清空），管理台只读展示。
+    """
     return {
         "expansion_id": row["expansion_id"],
         "units": int(row["units"]),
+        "unit_bytes": int(row["unit_bytes"]),
         "status": row["status"],
         "auto_renew": bool(row["auto_renew"]),
         "period_start": _iso_z(row["period_start"]),
         "period_end": _iso_z(row["period_end"]),
         "grace_until": _iso_z(row["grace_until"]),
+        "last_renew_error": row.get("last_renew_error"),
     }
 
 

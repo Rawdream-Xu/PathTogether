@@ -4415,7 +4415,236 @@ describe("storage quota UI (2026-11-04)", () => {
 		expect(src).toContain('request("admin.users.storageQuota.set"');
 		expect(src).toContain('request("admin.users.storageQuota.restoreDefault"');
 		expect(src).toContain("quota_bytes: bytes");
+		// PUT 只改基础容量：标签/提示/成功文案必须写「基础容量」，并解释
+		// 有效容量 = 基础 + 付费扩容（服务端 quota_bytes 列即基础容量）。
+		expect(src).toContain("基础容量（GB，必填）");
+		expect(src).toContain("有效容量 = 基础容量 + 付费扩容");
+		expect(src).toContain("已设置基础容量");
+		expect(src).toContain("已恢复默认基础容量");
+		expect(src).toContain("付费存储扩容（只读）");
 		// 不再有月额度覆盖等退役入口
 		expect(src).not.toContain("setSpendOverride");
+	});
+});
+
+describe("storage expansion display in user drawer (2026-11-06, 0.4.23)", () => {
+	const NONCE = "sx".repeat(32);
+	const GIB = 1024 ** 3;
+
+	const USER = {
+		user_id: "u-storage", display_name: "扩容用户",
+		login_id_masked: "e***@x.com", role: "user",
+		enabled: true, ai_access: true,
+		spend: {
+			total: {
+				allowance_id: "alw_s", total_limit_nano_cny: "50000000000",
+				spent_nano_cny: "0", reserved_nano_cny: "0",
+				remaining_nano: "50000000000", overage_nano: "0",
+				source: "admin", version: 1,
+			},
+		},
+	};
+
+	function baseBody(overrides: Record<string, unknown> = {}) {
+		return {
+			user_id: USER.user_id, quota_applies: true,
+			base_quota_bytes: 10 * GIB, extra_quota_bytes: 30 * GIB,
+			quota_bytes: 40 * GIB, used_bytes: 5 * GIB,
+			reserved_bytes: 0, remaining_bytes: 35 * GIB,
+			default_quota_bytes: 10 * GIB, min_quota_bytes: 0,
+			max_quota_bytes: 1024 ** 4, expansions: [],
+			...overrides,
+		};
+	}
+
+	function expansion(overrides: Record<string, unknown> = {}) {
+		return {
+			expansion_id: "sxp_" + "a".repeat(24),
+			units: 1, unit_bytes: 10 * GIB, status: "active",
+			auto_renew: true, period_start: "2026-11-06T00:00:00Z",
+			period_end: "2027-11-06T00:00:00Z", grace_until: null,
+			last_renew_error: null,
+			...overrides,
+		};
+	}
+
+	function boot(bus: ReturnType<typeof loadPluginUiWithBus>) {
+		bus.dispatch(bus.parent, {
+			kind: "init", bridge: "admin", protocolVersion: "1.0.0",
+			nonce: NONCE,
+			adminPermissions: ["admin:users:read", "admin:users:write"],
+		});
+		expect(bus.client!.handshakeState().ready).toBe(true);
+	}
+
+	async function openDrawer(bus: ReturnType<typeof loadPluginUiWithBus>) {
+		bus.client!.showPage("users");
+		await ticks(4);
+		replyMethod(bus, NONCE, "admin.users.list", {
+			ok: true, result: { items: [USER], next_cursor: null },
+		});
+		await ticks(4);
+		const detailBtn = bus.created.find((el) => el.textContent === "详情" &&
+			el._listeners && el._listeners.click);
+		expect(detailBtn).toBeTruthy();
+		detailBtn!._fire("click", {});
+		expect(bus.els["adm-user-drawer"].hidden).toBe(false);
+	}
+
+	async function replyStorage(
+		bus: ReturnType<typeof loadPluginUiWithBus>,
+		body: Record<string, unknown>,
+	) {
+		replyMethod(bus, NONCE, "admin.users.storageQuota.get", {
+			ok: true, result: body,
+		});
+		await ticks(4);
+	}
+
+	function drawerText(bus: ReturnType<typeof loadPluginUiWithBus>) {
+		return bus.els["adm-drawer-body"].textContent;
+	}
+
+	it("renders effective = base + extra, active/grace/ended rows, periods and auto-renew", async () => {
+		const bus = loadPluginUiWithBus();
+		boot(bus);
+		await openDrawer(bus);
+		await replyStorage(bus, baseBody({
+			expansions: [
+				expansion(),
+				expansion({
+					expansion_id: "sxp_" + "b".repeat(24),
+					units: 2, status: "grace",
+					auto_renew: true,
+					period_start: "2025-11-06T00:00:00Z",
+					period_end: "2026-11-06T00:00:00Z",
+					grace_until: "2026-11-08T00:00:00Z",
+					last_renew_error: "credits_insufficient (shortfall=25000000000)",
+				}),
+				expansion({
+					expansion_id: "sxp_" + "c".repeat(24),
+					status: "ended", auto_renew: false,
+					period_start: "2024-11-06T00:00:00Z",
+					period_end: "2025-11-06T00:00:00Z",
+				}),
+			],
+		}));
+		const body = drawerText(bus);
+		// 三个数都展示：有效容量 = 基础 + 付费扩容
+		expect(body).toContain(
+			"已用 5 GB / 有效容量 40 GB（基础 10 GB + 付费扩容 30 GB）");
+		// 份数 × 每份容量
+		expect(body).toContain("1 份 · 10 GB");
+		expect(body).toContain("2 份 · 20 GB");
+		// 状态；宽限中显示截止日
+		expect(body).toContain("状态：生效中");
+		expect(body).toContain("状态：宽限中（宽限至 2026-11-08）");
+		expect(body).toContain("状态：已结束");
+		// 当前周期起止 + 自动续费
+		expect(body).toContain("周期：2026-11-06 至 2027-11-06");
+		expect(body).toContain("周期：2025-11-06 至 2026-11-06");
+		expect(body).toContain("自动续费：开启");
+		expect(body).toContain("自动续费：关闭");
+		// 失败原因映射（shortfall 是 credit_units → Credits）
+		expect(body).toContain(
+			"最近一次续费失败：Credits 余额不足（缺口 2500 Credits）");
+		// 宽限行整行醒目样式（CSS/类名）
+		const graceRow = bus.created.find((el) =>
+			String(el.className).includes("adm-expansion-item--grace"));
+		expect(graceRow).toBeTruthy();
+		expect(graceRow!.textContent).toContain("宽限中");
+		// 只读：没有扩容写动作按钮
+		expect(src).not.toContain("storageQuota.expansion");
+	});
+
+	it("shows 无付费扩容 when the user has no expansion records", async () => {
+		const bus = loadPluginUiWithBus();
+		boot(bus);
+		await openDrawer(bus);
+		await replyStorage(bus, baseBody({ expansions: [] }));
+		const body = drawerText(bus);
+		expect(body).toContain("无付费扩容");
+		expect(body).not.toContain("宽限中");
+		expect(body).not.toContain("最近一次续费失败");
+	});
+
+	it("maps known renewal failure codes to Chinese; unknown codes stay verbatim", async () => {
+		const bus = loadPluginUiWithBus();
+		boot(bus);
+		await openDrawer(bus);
+		await replyStorage(bus, baseBody({
+			expansions: [
+				expansion({
+					expansion_id: "sxp_" + "d".repeat(24), status: "grace",
+					grace_until: "2026-11-08T00:00:00Z",
+					last_renew_error: "account_restricted:wallet_not_credits",
+				}),
+				expansion({
+					expansion_id: "sxp_" + "e".repeat(24), status: "grace",
+					grace_until: "2026-11-08T00:00:00Z",
+					last_renew_error: "account_restricted:frozen:manual",
+				}),
+				expansion({
+					expansion_id: "sxp_" + "f".repeat(24), status: "grace",
+					grace_until: "2026-11-08T00:00:00Z",
+					last_renew_error: "future_unknown_error",
+				}),
+			],
+		}));
+		const body = drawerText(bus);
+		expect(body).toContain("最近一次续费失败：账户未启用 Credit 钱包");
+		expect(body).toContain("最近一次续费失败：账户 Credit 已冻结（manual）");
+		expect(body).toContain("最近一次续费失败：future_unknown_error");
+	});
+
+	it("editor labels say base capacity; save confirm/success explain effective capacity", async () => {
+		const bus = loadPluginUiWithBus();
+		boot(bus);
+		await openDrawer(bus);
+		await replyStorage(bus, baseBody({ expansions: [expansion()] }));
+		const label = bus.created.find((el) =>
+			el.htmlFor === "adm-storage-quota-input");
+		expect(label).toBeTruthy();
+		expect(String(label!.textContent)).toContain("基础容量");
+		const input = bus.created.find((el) =>
+			el.id === "adm-storage-quota-input");
+		expect(input!.placeholder).toBe("当前基础 10 GB");
+		input!.value = "15";
+		const saveBtn = bus.created.find((el) =>
+			el.textContent === "设置基础容量" &&
+			el._listeners && el._listeners.click);
+		expect(saveBtn).toBeTruthy();
+		saveBtn!._fire("click", {});
+		const confirm = bus.els["adm-drawer-confirm"];
+		expect(confirm.textContent).toContain("基础容量定为 15 GB");
+		expect(confirm.textContent).toContain("有效容量 = 基础容量 + 付费扩容");
+		const okBtn = bus.created.filter((el) =>
+			el.textContent === "确认执行").at(-1);
+		okBtn!._fire("click", {});
+		await ticks(2);
+		// PUT 只回配额行：没有 expansions 键（与真实服务端一致）
+		const putBody = baseBody({
+			base_quota_bytes: 15 * GIB,
+			quota_bytes: 45 * GIB,
+			remaining_bytes: 40 * GIB,
+		});
+		delete (putBody as { expansions?: unknown }).expansions;
+		replyMethod(bus, NONCE, "admin.users.storageQuota.set", {
+			ok: true, result: putBody,
+		});
+		await ticks(4);
+		const status = bus.created.filter((el) =>
+			String(el.className).includes("adm-status"))
+			.map((el) => el.textContent).join("\n");
+		expect(status).toContain(
+			"已设置基础容量 15 GB（有效容量 45 GB；已用/预占保留）");
+		expect(status).not.toContain("已设置存储上限");
+		// PUT 响应无 expansions：已加载的只读列表保留，不被清空
+		expect(drawerText(bus)).toContain("1 份 · 10 GB");
+	});
+
+	it("grace styling is present in the bundle stylesheet", () => {
+		expect(cssSrc).toContain(".adm-expansion-item--grace");
+		expect(cssSrc).toContain(".adm-expansion-status--grace");
 	});
 });
