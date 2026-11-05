@@ -523,7 +523,7 @@ body {
   border-top: 1px dashed var(--separator);
 }
 /* 付费存储扩容记录（2026-11-06，只读）：宽限中整行醒目提示续费失败风险 */
-.adm-expansion-section { margin-top: 10px; }
+.adm-expansion-section { margin-top: 10px; margin-bottom: 14px; }
 .adm-expansion-list {
   display: flex; flex-direction: column; gap: 8px; margin-top: 8px;
 }
