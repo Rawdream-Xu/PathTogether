@@ -49,6 +49,7 @@ import credit_store
 import pg_store
 import settings_store
 import share_store_pg
+import storage_expansion
 import support_payments
 import user_store
 
@@ -2437,6 +2438,7 @@ def sweep(now=None):
         "refunds_refunded": 0,
         "refund_errors": 0,
         "holds_flagged": 0,
+        "storage_expansions": {},
         "reconcile_ok": None,
         "reconcile_discrepancy_kinds": [],
     }
@@ -2512,6 +2514,11 @@ def sweep(now=None):
             credit_store.scan_expired_credit_holds(now=now).get("flagged", 0))
     except Exception:
         _LOG.exception("credit sweep hold expiry scan failed")
+
+    try:
+        stats["storage_expansions"] = storage_expansion.sweep(now=now)
+    except Exception:
+        _LOG.exception("credit sweep storage expansion failed")
 
     try:
         report = credit_store.reconcile_report(now=now)
