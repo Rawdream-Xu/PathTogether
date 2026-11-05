@@ -250,7 +250,15 @@
               <span id="acct-pop-storage-fill" class="acct-pop-meter-fill"></span>
             </div>
             <div id="acct-pop-storage-detail" class="acct-pop-detail"></div>
+            <div id="acct-pop-storage-extra" class="acct-pop-detail acct-pop-extra" hidden></div>
+            <p id="acct-pop-storage-warn" class="acct-pop-detail acct-storage-warn"
+               role="status" hidden></p>
           </div>
+          {# 付费存储扩容入口（0092）：新标签打开 Credit 页 #storage 锚点；
+             预览态 / owner / 非 credits 账户由 JS 隐藏。 #}
+          <a id="acct-storage-link" class="acct-settings acct-topup-link"
+             href="/app/credits#storage" target="_blank" rel="noopener"
+             data-i18n="acct.storage.expand" hidden>购买存储扩容</a>
           {# Credit 钱包（0088）：credits 账户显示入口；legacy/owner 隐藏。
              文案由 can_topup 决定：「充值 Credit」/「Credit 明细」。
              新标签打开（rel=noopener），不打断当前切片/对话。 #}

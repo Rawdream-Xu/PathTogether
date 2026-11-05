@@ -595,6 +595,8 @@ button {
   word-break: break-word;
 }
 .acct-pop-extra[hidden] { display: none; }
+.acct-storage-warn { color: #d99a3d; }
+.acct-storage-warn[hidden] { display: none; }
 .acct-settings {
   align-self: stretch;
   text-align: left;

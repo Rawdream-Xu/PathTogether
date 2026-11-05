@@ -567,6 +567,100 @@ input:focus-visible {
 }
 .credit-more:hover { border-color: #6a6a6a; color: #fff; }
 
+/* ---------------------------------------------------------------------- */
+/* 存储扩容（0092，2026-11-06）：当前容量 / 份数选择 / 确认框 / 扩容列表   */
+/* ---------------------------------------------------------------------- */
+.credit-storage { margin-top: 42px; }
+.credit-storage-box {
+  margin-top: 14px;
+  padding: 18px 20px;
+  border: 1px solid var(--credit-line);
+  border-radius: 12px;
+  background: var(--credit-panel);
+}
+.credit-storage-current {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+  color: var(--credit-muted);
+  font-size: 13px;
+}
+.credit-storage-current strong {
+  color: var(--credit-text);
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.credit-storage-used { color: var(--credit-muted-2); font-size: 12px; }
+.credit-storage-buy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+}
+.credit-storage-units-label { color: #bbb; font-size: 13px; }
+.credit-storage-units {
+  min-width: 88px;
+  padding: 8px 10px;
+  border: 1px solid var(--credit-line-strong);
+  border-radius: 8px;
+  background: var(--credit-panel-2);
+  color: var(--credit-text);
+}
+.credit-storage-buy-btn {
+  width: auto;
+  min-width: 132px;
+  margin: 0;
+  padding: 10px 18px;
+  font-size: 14px;
+}
+.credit-storage-confirm {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--credit-blue);
+  border-radius: 10px;
+  background: var(--credit-blue-soft);
+}
+.credit-storage-confirm p { color: #dbe9fb; font-size: 13px; }
+.credit-storage-gift { margin-top: 6px; color: #a8c8ec !important; }
+.credit-storage-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+.credit-storage-confirm-actions .credit-pay {
+  width: auto;
+  min-width: 120px;
+  margin: 0;
+  padding: 9px 16px;
+  font-size: 13px;
+}
+.credit-storage-confirm-actions .credit-more { margin: 0; }
+.credit-storage-list { margin: 16px 0 0; padding: 0; list-style: none; }
+.credit-storage-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 0;
+  border-top: 1px solid var(--credit-line);
+}
+.credit-storage-item-size { color: #dedede; font-size: 13px; font-weight: 500; }
+.credit-storage-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--credit-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.credit-storage-toggle input { accent-color: var(--credit-blue); }
+.credit-storage .credit-empty { margin-top: 14px; }
+
 .credit-noscript {
   margin-top: 24px;
   padding: 12px 14px;

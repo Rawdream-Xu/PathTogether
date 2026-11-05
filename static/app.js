@@ -1762,6 +1762,9 @@
     acctPopStorageBar: $("acct-pop-storage-bar"),
     acctPopStorageFill: $("acct-pop-storage-fill"),
     acctPopStorageDetail: $("acct-pop-storage-detail"),
+    acctPopStorageExtra: $("acct-pop-storage-extra"),
+    acctPopStorageWarn: $("acct-pop-storage-warn"),
+    acctStorageLink: $("acct-storage-link"),
     acctSettingsBtn: $("acct-settings-btn"),
   };
 
@@ -14554,9 +14557,11 @@
     }
   }
 
-  // 存储用量（2026-11-04）：与余额同一 popover 打开时拉取；只读自助接口
-  // （/api/account/storage，不接受 user_id）。quota_applies=false（owner）→
-  // 整段隐藏。用量条 fill = (used+reserved)/quota；满盘时提示联系管理员。
+  // 存储用量（2026-11-04；2026-11-06 付费扩容）：与余额同一 popover 打开时
+  // 拉取；只读自助接口（/api/account/storage，不接受 user_id）。
+  // quota_applies=false（owner）→ 整段隐藏。head 值 = 已用 / 有效容量
+  // （基础 + 扩容）；副行显示「含扩容 X」与 grace 警示；扩容入口在
+  // purchase_block_reason 不属于 owner/legacy/preview 时显示。
   function loadAccountStorage() {
     var el = els.acctPopStorage;
     if (!el) return;
@@ -14566,6 +14571,15 @@
     if (els.acctPopStorageDetail) {
       els.acctPopStorageDetail.textContent = t("acct.storage.loading");
     }
+    if (els.acctPopStorageExtra) {
+      els.acctPopStorageExtra.textContent = "";
+      els.acctPopStorageExtra.hidden = true;
+    }
+    if (els.acctPopStorageWarn) {
+      els.acctPopStorageWarn.textContent = "";
+      els.acctPopStorageWarn.hidden = true;
+    }
+    if (els.acctStorageLink) els.acctStorageLink.hidden = true;
     apiFetch("/api/account/storage").then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (body) {
         return { status: r.status, body: body };
@@ -14576,6 +14590,15 @@
         el.hidden = true;
         if (els.acctPopStorageValue) els.acctPopStorageValue.textContent = "";
         if (els.acctPopStorageDetail) els.acctPopStorageDetail.textContent = "";
+        if (els.acctPopStorageExtra) {
+          els.acctPopStorageExtra.textContent = "";
+          els.acctPopStorageExtra.hidden = true;
+        }
+        if (els.acctPopStorageWarn) {
+          els.acctPopStorageWarn.textContent = "";
+          els.acctPopStorageWarn.hidden = true;
+        }
+        if (els.acctStorageLink) els.acctStorageLink.hidden = true;
         acctMeterHide(els.acctPopStorageBar, els.acctPopStorageFill);
         return;
       }
@@ -14614,6 +14637,38 @@
           els.acctPopStorageDetail.textContent = remaining === null ? "" :
             t("acct.storage.remaining", { remaining: remaining });
         }
+      }
+      var extraBytes = Number(data.extra_quota_bytes || 0);
+      if (els.acctPopStorageExtra && extraBytes > 0) {
+        var extraText = storageGbText(extraBytes);
+        if (extraText !== null) {
+          els.acctPopStorageExtra.textContent = t("acct.storage.extra", {
+            extra: extraText,
+          });
+          els.acctPopStorageExtra.hidden = false;
+        }
+      }
+      var expansion = data.expansion || null;
+      var graceItem = null;
+      (expansion && expansion.items || []).forEach(function (item) {
+        if (!graceItem && item.status === "grace") graceItem = item;
+      });
+      if (els.acctPopStorageWarn && graceItem && graceItem.grace_until) {
+        els.acctPopStorageWarn.textContent = t("acct.storage.grace_warn", {
+          date: String(graceItem.grace_until).slice(0, 10),
+        });
+        els.acctPopStorageWarn.hidden = false;
+      }
+      if (els.acctStorageLink) {
+        var reason = expansion && expansion.purchase_block_reason;
+        var blocked = reason === "owner_not_applicable" ||
+          reason === "wallet_not_credits" || reason === "preview_readonly";
+        var preview = !!(data.subject && data.subject.preview);
+        els.acctStorageLink.hidden = !expansion || blocked || preview;
+        if (els.acctStorageLink.setAttribute) {
+          els.acctStorageLink.setAttribute("data-i18n", "acct.storage.expand");
+        }
+        els.acctStorageLink.textContent = t("acct.storage.expand");
       }
       if (!filled) acctMeterHide(els.acctPopStorageBar, els.acctPopStorageFill);
     }).catch(function () {

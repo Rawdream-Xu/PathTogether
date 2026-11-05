@@ -654,6 +654,397 @@
       });
   }
 
+  /* ------------------------------ 存储扩容 ------------------------------ */
+  // 0092：每份 10 GiB / 1,000 Credits / 年，默认自动续费（7 天宽限）。
+  // 服务端 /api/account/storage 的 expansion 块是唯一权威（价格/份数/状态），
+  // 前端只做展示与确认；所有金额仍用 BigInt，容量用 GB 展示（GiB 口径）。
+  var DEFAULT_STORAGE_UNIT_BYTES = 10 * 1024 * 1024 * 1024;
+
+  function formatGb(bytes) {
+    if (bytes === null || bytes === undefined || bytes === "") return null;
+    var n = Number(bytes);
+    if (!isFinite(n) || n < 0) return null;
+    var gib = 1024 * 1024 * 1024;
+    var tenths = Math.round(n * 10 / gib);
+    return (tenths % 10 === 0 ? String(tenths / 10)
+      : (tenths / 10).toFixed(1)) + " GB";
+  }
+
+  function formatDate(iso) {
+    if (!iso) return "—";
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return String(iso);
+    function pad(n) { return (n < 10 ? "0" : "") + n; }
+    return d.getFullYear() + "." + pad(d.getMonth() + 1) + "." +
+      pad(d.getDate());
+  }
+
+  function storageStatusKey(item) {
+    if (!item) return "credit.storage.status.ended";
+    if (item.status === "grace") return "credit.storage.status.grace";
+    if (item.status === "ended") return "credit.storage.status.ended";
+    return "credit.storage.status.active";
+  }
+
+  function storageStatusVars(item) {
+    if (!item) return {};
+    if (item.status === "grace") {
+      return { date: formatDate(item.grace_until) };
+    }
+    return { date: formatDate(item.period_end) };
+  }
+
+  function storageUnitChoices(expansion) {
+    var max = expansion && expansion.max_units ? expansion.max_units : 0;
+    var active = expansion && expansion.active_units
+      ? expansion.active_units : 0;
+    var remaining = Math.max(0, max - active);
+    var choices = [];
+    for (var i = 1; i <= remaining; i++) choices.push(i);
+    return choices;
+  }
+
+  function storagePlan(expansion, units) {
+    var price = null;
+    var size = null;
+    try {
+      price = BigInt(String(expansion.price_units)) * BigInt(units);
+    } catch (e) { price = null; }
+    var unitBytes = Number(expansion.unit_bytes || DEFAULT_STORAGE_UNIT_BYTES);
+    size = unitBytes * Number(units);
+    return { priceUnits: price, sizeBytes: size };
+  }
+
+  function storageBlockedKey(reason) {
+    switch (reason) {
+      case "preview_readonly": return "credit.storage.blocked.preview";
+      case "owner_not_applicable": return "credit.storage.blocked.owner";
+      case "wallet_not_credits": return "credit.storage.blocked.legacy";
+      case "account_restricted": return "credit.storage.blocked.restricted";
+      case "storage_expansion_limit": return "credit.storage.blocked.limit";
+      case "credits_insufficient": return "credit.storage.blocked.credits";
+      default: return "credit.storage.blocked.generic";
+    }
+  }
+
+  function setStorageState(state, body) {
+    state.storageBody = body || null;
+    state.storageData = (body && body.expansion) || null;
+    state.storageError = null;
+  }
+
+  function storageMessage(state, key, vars, kind) {
+    setMessage("credit-storage-message", key ? t(key, vars) : "", kind);
+  }
+
+  function renderStorageConfirm(state) {
+    var box = $("credit-storage-confirm");
+    if (!box) return;
+    var data = state.storageData;
+    var units = state.storagePendingUnits;
+    if (!data || !units) {
+      box.hidden = true;
+      return;
+    }
+    var plan = storagePlan(data, units);
+    var cost = plan.priceUnits === null ? null
+      : formatCreditsWhole(plan.priceUnits.toString());
+    var after = null;
+    if (plan.priceUnits !== null && state.balanceUnits !== null &&
+        state.balanceUnits !== undefined) {
+      var remaining = state.balanceUnits - plan.priceUnits;
+      after = formatCreditsWhole(
+        (remaining < 0n ? 0n : remaining).toString());
+    }
+    setText("credit-storage-confirm-text", t("credit.storage.confirm", {
+      size: formatGb(plan.sizeBytes) || "—",
+      credits: cost === null ? "—" : cost,
+      after: after === null ? "—" : after,
+    }));
+    box.hidden = false;
+  }
+
+  function storageSetBusy(state, busy) {
+    state.storageBusy = !!busy;
+    var buy = $("credit-storage-buy-btn");
+    var confirm = $("credit-storage-confirm-btn");
+    if (buy) buy.disabled = !!busy || !state.storageCanBuy;
+    if (confirm) confirm.disabled = !!busy;
+    var select = $("credit-storage-units");
+    if (select) select.disabled = !!busy;
+  }
+
+  function storageRefreshFrom(state, body) {
+    if (body) setStorageState(state, body);
+    renderStorage(state);
+  }
+
+  function renderStorage(state) {
+    var data = state.storageData;
+    var body = state.storageBody;
+    var section = $("storage");
+    var note = $("credit-storage-price-note");
+    var select = $("credit-storage-units");
+    var list = $("credit-storage-list");
+    if (!list && !select) return;
+    if (section) section.hidden = !!(body && !body.quota_applies);
+
+    if (note && data) {
+      note.textContent = t("credit.storage.price_note", {
+        size: formatGb(data.unit_bytes) || "—",
+        credits: formatCreditsWhole(data.price_units) || "—",
+      });
+    }
+    if (!body || !body.quota_applies || !data) {
+      setHidden("credit-storage-body", true);
+      setHidden("credit-storage-unavailable", false);
+      return;
+    }
+    setHidden("credit-storage-unavailable", true);
+    setHidden("credit-storage-body", false);
+
+    var quotaText = formatGb(body.quota_bytes);
+    setText("credit-storage-current", quotaText === null ? "—" : quotaText);
+    setText("credit-storage-used", quotaText === null ? "" :
+      t("credit.storage.used", {
+        used: formatGb(body.used_bytes) || "—",
+        total: quotaText,
+      }));
+
+    var choices = storageUnitChoices(data);
+    state.storageCanBuy = !!data.can_purchase && choices.length > 0;
+    if (select) {
+      while (select.firstChild) select.removeChild(select.firstChild);
+      for (var i = 0; i < choices.length; i++) {
+        var option = el("option", "", String(choices[i]));
+        option.value = String(choices[i]);
+        select.appendChild(option);
+      }
+      select.hidden = choices.length === 0;
+    }
+    var buy = $("credit-storage-buy-btn");
+    if (buy) buy.hidden = choices.length === 0;
+    var label = $("credit-storage-units-label");
+    if (label) label.hidden = choices.length === 0;
+
+    var atLimit = (data.active_units || 0) >= (data.max_units || 0);
+    setHidden("credit-storage-limit", !atLimit);
+    var blocked = $("credit-storage-blocked");
+    if (blocked) {
+      var reason = data.can_purchase ? null : data.purchase_block_reason;
+      if (reason && reason !== "storage_expansion_limit") {
+        blocked.textContent = t(storageBlockedKey(reason));
+        blocked.hidden = false;
+      } else {
+        blocked.textContent = "";
+        blocked.hidden = true;
+      }
+    }
+
+    if (list) {
+      while (list.firstChild) list.removeChild(list.firstChild);
+      (data.items || []).forEach(function (item) {
+        var li = el("li", "credit-storage-item");
+        var head = el("div", "credit-storage-item-head");
+        head.appendChild(el("strong", "credit-storage-item-size",
+          (formatGb(item.units * data.unit_bytes) || "—") + " · " +
+          t(storageStatusKey(item), storageStatusVars(item))));
+        li.appendChild(head);
+        if (item.status === "active" || item.status === "grace") {
+          var toggle = el("label", "credit-storage-toggle");
+          var input = document.createElement("input");
+          input.type = "checkbox";
+          input.checked = !!item.auto_renew;
+          input.setAttribute("data-expansion-id", item.expansion_id);
+          input.addEventListener("change", function () {
+            setAutoRenew(state, item, input);
+          });
+          toggle.appendChild(input);
+          toggle.appendChild(el("span", "", t("credit.storage.auto_renew")));
+          li.appendChild(toggle);
+        }
+        list.appendChild(li);
+      });
+      setHidden("credit-storage-empty", (data.items || []).length > 0);
+    }
+    storageSetBusy(state, state.storageBusy);
+    if (state.storagePendingUnits) renderStorageConfirm(state);
+  }
+
+  function loadStorage(state) {
+    var list = $("credit-storage-list");
+    if (!list) return;
+    fetch("/api/account/storage", {
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    }).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (body) {
+        return { status: res.status, body: body || {} };
+      });
+    }).then(function (res) {
+      if (res.status === 200 && res.body) {
+        setStorageState(state, res.body);
+        renderStorage(state);
+        return;
+      }
+      setHidden("credit-storage-body", true);
+      setHidden("credit-storage-unavailable", false);
+    }).catch(function () {
+      setHidden("credit-storage-body", true);
+      setHidden("credit-storage-unavailable", false);
+    });
+  }
+
+  function openStorageConfirm(state) {
+    var data = state.storageData;
+    if (!data || !state.storageCanBuy) return;
+    var select = $("credit-storage-units");
+    var units = select ? parseInt(select.value || "1", 10) : 1;
+    if (!units || units < 1) return;
+    state.storagePendingUnits = units;
+    storageMessage(state, null, null, null);
+    renderStorageConfirm(state);
+  }
+
+  function closeStorageConfirm(state) {
+    state.storagePendingUnits = null;
+    state.storageKeys.reset();
+    setHidden("credit-storage-confirm", true);
+  }
+
+  function storageErrorKey(code, status) {
+    if (code === "credits_insufficient") return "credit.storage.error.credits";
+    if (code === "storage_expansion_limit") return "credit.storage.error.limit";
+    if (code === "wallet_not_credits") return "credit.storage.error.legacy";
+    if (code === "account_restricted") return "credit.storage.error.restricted";
+    if (code === "preview_readonly") return "credit.storage.error.preview";
+    if (code === "owner_not_applicable") return "credit.storage.error.owner";
+    if (status === 503) return "credit.storage.error.unavailable";
+    return "credit.storage.error.generic";
+  }
+
+  function purchaseStorage(state) {
+    var units = state.storagePendingUnits;
+    if (!units || state.storageBusy) return;
+    var key = state.storageKeys.forAttempt("storage:" + units);
+    storageSetBusy(state, true);
+    storageMessage(state, "credit.storage.purchasing", null, null);
+    fetch("/api/account/storage/expansions", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "X-CSRF-Token": state.boot.csrf_token,
+        "Idempotency-Key": key,
+      },
+      body: JSON.stringify({ units: units }),
+    }).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (body) {
+        return { status: res.status, body: body || {} };
+      });
+    }).then(function (res) {
+      storageSetBusy(state, false);
+      if (res.status === 200 && res.body && res.body.expansion) {
+        closeStorageConfirm(state);
+        if (res.body.storage) storageRefreshFrom(state, res.body.storage);
+        else loadStorage(state);
+        storageMessage(state, "credit.storage.purchased", {
+          size: formatGb(Number(res.body.expansion.units) *
+            Number((state.storageData || {}).unit_bytes ||
+              DEFAULT_STORAGE_UNIT_BYTES)) || "—",
+        }, "success");
+        loadAccount(state);
+        loadLedger(state, true);
+        return;
+      }
+      var code = res.body && res.body.code;
+      if (code === "credit_idempotency_conflict") state.storageKeys.reset();
+      closeStorageConfirm(state);
+      var vars = null;
+      if (code === "credits_insufficient") {
+        vars = {
+          credits: formatCreditsWhole(
+            String((res.body && res.body.shortfall_units) || 0)) || "—",
+        };
+      }
+      storageMessage(state, storageErrorKey(code, res.status), vars, "error");
+      if (code === "storage_expansion_limit" || code === "credits_insufficient") {
+        loadStorage(state);
+      }
+    }).catch(function () {
+      storageSetBusy(state, false);
+      closeStorageConfirm(state);
+      storageMessage(state, "credit.storage.error.network", null, "error");
+    });
+  }
+
+  function setAutoRenew(state, item, input) {
+    if (state.storageBusy || !item || !item.expansion_id) return;
+    var enabled = !!input.checked;
+    storageSetBusy(state, true);
+    if (input) input.disabled = true;
+    fetch("/api/account/storage/expansions/" +
+      encodeURIComponent(item.expansion_id) + "/auto-renew", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "X-CSRF-Token": state.boot.csrf_token,
+      },
+      body: JSON.stringify({ enabled: enabled }),
+    }).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (body) {
+        return { status: res.status, body: body || {} };
+      });
+    }).then(function (res) {
+      storageSetBusy(state, false);
+      if (res.status === 200 && res.body) {
+        if (input) input.disabled = false;
+        if (res.body.storage) storageRefreshFrom(state, res.body.storage);
+        else loadStorage(state);
+        storageMessage(state,
+          enabled ? "credit.storage.auto_renew.on"
+            : "credit.storage.auto_renew.off", null, "success");
+        return;
+      }
+      if (input) input.checked = !!item.auto_renew;
+      if (input) input.disabled = false;
+      storageMessage(state, "credit.storage.error.toggle", null, "error");
+    }).catch(function () {
+      storageSetBusy(state, false);
+      if (input) {
+        input.checked = !!item.auto_renew;
+        input.disabled = false;
+      }
+      storageMessage(state, "credit.storage.error.network", null, "error");
+    });
+  }
+
+  function initStorage(state) {
+    var note = $("credit-storage-price-note");
+    if (note) {
+      note.textContent = t("credit.storage.price_note", {
+        size: formatGb(DEFAULT_STORAGE_UNIT_BYTES) || "—",
+        credits: "1,000",
+      });
+    }
+    var buy = $("credit-storage-buy-btn");
+    if (buy) buy.addEventListener("click", function () {
+      openStorageConfirm(state);
+    });
+    var confirm = $("credit-storage-confirm-btn");
+    if (confirm) confirm.addEventListener("click", function () {
+      purchaseStorage(state);
+    });
+    var cancel = $("credit-storage-cancel-btn");
+    if (cancel) cancel.addEventListener("click", function () {
+      closeStorageConfirm(state);
+    });
+    loadStorage(state);
+  }
+
   /* ------------------------------ 订单结果页 ---------------------------- */
   function orderDetailText(order) {
     var key = orderStateKey(order);
@@ -827,6 +1218,13 @@
       ledgerCursor: null,
       ledgerLoading: false,
       ledgerUnavailable: false,
+      storageBody: null,
+      storageData: null,
+      storageError: null,
+      storageCanBuy: false,
+      storageBusy: false,
+      storagePendingUnits: null,
+      storageKeys: new AttemptKeys(window.crypto || null),
     };
   }
 
@@ -843,6 +1241,7 @@
       else if (state.orderUnavailable) setOrderUnavailable(state);
       renderTopups(state);
       renderLedger(state);
+      renderStorage(state);
       setBusy(state, state.busy);
     });
   }
@@ -876,6 +1275,7 @@
       });
     }
     updateCheckout(state);
+    initStorage(state);
     loadTopups(state, true);
     loadLedger(state, true);
   }
@@ -907,6 +1307,13 @@
     isAllowedPayUrl: isAllowedPayUrl,
     generateKey: generateKey,
     AttemptKeys: AttemptKeys,
+    formatGb: formatGb,
+    formatDate: formatDate,
+    storageStatusKey: storageStatusKey,
+    storageStatusVars: storageStatusVars,
+    storageUnitChoices: storageUnitChoices,
+    storagePlan: storagePlan,
+    storageBlockedKey: storageBlockedKey,
   };
 
   if (document.readyState === "loading") {
