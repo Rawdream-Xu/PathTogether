@@ -2480,7 +2480,8 @@ describe("上传行按钮（§6.3 是按钮全集的唯一权威）", () => {
 			appSrc.indexOf("uploadFileCos(file, row, {"),
 			appSrc.indexOf("uploadFileCos(file, row, {") + 900);
 		expect(callSite).toContain("assocTarget: opts.assocTarget");
-		expect(callSite).toContain("directClass: cls ? (cls.directClass || null) : null");
+		expect(callSite).toContain("directClass: rasterFallback ? \"legacy-direct\"");
+		expect(callSite).toContain("cls ? (cls.directClass || null) : null");
 	});
 
 	it("面板 entry → row 适配器（setStage / markError / _row）", () => {

@@ -107,6 +107,7 @@ const COS_CAPS = {
 	// 的词表项，掩盖了 zip 携带 direct_class 的回归。
 	formats: ["svs", "tif", "tiff", "ndpi", "vms", "vmu", "scn", "bif",
 		"svslide", "bmp", "jpg", "jpeg", "zip"],
+	direct_upload: { formats: ["tif", "tiff", "ndpi", "vms", "vmu", "scn", "bif", "svslide", "bmp", "jpg", "jpeg"] },
 };
 
 function loadApp(caps: unknown, openImpl?: () => unknown) {
@@ -206,6 +207,27 @@ function fakeFile(name: string, bytes: Uint8Array) {
 }
 
 describe("工作台直传分流（阶段 1）", () => {
+	it("转换器不可用时，已开放直传的基线 JPEG 保留原文件并声明 legacy-direct", async () => {
+		const h = loadApp({ cos_upload: COS_CAPS });
+		// Baseline SOF0, three components: the real header classifier chooses convert.
+		const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0xc0, 0, 8, 8, 0, 1, 0, 1, 3, 0xff, 0xd9]);
+		h.up.uploadFile(fakeFile("sample.jpg", jpeg));
+		await flush(12);
+		const create = fetchCalls(h).find(c => c.url === "/api/ingestions" && c.method === "POST");
+		expect(create).toBeTruthy();
+		const body = JSON.parse(String(create!.opts!.body));
+		expect(body.filename).toBe("sample.jpg");
+		expect(body.direct_class).toBe("legacy-direct");
+	});
+
+	it("服务端没有开放 JPEG 直传时，转换器不可用仍不创建任务", async () => {
+		const h = loadApp({ cos_upload: { ...COS_CAPS, direct_upload: { formats: ["tif"] } } });
+		const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0xc0, 0, 8, 8, 0, 1, 0, 1, 3, 0xff, 0xd9]);
+		h.up.uploadFile(fakeFile("sample.jpg", jpeg));
+		await flush(12);
+		expect(fetchCalls(h).filter(c => c.url === "/api/ingestions")).toHaveLength(0);
+	});
+
 	it("OME-TIFF → 立即创建 ingestion，创建体携带 direct_class=ome-tiff", async () => {
 		const h = loadApp({ cos_upload: COS_CAPS });
 		const ome = '<?xml version="1.0"?><OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06"></OME>\x00';

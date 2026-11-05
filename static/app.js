@@ -10633,7 +10633,9 @@
     }
     // 需要本机转换（KFB/KFBF/JPEG SVS/MRXS 成员）→ 面板内转换；面板不可用
     //（开关关闭/引擎初始化失败）时行内说明 + 重试，绝不跳转换器页面
-    if (cls && cls.cls === "convert") {
+    var rasterFallback = !!(cls && cls.cls === "convert" &&
+                            canDirectUploadRaster(file));
+    if (cls && cls.cls === "convert" && !rasterFallback) {
       convertNeededUnavailable(file, file && file.name,
         function () { uploadFile(file, opts); }, row);
       return;
@@ -10671,7 +10673,8 @@
       // 直传类携带 direct_class 声明（ome-tiff/converter-bigtiff/
       // legacy-direct/unconverted-variant:svs-jp2k；服务端词表校验 + worker
       // 头级核验）
-      directClass: cls ? (cls.directClass || null) : null,
+      directClass: rasterFallback ? "legacy-direct" :
+        (cls ? (cls.directClass || null) : null),
       // 复核（设计 §3.5 / 第四轮复审 A1）：**必须把冻结的目标快照转发下去**。
       // 此前这里的字面量不含该键，uploadFileCos 内的
       // `fbUpAssocSave(jobId, opts.assocTarget)`（:10789 区）被其守卫吞掉、
@@ -10761,6 +10764,21 @@
     var name = file.name || "";
     var ext = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
     return COS_UPLOAD_CONFIG.formats.indexOf(ext) >= 0;
+  }
+
+  // When the browser converter is unavailable, the server's existing raster
+  // reader can accept ordinary images directly. Require its advertised direct
+  // capability as well as the normal size/format gate; all other conversion
+  // inputs remain on the existing refusal path. The uploader still verifies
+  // the file header and the server performs full decode and pixel-limit checks.
+  function canDirectUploadRaster(file) {
+    if (!file || !/\.(?:jpe?g|bmp)$/i.test(file.name || "") ||
+        !cosUploadEligible(file)) return false;
+    var caps = window.HP_APP_BOOTSTRAP && window.HP_APP_BOOTSTRAP.capabilities;
+    var direct = caps && caps.cos_upload && caps.cos_upload.direct_upload;
+    var ext = file.name.slice(file.name.lastIndexOf(".") + 1).toLowerCase();
+    return !!(direct && Array.isArray(direct.formats) &&
+              direct.formats.indexOf(ext) >= 0);
   }
 
   function cosIneligibleReason(file) {
