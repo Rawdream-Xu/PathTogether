@@ -92,8 +92,18 @@ python credit_payments.py reconcile        # 或等 sweep 摘要
   `owner-plan` 显示 `already_migrated`，`owner-apply` 不重复发放、不覆盖
   管理员调过的容量。
 - 只迁 `role=owner`；`--user-id` 缺省表示全部 owner。
+- **已用量补记**：owner 历史上配额豁免，名下切片从未计入 `used_bytes`。
+  `owner-plan` 会按「`owner_user_id=owner` 且 `asset_state NOT IN
+  ('deleted','deleting','staging')` 的 `slides.accounted_bytes` 合计」输出
+  `rows[].used_bytes` / `accounted_slides` / `unaccounted_slides`（及
+  `usage` 汇总），并**纳入 plan hash**；`owner-apply` 在同一事务内锁住这些
+  切片行重算后写入新配额行（与 plan 值不符 → `changed_since_plan`；plan
+  之后有新切片发布/删除 → hash 不符整体中止，重新 plan 即可）。配额行已
+  存在时**不覆盖**（幂等，管理员改过的值保持）。
 - 验收断言：迁移后 `verify.ok=true` 且 `reconcile.ok=true`；配额行
-  `quota_bytes=1 TiB`（`1099511627776`）且 `used_bytes << quota_bytes`。
+  `quota_bytes=1 TiB`（`1099511627776`），`used_bytes` 等于 plan 的
+  `used_bytes`（生产预期约 2.85 GB：15 张切片中 11 张有
+  `accounted_bytes`），且 `used_bytes << quota_bytes`。
 - 迁移不换算旧月窗口余额（窗口 spent/limit 原样保留在快照
   `credit_migration.legacy_window` 里，只作历史记录）。
 - 管理员后台：用户详情抽屉对已迁移 owner 显示「账务后端 = Credit 钱包」与

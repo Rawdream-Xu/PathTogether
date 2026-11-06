@@ -199,8 +199,13 @@ def test_owner_plan_is_read_only_and_reports_ready_owner():
     assert row["grant_credits"] == 100_000
     assert row["grant_units"] == 100_000 * CREDIT
     assert row["quota"] is None
+    assert row["used_bytes"] == 0
+    assert row["accounted_slides"] == 0
+    assert row["unaccounted_slides"] == 0
     assert row["quota_ok"] is True
     assert plan["quota_ok"] is True
+    assert plan["usage"] == {"used_bytes": 0, "accounted_slides": 0,
+                             "unaccounted_slides": 0}
     # 只读：不建账户、不建批次、不建配额行
     assert _account(owner) is None
     assert _quota_row(owner["user_id"]) is None
@@ -635,3 +640,102 @@ def test_owner_can_create_topup_order(topup_env, monkeypatch):
     assert result["order"]["payment_state"] == "paying"
     assert result["order"]["credits"] == package["credits"]
     assert result["pay_url"] == "https://pay.example.test/owner-order"
+
+
+def _seed_owner_slides(owner_id, specs):
+    """直接种 owner 名下切片（slide_id, asset_state, accounted_bytes）。"""
+    conn = ch.connect()
+    try:
+        with ch.tx(conn) as cur:
+            for slide_id, state, accounted in specs:
+                cur.execute(
+                    "INSERT INTO slides (slide_id, legacy_filename, "
+                    "owner_user_id, asset_state, accounted_bytes) "
+                    "VALUES (%s,%s,%s,%s,%s)",
+                    (slide_id, slide_id + ".svs", owner_id, state, accounted))
+    finally:
+        conn.close()
+
+
+def test_owner_migration_backfills_used_bytes_from_slides():
+    """owner 迁移把历史切片计入 used_bytes（与用户同一口径）。
+
+    口径：`owner_user_id = owner` 且 `asset_state NOT IN
+    ('deleted','deleting','staging')` 的 `accounted_bytes` 合计；NULL 无账
+    切片只计数不贡献字节。plan 输出该值（并入 hash），apply 建行时写入；
+    既有行不覆盖；重跑幂等。
+    """
+    _seed_prices()
+    owner = _owner()
+    uid = owner["user_id"]
+    gb = 1024 ** 3
+    expected_used = 1 * gb + 512 * 1024 ** 2 + 256 * 1024 ** 2
+    _seed_owner_slides(uid, [
+        ("sld_op_ready1", "ready", 1 * gb),
+        ("sld_op_ready2", "ready", 512 * 1024 ** 2),
+        ("sld_op_legacy", "legacy", 256 * 1024 ** 2),   # legacy 也计入
+        ("sld_op_deleted", "deleted", 9 * gb),
+        ("sld_op_deleting", "deleting", 9 * gb),
+        ("sld_op_staging", "staging", 9 * gb),
+        ("sld_op_null", "ready", None),
+    ])
+
+    plan = _plan(owner)
+    row = plan["rows"][0]
+    assert row["used_bytes"] == expected_used
+    assert row["accounted_slides"] == 3
+    assert row["unaccounted_slides"] == 1
+    assert row["total_slides"] == 4          # 排除 deleted/deleting/staging
+    assert row["quota_ok"] is True
+    assert plan["usage"]["used_bytes"] == expected_used
+    assert plan["usage"]["accounted_slides"] == 3
+    assert plan["usage"]["unaccounted_slides"] == 1
+
+    # plan 之后新增切片 → 已用量进入 hash（漂移可见）
+    _seed_owner_slides(uid, [("sld_op_extra", "ready", 1)])
+    drifted = _plan(owner)
+    assert drifted["rows"][0]["used_bytes"] == expected_used + 1
+    assert drifted["plan_hash"] != plan["plan_hash"]
+
+    # 旧 hash apply → 整体中止，不写账户/配额行
+    _set_maintenance(True)
+    try:
+        stale = credit_migration.owner_apply(
+            plan["plan_hash"], actor_user_id=uid, user_id=uid)
+    finally:
+        _set_maintenance(False)
+    assert stale["aborted"] == "hash_mismatch"
+    assert _account(owner) is None
+    assert _quota_row(uid) is None
+
+    # 新 hash apply → used_bytes 只计入有效切片
+    _set_maintenance(True)
+    try:
+        report = credit_migration.owner_apply(
+            drifted["plan_hash"], actor_user_id=uid, user_id=uid)
+    finally:
+        _set_maintenance(False)
+    assert report["ok"] is True, report
+    result = report["results"][0]
+    assert result["result"] == "migrated"
+    assert result["used_bytes"] == expected_used + 1
+    assert result["quota_action"] == "created"
+    quota = _quota_row(uid)
+    assert quota["quota_bytes"] == TiB
+    assert quota["used_bytes"] == expected_used + 1
+
+    # 重跑幂等：行已存在不覆盖（即使之后又新增了切片）
+    _seed_owner_slides(uid, [("sld_op_after", "ready", 5 * gb)])
+    again = _plan(owner)
+    assert again["counts"]["already_migrated"] == 1
+    _set_maintenance(True)
+    try:
+        second = credit_migration.owner_apply(
+            again["plan_hash"], actor_user_id=uid, user_id=uid)
+    finally:
+        _set_maintenance(False)
+    assert second["ok"] is True, second
+    assert second["summary"]["already_migrated"] == 1
+    assert second["results"][0]["quota_action"] == "existing"
+    assert second["results"][0]["quota_used_bytes"] == expected_used + 1
+    assert _quota_row(uid)["used_bytes"] == expected_used + 1

@@ -76,6 +76,10 @@ OWNER_MIGRATION_SOURCE = "owner_parity_v1"
 OWNER_MIGRATION_AUDIT_ACTION = "credit.owner_migrated"
 #: owner 基础存储容量（1 TiB；行不存在时建行，不改 env 默认 10 GiB）
 OWNER_BASE_QUOTA_BYTES = 1024 ** 4
+#: 计入 owner 已用量（used_bytes）的切片状态过滤：迁移口径与普通用户一致，
+#: 排除已删除 / 删除中 / 暂存（staging）资产；`accounted_bytes` 为 NULL 的
+#: 无账历史切片计入 `unaccounted_slides`，但不贡献字节。
+OWNER_USAGE_EXCLUDED_ASSET_STATES = ("deleted", "deleting", "staging")
 #: owner 迁移赠送原因文案（流水 reason）
 OWNER_GRANT_REASON = "owner parity migration grant"
 #: owner plan 状态词表（顺序即报告顺序）
@@ -803,6 +807,45 @@ def _owner_window_snapshot_tx(cur, user_id):
     return out
 
 
+def _owner_usage_tx(cur, user_id, *, lock=False):
+    """owner 名下有效切片的已用量汇总 → dict（迁移写 used_bytes 的唯一口径）。
+
+    范围：``owner_user_id = <owner>`` 且 ``asset_state`` 不在
+    :data:`OWNER_USAGE_EXCLUDED_ASSET_STATES`（排除已删除/删除中/暂存）。
+    返回 ``used_bytes``（``accounted_bytes`` 合计，NULL 计 0）、
+    ``accounted_slides``（有账切片数）、``unaccounted_slides``（无
+    ``accounted_bytes`` 的历史切片数）与 ``total_slides``。
+
+    ``lock=True`` 时先按 ``slide_id`` 顺序 ``FOR UPDATE`` 锁住这些切片行
+    （与发布/删除结算同锁序），保证迁移写入 used_bytes 期间没有并发结算
+    造成重复或漏计。
+    """
+    excluded = list(OWNER_USAGE_EXCLUDED_ASSET_STATES)
+    if lock:
+        cur.execute(
+            "SELECT slide_id FROM slides "
+            " WHERE owner_user_id=%s AND NOT (asset_state = ANY(%s)) "
+            " ORDER BY slide_id FOR UPDATE", (user_id, excluded))
+        cur.fetchall()
+    cur.execute(
+        "SELECT COALESCE(SUM(accounted_bytes), 0)::bigint AS used_bytes, "
+        "       COUNT(*) FILTER (WHERE accounted_bytes IS NOT NULL)::bigint "
+        "         AS accounted_slides, "
+        "       COUNT(*) FILTER (WHERE accounted_bytes IS NULL)::bigint "
+        "         AS unaccounted_slides, "
+        "       COUNT(*)::bigint AS total_slides "
+        "  FROM slides "
+        " WHERE owner_user_id=%s AND NOT (asset_state = ANY(%s))",
+        (user_id, excluded))
+    row = cur.fetchone()
+    return {
+        "used_bytes": int(row["used_bytes"]),
+        "accounted_slides": int(row["accounted_slides"]),
+        "unaccounted_slides": int(row["unaccounted_slides"]),
+        "total_slides": int(row["total_slides"]),
+    }
+
+
 def _owner_quota_tx(cur, user_id):
     """owner 存储配额行（不存在 → None；只读不建行）。"""
     cur.execute(
@@ -827,6 +870,7 @@ def _owner_plan_row_tx(cur, user, *, credits):
         user_id)
     quota = _owner_quota_tx(cur, user_id)
     window = _owner_window_snapshot_tx(cur, user_id)
+    usage = _owner_usage_tx(cur, user_id)
     if (user.get("role") or "") != "owner":
         status = "not_owner"
     elif backend == credit_store.BACKEND_CREDITS:
@@ -850,17 +894,29 @@ def _owner_plan_row_tx(cur, user, *, credits):
                                  if lot is not None else None),
         "legacy_window": window,
         "quota": quota,
-        # 验收断言：owner 已用量必须远低于 1 TiB 基础容量。无配额行时视为
-        # 0（迁移会按 1 TiB 建行）；有行时 used+reserved 必须装得下。
-        "quota_ok": (True if quota is None
-                     else quota["used_bytes"] + quota["reserved_bytes"]
-                     <= quota["quota_bytes"]),
+        # 迁移将要写入的已用量（新行）或既有行已记录值（不覆盖）：口径见
+        # _owner_usage_tx（排除 deleted/deleting/staging；NULL 无账不计字节）。
+        "used_bytes": usage["used_bytes"],
+        "accounted_slides": usage["accounted_slides"],
+        "unaccounted_slides": usage["unaccounted_slides"],
+        "total_slides": usage["total_slides"],
+        # 验收断言：owner 已用量必须远低于 1 TiB 基础容量。无配额行时按
+        # 即将写入的 used_bytes 判定；有行时 used+reserved 必须装得下。
+        "quota_ok": (
+            (usage["used_bytes"] <= OWNER_BASE_QUOTA_BYTES)
+            if quota is None
+            else quota["used_bytes"] + quota["reserved_bytes"]
+            <= quota["quota_bytes"]),
         "status": status,
     }
 
 
 def owner_plan_hash(rows, *, credits):
-    """owner plan 的 canonical SHA-256（含 credits 参数，防止换额度重放）。"""
+    """owner plan 的 canonical SHA-256（含 credits 参数与已用量口径）。
+
+    ``used_bytes`` / ``accounted_slides`` / ``unaccounted_slides`` 入 hash：
+    plan 之后若有切片发布/删除/结算，apply 会因 hash 不符中止（漂移可见）。
+    """
     ordered = sorted(rows, key=lambda row: row["user_id"])
     payload = [
         [
@@ -869,6 +925,9 @@ def owner_plan_hash(rows, *, credits):
             row["billing_backend"],
             row["existing_grant_units"],
             row["grant_units"],
+            row["used_bytes"],
+            row["accounted_slides"],
+            row["unaccounted_slides"],
             row["status"],
             int(credits),
         ]
@@ -889,19 +948,37 @@ def _owner_plan_payload_tx(cur, *, user_id, credits):
     counts = {status: 0 for status in OWNER_PLAN_STATUSES}
     for row in rows:
         counts[row["status"]] = counts.get(row["status"], 0) + 1
+    migrating = [row for row in rows
+                 if row["status"] in ("ready", "already_migrated")]
     return {
         "rows": rows,
         "counts": counts,
         "credits": int(credits),
         "grant_units": sum(row["grant_units"] for row in rows
                            if row["status"] == "ready"),
+        # 将要写入（或缺失行将补建）的已用量汇总（额度行口径见
+        # _owner_usage_tx；只统计会被处理的 owner）。
+        "usage": {
+            "used_bytes": sum(row["used_bytes"] for row in migrating),
+            "accounted_slides": sum(row["accounted_slides"]
+                                    for row in migrating),
+            "unaccounted_slides": sum(row["unaccounted_slides"]
+                                      for row in migrating),
+        },
         "quota_ok": all(row["quota_ok"] for row in rows),
         "plan_hash": owner_plan_hash(rows, credits=credits),
     }
 
 
 def owner_plan(*, user_id=None, credits=OWNER_GRANT_CREDITS):
-    """只读盘点 owner 迁移计划（dry-run 用；不写任何行）。"""
+    """只读盘点 owner 迁移计划（dry-run 用；不写任何行）。
+
+    每行带将要写入配额行的 ``used_bytes``（owner 名下
+    ``asset_state NOT IN ('deleted','deleting','staging')`` 切片的
+    ``accounted_bytes`` 合计）、``accounted_slides`` / ``unaccounted_slides``
+    计数与 ``total_slides``；这三项已纳入 plan hash，plan 之后发生切片
+    发布/删除会让 apply 以 hash 不符中止（漂移可见）。
+    """
     credits = _require_credits_amount(credits)
     if user_id is not None:
         user_id = _require_text(user_id, "user_id")
@@ -917,15 +994,18 @@ def owner_plan(*, user_id=None, credits=OWNER_GRANT_CREDITS):
         conn.close()
 
 
-def _ensure_owner_quota_row_tx(cur, user_id):
+def _ensure_owner_quota_row_tx(cur, user_id, *, used_bytes=0):
     """owner 基础容量行（1 TiB）：仅在不存在时创建 → ``"created"|"existing"``。
 
-    管理员已调整过的行不被覆盖（幂等）；env 默认值保持 10 GiB 不变。
+    新行同时写入 ``used_bytes``（owner 历史上配额豁免，名下切片从未记账；
+    迁移按 ``slides.accounted_bytes`` 汇总补记，见 :func:`_owner_usage_tx`）。
+    管理员/既有行一律不覆盖（幂等）；env 默认值保持 10 GiB 不变。
     """
     cur.execute(
-        "INSERT INTO upload_user_quotas (user_id, quota_bytes) "
-        "VALUES (%s, %s) ON CONFLICT (user_id) DO NOTHING RETURNING user_id",
-        (user_id, OWNER_BASE_QUOTA_BYTES))
+        "INSERT INTO upload_user_quotas (user_id, quota_bytes, used_bytes) "
+        "VALUES (%s, %s, %s) ON CONFLICT (user_id) DO NOTHING "
+        "RETURNING user_id",
+        (user_id, OWNER_BASE_QUOTA_BYTES, int(used_bytes)))
     created = cur.fetchone() is not None
     return "created" if created else "existing"
 
@@ -935,21 +1015,37 @@ def _owner_apply_one(conn, row, expected_hash, actor_user_id, credits):
     user_id = row["user_id"]
     grant_units = int(row["grant_units"])
     credits = int(credits)
+    expected_used = int(row["used_bytes"])
 
     def run(cur):
         account = credit_store.get_account_by_user_tx(cur, user_id)
         if account is not None:
             account = credit_store.lock_account_tx(
                 cur, account["account_id"])
+        # 已用量必须在写配额行之前、同事务内重算：迁移后 used_bytes 就是
+        # 存储条口径，不能停在 0。先按 slide_id 顺序锁切片行，避免与并发
+        # 发布/删除结算重复或漏计；与 plan 值不一致 → changed_since_plan。
+        usage = _owner_usage_tx(cur, user_id, lock=True)
+        if usage["used_bytes"] != expected_used:
+            return {"result": "changed_since_plan",
+                    "reason": "usage_changed"}
+
         if account is not None \
                 and account["billing_backend"] == credit_store.BACKEND_CREDITS:
             lot = _owner_grant_lot_tx(cur, account["account_id"], user_id)
             if lot is not None and int(lot["issued_units"]) == grant_units:
+                quota_action = _ensure_owner_quota_row_tx(
+                    cur, user_id, used_bytes=usage["used_bytes"])
+                stored = _owner_quota_tx(cur, user_id) or {}
                 return {"result": "already_migrated",
                         "account_id": account["account_id"],
                         "grant_units": grant_units,
-                        "quota_action": _ensure_owner_quota_row_tx(
-                            cur, user_id)}
+                        "used_bytes": usage["used_bytes"],
+                        "accounted_slides": usage["accounted_slides"],
+                        "unaccounted_slides": usage["unaccounted_slides"],
+                        "quota_action": quota_action,
+                        "quota_used_bytes": stored.get("used_bytes"),
+                        "quota_bytes": stored.get("quota_bytes")}
             return {"result": "changed_since_plan",
                     "reason": "credits_without_matching_grant"}
 
@@ -991,7 +1087,9 @@ def _owner_apply_one(conn, row, expected_hash, actor_user_id, credits):
             source_key=OWNER_SOURCE_KEY_TEMPLATE % user_id,
             reason=OWNER_GRANT_REASON, kind="promotional",
             actor_user_id=actor_user_id, migration=migration)
-        quota_action = _ensure_owner_quota_row_tx(cur, user_id)
+        quota_action = _ensure_owner_quota_row_tx(
+            cur, user_id, used_bytes=usage["used_bytes"])
+        stored = _owner_quota_tx(cur, user_id) or {}
         share_store_pg.record_audit_tx(
             cur, OWNER_MIGRATION_AUDIT_ACTION,
             actor_user_id=actor_user_id, actor_role="owner",
@@ -1003,6 +1101,9 @@ def _owner_apply_one(conn, row, expected_hash, actor_user_id, credits):
                 "legacy_ledger_sum_nano": legacy_sum,
                 "legacy_ledger_count": legacy_count,
                 "quota_action": quota_action,
+                "used_bytes": usage["used_bytes"],
+                "accounted_slides": usage["accounted_slides"],
+                "unaccounted_slides": usage["unaccounted_slides"],
                 "plan_hash": expected_hash,
             })
         return {
@@ -1012,6 +1113,11 @@ def _owner_apply_one(conn, row, expected_hash, actor_user_id, credits):
             "legacy_ledger_sum_nano": legacy_sum,
             "legacy_ledger_count": legacy_count,
             "quota_action": quota_action,
+            "used_bytes": usage["used_bytes"],
+            "accounted_slides": usage["accounted_slides"],
+            "unaccounted_slides": usage["unaccounted_slides"],
+            "quota_used_bytes": stored.get("used_bytes"),
+            "quota_bytes": stored.get("quota_bytes"),
         }
 
     with pg_store.transaction(conn) as c:
@@ -1029,10 +1135,12 @@ def owner_apply(expected_hash, *, actor_user_id, user_id=None,
       2. 重算 owner plan 的 hash == ``expected_hash``。
 
     ``dry_run=True`` 时维护闸不参与判定（不写任何行），只返回 plan 预览。
-    每个 owner 独立事务：锁账户 → 记录旧 ledger/窗口快照 → 切 credits +
-    发行 100,000 Credits promotional 批次（source_key
-    ``owner-promotional:<user_id>:v1``）→ 建 1 TiB 基础容量行（仅当缺失）→
-    audit。finally 附 ``credit_store.reconcile_report`` 摘要。
+    每个 owner 独立事务：锁账户 → **锁 owner 名下有效切片并重算
+    used_bytes**（与 plan 值不符 → ``changed_since_plan``）→ 记录旧
+    ledger/窗口快照 → 切 credits + 发行 100,000 Credits promotional 批次
+    （source_key ``owner-promotional:<user_id>:v1``）→ 建 1 TiB 基础容量行
+    并写入该 `used_bytes`（仅当缺失；既有行不覆盖）→ audit。finally 附
+    ``credit_store.reconcile_report`` 摘要。
 
     回滚：0088 的 ``billing_accounts_backend_guard`` 明确禁止 credits →
     legacy（一次性迁移）；回滚按运维文档执行——停 AI 派发、确认没有 credits
@@ -1081,14 +1189,7 @@ def owner_apply(expected_hash, *, actor_user_id, user_id=None,
             results = []
             for row in plan_payload["rows"]:
                 status = row["status"]
-                if status == "already_migrated":
-                    results.append({
-                        "user_id": row["user_id"], "status": status,
-                        "result": "already_migrated",
-                        "grant_units": row["grant_units"],
-                    })
-                    continue
-                if status != "ready":
+                if status not in ("ready", "already_migrated"):
                     results.append({
                         "user_id": row["user_id"], "status": status,
                         "result": "skipped",
