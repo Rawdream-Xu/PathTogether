@@ -32,16 +32,82 @@
 ### 1.3 业务开关边界
 
 - 新充值默认关闭（`CREDIT_TOPUP_ENABLED` 未设即关）；只有显式打开并完成
-  方案 §9.2 第 7 步验证后才对外开放。
-- owner 保持月窗口预算、demo 保持匿名周窗口；只有 `role=user` 且账户
-  `billing_backend='credits'` 走钱包。
+  方案 §9.2 第 7 步验证后才对外开放。2026-11-06 起生产打开（对所有
+  Credit 账户开放，含 owner，见 §1.4）。
+- owner 执行 §1.4 的迁移后：账户 `billing_backend='credits'`，AI 预占/
+  扣费走钱包，存储受配额约束（迁移建 1 TiB 基础容量行），并可充值/购买
+  扩容——与普通用户完全一致。**未迁移的 owner 仍保持月窗口预算**
+  （`owner_month_window`），用于兼容与回滚前状态。
+- demo 保持匿名周窗口。
 - 账户冻结（`credit_frozen_reason`）只禁止新消费，不阻止已付款入账、退款与
   对账。
 - **HistoPilot 必须设置 `BILLING_HOLDS_ENABLED=true`**：PathTogether 对
-  credits 用户派发时在 `config.billing_subject.billing_backend` 写入
-  `"credits"`，HistoPilot 据此强制每次调用先拿到有效 hold；关闭 hold 客户端
-  或授权失败时 Credit 运行 **fail-closed（不调用模型）**，不会产生无授权
-  消费。legacy/owner/demo 不受此开关影响。
+  credits 主体（user **或已迁移的 owner**）派发时在
+  `config.billing_subject.billing_backend` 写入 `"credits"`，HistoPilot
+  据此强制每次调用先拿到有效 hold；关闭 hold 客户端或授权失败时 Credit
+  运行 **fail-closed（不调用模型）**，不会产生无授权消费。legacy/demo
+  不受此开关影响。
+
+### 1.4 owner 迁移到 Credit 钱包（2026-11-06 owner parity）
+
+生产配置（发布脚本注入，进程级）：
+
+| 变量 | 值 |
+|---|---|
+| `CREDIT_TOPUP_ENABLED` | `1` |
+| `CREDIT_ALIPAY_NOTIFY_URL` | `https://histopilot.cn/payments/alipay/credit-notify` |
+| `SUPPORT_ALIPAY_PAY_MODE` | `production`（沿用赞助支付；证书/app_id 复用 `SUPPORT_ALIPAY_PAY_*` 四项） |
+
+`topup_availability()` 在以下全部满足时返回 `{"enabled": true}`：
+`CREDIT_TOPUP_ENABLED` 为真、模式解析为 `production`、
+`support_payments.runtime_ready("production")` 成功（app id / seller pid /
+两个密钥文件）、`platform_settings.credit_topup_paused` 不为真。本地验证：
+`python -m pytest tests/test_owner_parity.py -k production_env -q`。
+
+**迁移步骤**（owner 迁移实现于 `credit_migration` 模块，镜像自带；CLI 为
+`scripts/migrate_credit_wallets.py`）：
+
+```bash
+# 1) dry-run：只读盘点（不写任何行）
+python scripts/migrate_credit_wallets.py owner-plan --user-id <owner_user_id>
+#    记录输出的 plan_hash
+
+# 2) 打开维护门（排空在途调用；apply 要求 ai_dispatch_maintenance=true）
+#    platform_settings: ai_dispatch_maintenance = true
+
+# 3) 正式迁移：切 credits + 发 100,000 Credits promotional + 建 1 TiB 容量行
+python scripts/migrate_credit_wallets.py owner-apply \
+  --user-id <owner_user_id> --expected-hash <plan_hash> --actor <owner_user_id>
+
+# 4) 复核（迁移快照 / legacy 流水快照 / reconcile）
+python scripts/migrate_credit_wallets.py verify
+python credit_payments.py reconcile        # 或等 sweep 摘要
+
+# 5) 关闭维护门（ai_dispatch_maintenance = false）
+```
+
+要点：
+
+- 幂等：同一 `source_key=owner-promotional:<user_id>:v1` 只发一次批次；重跑
+  `owner-plan` 显示 `already_migrated`，`owner-apply` 不重复发放、不覆盖
+  管理员调过的容量。
+- 只迁 `role=owner`；`--user-id` 缺省表示全部 owner。
+- 验收断言：迁移后 `verify.ok=true` 且 `reconcile.ok=true`；配额行
+  `quota_bytes=1 TiB`（`1099511627776`）且 `used_bytes << quota_bytes`。
+- 迁移不换算旧月窗口余额（窗口 spent/limit 原样保留在快照
+  `credit_migration.legacy_window` 里，只作历史记录）。
+- 管理员后台：用户详情抽屉对已迁移 owner 显示「账务后端 = Credit 钱包」与
+  Credit 钱包区（可赠送/退款/待核对处置），不再显示总额度/窗口编辑器；
+  「Owner 每月金额」策略在迁移后不再参与计费（保留用于回滚前状态）。
+
+**回滚**：0088 的 `billing_accounts_backend_guard` **明确禁止**
+`credits → legacy`（一次性迁移，数据库层拒绝）。因此回滚方式是灾难恢复：
+
+1. 关闭 `CREDIT_TOPUP_ENABLED`，暂停 AI 派发（维护门），确认没有进行中的
+   credits 消费；
+2. 用迁移前（`owner-apply` 之前）的数据库备份恢复，并回滚到迁移前的镜像；
+3. 恢复后按 §4 重放恢复点之后的付款/退款/消费事件，不能只验证服务能启动；
+4. 若已开始真实充值/消费，按 §4 走「向前修复」而不是恢复旧库。
 
 ## 2. 定时任务
 
@@ -249,3 +315,11 @@ python scripts/migrate_credit_wallets.py set-new-user-backend \
       处置演练已完成（含 `migration_boundary_unverified` retry 被拒）。
 - [ ] 定时 `sweep`（2 分钟）与每日 `reconcile` 已配置并验证告警可达。
 - [ ] 回滚预案与兼容版本已就绪（理解新账务的版本）。
+- [ ] （2026-11-06 owner parity）生产 `CREDIT_TOPUP_ENABLED=1`、
+      `CREDIT_ALIPAY_NOTIFY_URL=https://histopilot.cn/payments/alipay/credit-notify`、
+      `SUPPORT_ALIPAY_PAY_MODE=production` 已设置，且
+      `topup_availability()` 返回 enabled。
+- [ ] （2026-11-06 owner parity）owner 已按 §1.4 迁移：`owner-plan` →
+      `owner-apply` → `verify.ok=true` / `reconcile.ok=true`；配额行
+      `quota_bytes=1 TiB` 且 `used_bytes` 远低于上限；迁移前数据库备份
+      已就位。
