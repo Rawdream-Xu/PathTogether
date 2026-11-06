@@ -461,13 +461,16 @@ def _user_eligibility(user, *, preview):
     """充值主体判定 → ``(ok, error_kind, reason)``。
 
     error_kind: ``not_allowed``（403）/ ``unavailable``（503）/ None。
-    钱包冻结/待核对**不**阻止充值（只有账户 status/backend 与用户状态）。
+    2026-11-06 起 owner 与受邀用户同一规则（充值对所有 Credit 账户开放）；
+    预览态、停用、非 credits 钱包仍然拒绝。钱包冻结/待核对**不**阻止充值
+    （只有账户 status/backend 与用户状态）。
     """
     if preview:
         return False, "not_allowed", "preview"
     if not isinstance(user, dict) or not user.get("user_id"):
         return False, "not_allowed", "user_not_found"
-    if user.get("role") != "user":
+    if user.get("role") not in (user_store.ROLE_OWNER,
+                               user_store.ROLE_USER):
         return False, "not_allowed", "not_user"
     if user.get("disabled"):
         return False, "not_allowed", "user_disabled"
