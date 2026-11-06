@@ -5,12 +5,10 @@
     "email_verify_en": 68618,
     "email_change_zh": 68619,
     "registration_created_zh": 68620,
-    "user_feedback_zh": 68621,
     "email_verify_zh_com": 68622,
     "email_verify_en_cn": 68623,
     "email_change_zh_com": 68624,
-    "registration_created_zh_com": 68625,
-    "format_request_zh": 68845
+    "registration_created_zh_com": 68625
   },
   "templates": [
     {
@@ -42,13 +40,6 @@
       "sha256": "38b9fd20096e9559349b544030caee1a5ea56fa3a790f2f1f866c10478ebc042"
     },
     {
-      "key": "user_feedback_zh",
-      "name": "HistoPilot-user_feedback_zh-a400221d9d",
-      "id": 68621,
-      "status": 0,
-      "sha256": "a400221d9d3f1d71207c7b1587cdde4c3bf7d57ca566a933871d8468bf48f50d"
-    },
-    {
       "key": "email_verify_zh_com",
       "name": "HistoPilot-email_verify_zh_com-6b0133544f",
       "id": 68622,
@@ -75,13 +66,6 @@
       "id": 68625,
       "status": 0,
       "sha256": "4e55feacf1a4f1af261485d68310b755ef95099587807256ad05449b4dae273a"
-    },
-    {
-      "key": "format_request_zh",
-      "name": "HistoPilot-format_request_zh-89521a93d5",
-      "id": 68845,
-      "status": 1,
-      "sha256": "89521a93d512d6d29c34e5eb4b8c0fc415b0284c59c66e6d1f57a33f0ca10621"
     }
   ]
 }

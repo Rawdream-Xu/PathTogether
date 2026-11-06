@@ -16,7 +16,7 @@
       * ``REGISTRATION_MAIL_SENDER=smtp`` → :class:`SmtpMailSender`
         （SSL/STARTTLS SMTP；账号口令只从环境变量读取，日志不回传）；
       * ``REGISTRATION_MAIL_SENDER=tencent_ses`` →
-        :class:`TencentSesMailSender`（官方 SDK、审核模板、无隐式重试）；
+        :class:`PurposeRoutingMailSender`（常规邮件用 SES，格式申请/反馈用 SMTP）；
       * 未配置 → ``None``：``email_verify_invite_activation`` 模式的前置
         检查（app 层）据此 fail-closed——sender 未配置时新模式**不能开启**。
   - 载荷安全：验证链接含**明文 token**，冻结正文在入队前经
@@ -586,9 +586,8 @@ class TencentSesMailSender:
 
     TEMPLATE_KEYS = frozenset(("email_verify_zh", "email_verify_en",
                                "email_change_zh", "registration_created_zh",
-                               "user_feedback_zh", "email_verify_zh_com",
-                               "email_verify_en_cn", "email_change_zh_com",
-                               "registration_created_zh_com", "format_request_zh"))
+                               "email_verify_zh_com", "email_verify_en_cn",
+                               "email_change_zh_com", "registration_created_zh_com"))
 
     def __init__(self, environ=None):
         from email.utils import parseaddr
@@ -646,9 +645,6 @@ class TencentSesMailSender:
         import re
         from urllib.parse import parse_qs, urlsplit
 
-        if key in ("user_feedback_zh", "format_request_zh"):
-            field = "feedback_id" if key == "user_feedback_zh" else "request_id"
-            return key, {field: data.get(field, "")}
         paths = {"email_verify_zh": "/verify-email",
                  "email_verify_en": "/verify-email",
                  "email_change_zh": "/verify-email-change",
@@ -712,16 +708,6 @@ class TencentSesMailSender:
         }
         if self.reply_to:
             params["ReplyToAddresses"] = self.reply_to
-        if key in ("user_feedback_zh", "format_request_zh"):
-            # 管理员通知的诊断/格式申请详情保留完整正文，避免模板变量上限截断。
-            body = str(payload.get("body") or "").encode("utf-8")
-            if len(body) > 4_000_000:
-                raise MailSenderError("ses_attachment_too_large")
-            params["Attachments"] = [{
-                "FileName": ("feedback.txt" if key == "user_feedback_zh"
-                             else "format-request.txt"),
-                "Content": base64.b64encode(body).decode("ascii"),
-            }]
         request = self.models.SendEmailRequest()
         request.from_json_string(json.dumps(params, ensure_ascii=False))
         try:
@@ -745,8 +731,30 @@ class TencentSesMailSender:
             raise MailSenderUncertainError("ses_message_id_missing")
 
 
+class PurposeRoutingMailSender:
+    """Fixed routes by server-frozen purpose; transport errors never change routes."""
+
+    SMTP_KEYS = frozenset(("user_feedback_zh", "format_request_zh"))
+
+    def __init__(self, ses, smtp):
+        self.ses = ses
+        self.smtp = smtp
+
+    def send_payload(self, to, payload):
+        key = payload.get("template_key")
+        if not isinstance(key, str):
+            raise MailSenderError("mail_purpose_route_unknown")
+        if key in self.SMTP_KEYS:
+            self.smtp.send(to, str(payload.get("subject") or ""),
+                           str(payload.get("body") or ""))
+        elif key in TencentSesMailSender.TEMPLATE_KEYS:
+            self.ses.send_payload(to, payload)
+        else:
+            raise MailSenderError("mail_purpose_route_unknown")
+
+
 def _send_payload(sender, to, payload):
-    if isinstance(sender, TencentSesMailSender):
+    if isinstance(sender, (TencentSesMailSender, PurposeRoutingMailSender)):
         sender.send_payload(to, payload)
     else:
         sender.send(to, str(payload.get("subject") or ""),
@@ -807,7 +815,7 @@ def get_sender(environ=None):
             return None
     if kind == "tencent_ses":
         try:
-            return TencentSesMailSender(env)
+            return PurposeRoutingMailSender(TencentSesMailSender(env), SmtpMailSender(env))
         except MailSenderUnavailable:
             return None
     return None
