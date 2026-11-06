@@ -8,13 +8,13 @@
 
 - 发信域名验证通过还需要创建发件地址、审核模板和 API 权限。SES 默认只允许
   模板发送，不能直接把 SMTP 正文传给 `Simple`。
-- 覆盖邮箱验证（中文/英文）、邮箱改绑、注册成功管理员通知、用户反馈。
+- 覆盖邮箱验证（中文/英文）、邮箱改绑、注册成功管理员通知、用户反馈及格式兼容申请通知。
   模板参数在入队时与原正文一起加密，重发保留冻结入口、语言与原令牌；
   worker 不根据当前 `PUBLIC_BASE_URL` 重建验证链接。
 - SES 模板固定 `histopilot.cn` / `histopilot.com` 域名，仅将令牌作为链接变量。
   worker 从冻结链接校验域名、路径和令牌，选择对应域名和语言模板。未知域名、
   非 HTTPS、错误路径和额外查询参数拒绝发送；SMTP 仍保留通用部署能力。
-- 模板变量限制为 UTF-8 JSON 800 字节；用户反馈完整正文通过 `feedback.txt`
+- 模板变量限制为 UTF-8 JSON 800 字节；用户反馈与格式申请完整正文分别通过 `feedback.txt`、`format-request.txt`
   附件发送，避免丢失诊断记录。模板使用通用注册名额说明，不把每日上限写死。
 - SDK 禁用重试和跨地域熔断；SDK 调试日志强制为 WARNING，避免输出签名头
   和含令牌的模板参数。明确拒绝进入现有有界退避；超时、内部错误、无有效
@@ -33,7 +33,7 @@
 REGISTRATION_MAIL_SENDER=tencent_ses
 REGISTRATION_SES_REGION=ap-guangzhou
 REGISTRATION_SES_FROM=notifications@histopilot.cn
-REGISTRATION_SES_TEMPLATE_IDS={"email_verify_zh":68617,"email_verify_en":68618,"email_change_zh":68619,"registration_created_zh":68620,"user_feedback_zh":68621,"email_verify_zh_com":68622,"email_verify_en_cn":68623,"email_change_zh_com":68624,"registration_created_zh_com":68625}
+REGISTRATION_SES_TEMPLATE_IDS={"email_verify_zh":68617,"email_verify_en":68618,"email_change_zh":68619,"registration_created_zh":68620,"user_feedback_zh":68621,"email_verify_zh_com":68622,"email_verify_en_cn":68623,"email_change_zh_com":68624,"registration_created_zh_com":68625,"format_request_zh":68845}
 ```
 
 必需密钥变量：`REGISTRATION_SES_SECRET_ID`、`REGISTRATION_SES_SECRET_KEY`。
@@ -57,8 +57,9 @@ REGISTRATION_SES_TEMPLATE_IDS={"email_verify_zh":68617,"email_verify_en":68618,"
 | `registration_created_zh` | histopilot.cn | `day`, `user_id`, `email`, `count`, `limit` |
 | `registration_created_zh_com` | histopilot.com | `day`, `user_id`, `email`, `count`, `limit` |
 | `user_feedback_zh` | 无链接 | `feedback_id`（完整正文见附件） |
+| `format_request_zh` | 无链接 | `request_id`（完整原始申请见附件） |
 
-上传本目录下对应 HTML 为九个独立模板，等待审核通过。静态 HTML 含
+上传本目录下对应 HTML 为十个独立模板，等待审核通过。静态 HTML 含
 `{{变量名}}` 占位符，不能直接作为 app 页面部署。验证模板用于当前 public
 注册流程；已退役的 legacy 邀请码流程不支持通过该模板重新启用。
 
@@ -69,7 +70,7 @@ REGISTRATION_SES_TEMPLATE_IDS={"email_verify_zh":68617,"email_verify_en":68618,"
 输出仅含模板 ID、审核状态和内容哈希；状态 0=通过、1=待审核、2=拒绝。
 
 2026-11-06 云端核对：发件地址 `notifications@histopilot.cn` 已存在，
-`histopilot.cn` 的 MX/SPF/DKIM/DMARC 均验证通过。已提交上述九个独立模板，
+`histopilot.cn` 的 MX/SPF/DKIM/DMARC 均验证通过。已提交上述十个独立模板，
 创建时状态为 1（待审核）；云端 HTML 结构和变量已回读核对。
 早期使用完整 URL 变量的 68612–68616 已停用，不用于配置；审核反馈要求
 保留固定域名，现版本按该要求提交。中文/英文与入口域名独立选择，保持
@@ -97,7 +98,7 @@ REGISTRATION_SES_TEMPLATE_IDS={"email_verify_zh":68617,"email_verify_en":68618,"
 本次改动不自动切换生产服务。
 
 用户已指定私有验收邮箱并要求审核后再发。此次验收的本机后台
-检查每五分钟核对全部九个模板的状态和内容；全部通过才发送五封明确标注
+检查每五分钟核对最初九个模板的状态和内容；全部通过才发送五封明确标注
 “SES 验收测试”的邮件（中文/英文验证、改绑、管理员通知、反馈附件）。
 测试使用无对应数据库记录的合成令牌，不创建账号、不修改生产数据。
 任何模板退回、内容改变或发送结果异常均暂停发送，不自动重发。
@@ -118,7 +119,7 @@ pytest basetemp、缓存、SDK 安装目标与下载缓存均显式放在该目�
 工作区 `git diff --check` 通过；已检查本次变更不含附件中的密钥和登录密码。
 固定域名修正后 SES 套件 **44 passed**；追加的云端 HTML 属性归一化检查
 **1 passed**。对应日志为 `pytest-fixed-domains.log`、`pytest-ses-normalization.log`，
-均在同一运行目录。九个云端模板已回读核对 HTML 结构。
+均在同一运行目录。原九个云端模板已回读核对 HTML 结构。
 实际 SendEmail 由上述审核门控验收执行，最新进度以私有状态文件为准。
 
 官方依据：[SendEmail](https://cloud.tencent.com/document/api/1288/51034)、
@@ -143,3 +144,16 @@ pytest basetemp、缓存、SDK 安装目标与下载缓存均显式放在该目�
   镜像内运行 `pip check`。
 - SES 激活回退到新镜像的 SMTP 就绪容器；整版回退到切换前生产容器。
   两条路径均保留队列载荷密钥、验证盐和 SMTP 配置，绝不自动重发 uncertain。
+
+### 格式申请通知补充审查
+
+发现 `format_request_store.drain_once()` 复用邮件发送器却直接调用旧 `send()`，
+会在 SES 上产生 AttributeError。现已改用统一 `_send_payload()`，SMTP/fake
+仍按原正文发送；SES 选用独立 `format_request_zh` 模板，原始申请、厂商、
+下载地址和提取码完整放在 `format-request.txt` 附件中，不改收件人、不发送
+客户跟进邮件。已有格式申请作业也能直接适配，不需要重写业务行。
+
+新增六项隔离数据库回归在旧代码上 6 failed，修复后连同 SES、格式申请、
+并发与迁移检查共 85 passed；成功、超时 uncertain 和明确拒绝均覆盖。
+新增模板 ID 为 68845；版本库中的审核状态仅为查询快照，生产切换前须确认
+十个模板全部通过并与本地内容一致。格式申请模板不额外做真实邮件发送验收。

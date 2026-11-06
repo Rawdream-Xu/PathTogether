@@ -588,7 +588,7 @@ class TencentSesMailSender:
                                "email_change_zh", "registration_created_zh",
                                "user_feedback_zh", "email_verify_zh_com",
                                "email_verify_en_cn", "email_change_zh_com",
-                               "registration_created_zh_com"))
+                               "registration_created_zh_com", "format_request_zh"))
 
     def __init__(self, environ=None):
         from email.utils import parseaddr
@@ -646,8 +646,9 @@ class TencentSesMailSender:
         import re
         from urllib.parse import parse_qs, urlsplit
 
-        if key == "user_feedback_zh":
-            return key, {"feedback_id": data.get("feedback_id", "")}
+        if key in ("user_feedback_zh", "format_request_zh"):
+            field = "feedback_id" if key == "user_feedback_zh" else "request_id"
+            return key, {field: data.get(field, "")}
         paths = {"email_verify_zh": "/verify-email",
                  "email_verify_en": "/verify-email",
                  "email_change_zh": "/verify-email-change",
@@ -711,13 +712,14 @@ class TencentSesMailSender:
         }
         if self.reply_to:
             params["ReplyToAddresses"] = self.reply_to
-        if key == "user_feedback_zh":
-            # 反馈含诊断记录，不能塞进 800-byte TemplateData；保留完整正文。
+        if key in ("user_feedback_zh", "format_request_zh"):
+            # 管理员通知的诊断/格式申请详情保留完整正文，避免模板变量上限截断。
             body = str(payload.get("body") or "").encode("utf-8")
             if len(body) > 4_000_000:
                 raise MailSenderError("ses_attachment_too_large")
             params["Attachments"] = [{
-                "FileName": "feedback.txt",
+                "FileName": ("feedback.txt" if key == "user_feedback_zh"
+                             else "format-request.txt"),
                 "Content": base64.b64encode(body).decode("ascii"),
             }]
         request = self.models.SendEmailRequest()

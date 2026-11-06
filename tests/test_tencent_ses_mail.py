@@ -277,3 +277,52 @@ def test_worker_records_acceptance_and_never_retries_uncertain(
     assert "private-token" not in (row["last_error"] or "")
     assert mail.drain_once(sender=sender) == 0
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("use_configured_sender", [False, True])
+@pytest.mark.parametrize("failure,expected", [(None, "sent"),
+                                             ("timeout", "uncertain"),
+                                             ("rejected", "failed")])
+def test_format_request_worker_uses_ses_payload_and_preserves_diagnostics(
+        ses, monkeypatch, tmp_path, use_configured_sender, failure, expected):
+    import format_request_store as store
+
+    sender, _, calls, outcome = ses
+    monkeypatch.setenv("FORMAT_REQUEST_DIR", str(tmp_path / "format-requests"))
+    monkeypatch.setenv("FORMAT_REQUEST_ADMIN_EMAIL", "admin@example.test")
+    if failure == "timeout":
+        outcome["error"] = TimeoutError("private-token")
+    elif failure == "rejected":
+        outcome["Response"] = {"Error": {"Code": "FailedOperation.TemplateNotAvailable",
+                                          "Message": "private-token"},
+                               "RequestId": "test-request"}
+    rec = store.submit_request(user_id="ses-format-test", format_ext=".example",
+        message="完整诊断\n" * 100, contact="requester@example.test",
+        manufacturer="Offline scanner", sample_url="https://example.test/original",
+        sample_access_code="offline-code")
+    if use_configured_sender:
+        monkeypatch.setattr(mail, "get_sender", lambda: sender)
+        count = store.drain_once(limit=1)
+    else:
+        count = store.drain_once(limit=1, sender=sender)
+    assert count == (1 if expected == "sent" else 0)
+    assert len(calls) == 1
+    params = json.loads(calls[0].data)
+    assert params["Destination"] == [store.admin_email()]
+    assert params["Template"]["TemplateID"] == sender.template_ids["format_request_zh"]
+    assert json.loads(params["Template"]["TemplateData"]) == {"request_id": rec["id"]}
+    attachment = params["Attachments"][0]
+    assert attachment["FileName"] == "format-request.txt"
+    body = base64.b64decode(attachment["Content"]).decode()
+    assert body == store._build_mail(rec)[2]
+    assert "Offline scanner" in body and "offline-code" in body
+    assert "https://example.test/original" in body and "完整诊断" in body
+    with pg_store.connect() as c:
+        status, attempts, error = c.execute(
+            "SELECT mail_status,attempts,last_error FROM format_request_mail_jobs WHERE request_id=%s",
+            (rec["id"],)).fetchone()
+    assert status == expected and attempts == 1
+    assert "private-token" not in (error or "")
+    if expected in ("sent", "uncertain"):
+        assert store.drain_once(limit=1, sender=sender) == 0
+        assert len(calls) == 1

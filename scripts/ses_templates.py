@@ -17,7 +17,8 @@ from pathlib import Path
 TEMPLATE_KEYS = ("email_verify_zh", "email_verify_en", "email_change_zh",
                  "registration_created_zh", "user_feedback_zh",
                  "email_verify_zh_com", "email_verify_en_cn",
-                 "email_change_zh_com", "registration_created_zh_com")
+                 "email_change_zh_com", "registration_created_zh_com",
+                 "format_request_zh")
 
 
 def _html_structure(content):

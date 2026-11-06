@@ -9,7 +9,8 @@
     "email_verify_zh_com": 68622,
     "email_verify_en_cn": 68623,
     "email_change_zh_com": 68624,
-    "registration_created_zh_com": 68625
+    "registration_created_zh_com": 68625,
+    "format_request_zh": 68845
   },
   "templates": [
     {
@@ -74,7 +75,13 @@
       "id": 68625,
       "status": 0,
       "sha256": "4e55feacf1a4f1af261485d68310b755ef95099587807256ad05449b4dae273a"
+    },
+    {
+      "key": "format_request_zh",
+      "name": "HistoPilot-format_request_zh-89521a93d5",
+      "id": 68845,
+      "status": 1,
+      "sha256": "89521a93d512d6d29c34e5eb4b8c0fc415b0284c59c66e6d1f57a33f0ca10621"
     }
-  ],
-  "verified_at": "2026-11-06T14:15:00Z"
+  ]
 }

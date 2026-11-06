@@ -610,7 +610,11 @@ def drain_once(limit=_DRAIN_BATCH, sender=None) -> int:
             continue
         to, subject, body = _build_mail(job)
         try:
-            sender.send(to, subject, body)
+            rmw._send_payload(sender, to, {
+                "subject": subject, "body": body,
+                "template_key": "format_request_zh",
+                "template_data": {"request_id": str(job["request_id"])},
+            })
         except rmw.MailSenderUncertainError as e:
             # 先于 MailSenderError 捕获（子类）：绝不自动重发
             complete_mail_job(job["job_id"], job["lease_token"], "uncertain",
