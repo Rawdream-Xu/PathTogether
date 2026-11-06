@@ -430,6 +430,10 @@ def test_complete_happy_path_research_false(monkeypatch):
     assert notify["business_key"] == \
         "registration_created:" + completion["completion_id"]
     payload = registration_mail_worker.decrypt_payload(notify["payload_enc"])
+    assert payload["template_key"] == "registration_created_zh"
+    assert payload["template_data"]["user_id"] == user["user_id"]
+    assert payload["template_data"]["email"] == "new@x.com"
+    assert payload["template_data"]["link"] in payload["body"]
     assert user["user_id"] in payload["body"]
     assert "new@x.com" in payload["body"]
     assert "1/5" in payload["body"]

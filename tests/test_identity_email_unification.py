@@ -460,6 +460,9 @@ def test_email_change_start_validates_shape_and_uniqueness(monkeypatch):
     payload = registration_mail_worker.decrypt_payload(job["payload_enc"])
     assert payload["user_id"] == u["user_id"]  # payload 绑定 user_id
     assert payload["email"] == "new-mail@x.com"
+    assert payload["template_key"] == "email_change_zh"
+    assert payload["template_data"]["email"] == "new-mail@x.com"
+    assert payload["template_data"]["link"] in payload["body"]
     del other
 
 

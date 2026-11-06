@@ -185,6 +185,10 @@ def enqueue_email_change(user_id, new_email, base_url=None,
         "subject": subject, "body": body,
         "purpose": MAIL_PURPOSE_EMAIL_CHANGE, "email": email_norm,
         "user_id": str(user_id or ""),
+        "template_key": "email_change_zh",
+        "template_data": {"email": email_norm,
+                          "link": str(base_url).strip().rstrip("/")
+                          + "/verify-email-change?token=" + token},
     })
     token_hash = registration_store.verify_token_hash(token)
     job_id = "rmj_" + secrets.token_urlsafe(8)

@@ -817,7 +817,9 @@ def request_verification_email(email, *, flow, action="start",
                                 {"subject": subject, "body": body,
                                  "purpose": MAIL_PURPOSE_EMAIL_VERIFY,
                                  "email": email_norm,
-                                 "token": reusable_token})
+                                 "token": reusable_token,
+                                 **mail_worker.verify_template_metadata(
+                                     email_norm, reusable_token, origin, locale)})
                         if frozen_payload is None:
                             payload_enc = None  # 落到新 token 分支
                         else:
@@ -862,7 +864,9 @@ def request_verification_email(email, *, flow, action="start",
                 payload_enc = mail_worker.encrypt_payload(
                     {"subject": subject, "body": body,
                      "purpose": MAIL_PURPOSE_EMAIL_VERIFY,
-                     "email": email_norm, "token": token})
+                     "email": email_norm, "token": token,
+                     **mail_worker.verify_template_metadata(
+                         email_norm, token, origin, locale)})
                 token_hash = verify_token_hash(token)
                 job_id = "rmj_" + secrets.token_urlsafe(8)
                 if flow == MODE_EMAIL_VERIFY_INVITE_ACTIVATION:
@@ -1711,7 +1715,14 @@ def complete_public_registration(token, password, *, research_opt_in=None,
                 npayload = mail_worker.encrypt_payload(
                     {"subject": nsubject, "body": nbody,
                      "purpose": MAIL_PURPOSE_REGISTRATION_CREATED,
-                     "email": admin})
+                     "email": admin,
+                     "template_key": "registration_created_zh",
+                     "template_data": {
+                         "day": str(quota_day), "user_id": str(user["user_id"]),
+                         "email": email_norm, "source": "public_registration",
+                         "count": str(day_count), "limit": str(PUBLIC_DAILY_LIMIT),
+                         "link": mail_worker.public_base_url() + "/admin/users",
+                     }})
                 cur.execute(
                     "INSERT INTO registration_mail_jobs "
                     "(job_id, purpose, email_normalized, token_hash, "

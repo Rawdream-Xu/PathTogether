@@ -172,6 +172,8 @@ def test_feedback_happy_path_saves_row_and_enqueues_mail(monkeypatch):
     # 冻结正文（Fernet 解密）：含用户、时间、描述、当前切片、错误与失败
     # 请求摘要、完整 JSON（client + server）
     payload = registration_mail_worker.decrypt_payload(job["payload_enc"])
+    assert payload["template_key"] == "user_feedback_zh"
+    assert payload["template_data"]["feedback_id"] == body["feedback_id"]
     mail_body = payload["body"]
     assert user["login_id"] in mail_body
     assert "Asia/Shanghai" in mail_body

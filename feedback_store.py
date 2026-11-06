@@ -392,7 +392,9 @@ def submit(user, description, client, server, *, recipient=None,
                 mailed = False
                 if recipient:
                     payload = mail_worker.encrypt_payload(
-                        {"subject": subject, "body": body})
+                        {"subject": subject, "body": body,
+                         "template_key": "user_feedback_zh",
+                         "template_data": {"feedback_id": feedback_id}})
                     mail_job_id = "rmj_" + secrets.token_urlsafe(12)
                     cur.execute(
                         "INSERT INTO registration_mail_jobs "

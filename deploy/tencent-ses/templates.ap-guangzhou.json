@@ -1,0 +1,80 @@
+{
+  "region": "ap-guangzhou",
+  "template_ids": {
+    "email_verify_zh": 68617,
+    "email_verify_en": 68618,
+    "email_change_zh": 68619,
+    "registration_created_zh": 68620,
+    "user_feedback_zh": 68621,
+    "email_verify_zh_com": 68622,
+    "email_verify_en_cn": 68623,
+    "email_change_zh_com": 68624,
+    "registration_created_zh_com": 68625
+  },
+  "templates": [
+    {
+      "key": "email_verify_zh",
+      "name": "HistoPilot-email_verify_zh-7056aff084",
+      "id": 68617,
+      "status": 0,
+      "sha256": "7056aff084f0a87cd93300fba711c2ddf0e82cadc031aabea703c2120d88b6c5"
+    },
+    {
+      "key": "email_verify_en",
+      "name": "HistoPilot-email_verify_en-3ec6806131",
+      "id": 68618,
+      "status": 0,
+      "sha256": "3ec6806131e0508b05b983d58f3723a8b351f2d7d11da8da60801e41dbfdf54b"
+    },
+    {
+      "key": "email_change_zh",
+      "name": "HistoPilot-email_change_zh-83fffe5f50",
+      "id": 68619,
+      "status": 0,
+      "sha256": "83fffe5f50e104f642bc4c9a68f1f859a13704ecfe42319368bd6eb8611688c5"
+    },
+    {
+      "key": "registration_created_zh",
+      "name": "HistoPilot-registration_created_zh-38b9fd2009",
+      "id": 68620,
+      "status": 0,
+      "sha256": "38b9fd20096e9559349b544030caee1a5ea56fa3a790f2f1f866c10478ebc042"
+    },
+    {
+      "key": "user_feedback_zh",
+      "name": "HistoPilot-user_feedback_zh-a400221d9d",
+      "id": 68621,
+      "status": 0,
+      "sha256": "a400221d9d3f1d71207c7b1587cdde4c3bf7d57ca566a933871d8468bf48f50d"
+    },
+    {
+      "key": "email_verify_zh_com",
+      "name": "HistoPilot-email_verify_zh_com-6b0133544f",
+      "id": 68622,
+      "status": 0,
+      "sha256": "6b0133544f14a16333b0283e96fdf309963a84b10ecbc16951649f34119d53e3"
+    },
+    {
+      "key": "email_verify_en_cn",
+      "name": "HistoPilot-email_verify_en_cn-9fc6de2889",
+      "id": 68623,
+      "status": 0,
+      "sha256": "9fc6de28895b19ae8dd2ada23d64c66a727e7cabe27d8c00a69d63512dfde908"
+    },
+    {
+      "key": "email_change_zh_com",
+      "name": "HistoPilot-email_change_zh_com-d258888a42",
+      "id": 68624,
+      "status": 0,
+      "sha256": "d258888a421fed9c2631ad4881437c88a86036e58103fe57f17b061402c13fdf"
+    },
+    {
+      "key": "registration_created_zh_com",
+      "name": "HistoPilot-registration_created_zh_com-4e55feacf1",
+      "id": 68625,
+      "status": 0,
+      "sha256": "4e55feacf1a4f1af261485d68310b755ef95099587807256ad05449b4dae273a"
+    }
+  ],
+  "verified_at": "2026-11-06T14:15:00Z"
+}

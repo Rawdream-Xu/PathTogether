@@ -743,6 +743,9 @@ def test_resend_after_cooldown_redelivery_and_original_link_completes(
     assert red["job_id"] == job["job_id"]
     assert job["status"] == "sent"
     assert red["entry_origin"] == CN and red["form_locale"] == "zh"
+    frozen = registration_mail_worker.decrypt_payload(red["payload_enc"])
+    assert frozen["template_key"] == "email_verify_zh"
+    assert frozen["template_data"]["link"] in frozen["body"]
     # 重发不新增 token/intent（复用）
     assert _count("SELECT count(*) FROM registration_mail_jobs") == 1
     assert _count("SELECT count(*) FROM registration_intents") == 1
@@ -822,6 +825,13 @@ def test_cross_host_resend_shares_quota_and_uses_new_origin(monkeypatch):
             "payload_enc"])
     cn_link_token = _token_from_mail(cn_payload["body"])
     assert CN in cn_payload["body"]
+    assert cn_payload["template_key"] == "email_verify_zh"
+    assert cn_payload["template_data"]["link"] in cn_payload["body"]
+    red_payload = registration_mail_worker.decrypt_payload(
+        _one("SELECT payload_enc FROM registration_mail_redeliveries")["payload_enc"])
+    assert red_payload["template_key"] == "email_verify_en"
+    assert red_payload["template_data"]["link"].startswith(COM + "/verify-email?token=")
+    assert red_payload["template_data"]["link"] in red_payload["body"]
     rp = cn_client.post("/api/registration/verify", json={
         "token": cn_link_token, "password": PASSWORD})
     assert rp.status_code == 200

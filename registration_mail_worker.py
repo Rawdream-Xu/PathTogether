@@ -15,6 +15,8 @@
         配置/环境持有，不进本仓库、不进日志）；
       * ``REGISTRATION_MAIL_SENDER=smtp`` → :class:`SmtpMailSender`
         （SSL/STARTTLS SMTP；账号口令只从环境变量读取，日志不回传）；
+      * ``REGISTRATION_MAIL_SENDER=tencent_ses`` →
+        :class:`TencentSesMailSender`（官方 SDK、审核模板、无隐式重试）；
       * 未配置 → ``None``：``email_verify_invite_activation`` 模式的前置
         检查（app 层）据此 fail-closed——sender 未配置时新模式**不能开启**。
   - 载荷安全：验证链接含**明文 token**，冻结正文在入队前经
@@ -575,6 +577,194 @@ class SmtpMailSender:
                 "smtp_send_failed（%s）" % exc.__class__.__name__) from exc
 
 
+class TencentSesMailSender:
+    """腾讯云 SES 模板发送；模板参数在入队时与正文一起加密冻结。
+
+    SDK 不重试、不切地域；调用后的未知异常一律 uncertain，防止重复邮件。
+    只输出固定错误类别，不传播 SDK message（可能含凭据或验证链接）。
+    """
+
+    TEMPLATE_KEYS = frozenset(("email_verify_zh", "email_verify_en",
+                               "email_change_zh", "registration_created_zh",
+                               "user_feedback_zh", "email_verify_zh_com",
+                               "email_verify_en_cn", "email_change_zh_com",
+                               "registration_created_zh_com"))
+
+    def __init__(self, environ=None):
+        from email.utils import parseaddr
+        import registration_store
+
+        env = os.environ if environ is None else environ
+        self.region = (env.get("REGISTRATION_SES_REGION") or "ap-guangzhou").strip()
+        self.from_addr = (env.get("REGISTRATION_SES_FROM") or "").strip()
+        self.reply_to = (env.get("REGISTRATION_SES_REPLY_TO") or "").strip()
+        sid = (env.get("REGISTRATION_SES_SECRET_ID") or "").strip()
+        skey = (env.get("REGISTRATION_SES_SECRET_KEY") or "").strip()
+        token = (env.get("REGISTRATION_SES_TOKEN") or "").strip() or None
+        try:
+            ids = json.loads(env.get("REGISTRATION_SES_TEMPLATE_IDS") or "{}")
+            if not isinstance(ids, dict) or set(ids) != self.TEMPLATE_KEYS:
+                raise ValueError
+            if any(type(v) is not int or v <= 0 for v in ids.values()):
+                raise ValueError
+            self.template_ids = ids
+            if self.region not in ("ap-guangzhou", "ap-hongkong"):
+                raise ValueError
+            if not sid or not skey:
+                raise ValueError
+            # 腾讯支持「别名 <地址>」，别名不能含冒号；拒绝换行与多地址。
+            _alias, address = parseaddr(self.from_addr)
+            registration_store.validate_email(address)
+            if any(c in self.from_addr for c in "\r\n,;:"):
+                raise ValueError
+            if self.reply_to:
+                registration_store.validate_email(self.reply_to)
+        except (ValueError, TypeError, registration_store.EmailVerifyError):
+            raise MailSenderUnavailable("ses_configuration_invalid") from None
+        try:
+            from tencentcloud.common import credential
+            from tencentcloud.common.profile.client_profile import ClientProfile
+            from tencentcloud.common.profile.http_profile import HttpProfile
+            from tencentcloud.common.retry import NoopRetryer
+            from tencentcloud.ses.v20201002 import ses_client, models
+
+            # SDK 的 DEBUG 会输出签名请求头和 TemplateData（含明文 token）。
+            logging.getLogger("tencentcloud_sdk_common").setLevel(logging.WARNING)
+            profile = ClientProfile(
+                httpProfile=HttpProfile(endpoint="ses.tencentcloudapi.com",
+                                        reqTimeout=30),
+                retryer=NoopRetryer(), disable_region_breaker=True)
+            self.client = ses_client.SesClient(
+                credential.Credential(sid, skey, token), self.region, profile)
+            self.models = models
+        except ImportError:
+            raise MailSenderUnavailable("ses_sdk_unavailable") from None
+
+    @staticmethod
+    def _approved_template(key, data):
+        """固定域名模板；从冻结链接提取令牌，绝不把完整 URL 作为变量。"""
+        import re
+        from urllib.parse import parse_qs, urlsplit
+
+        if key == "user_feedback_zh":
+            return key, {"feedback_id": data.get("feedback_id", "")}
+        paths = {"email_verify_zh": "/verify-email",
+                 "email_verify_en": "/verify-email",
+                 "email_change_zh": "/verify-email-change",
+                 "registration_created_zh": "/admin/users"}
+        try:
+            url = urlsplit(data["link"])
+            if url.scheme != "https" or url.netloc not in (
+                    "histopilot.cn", "histopilot.com") \
+                    or url.fragment or url.path != paths[key]:
+                raise ValueError
+            if key == "registration_created_zh":
+                if url.query or data.get("source") != "public_registration":
+                    raise ValueError
+                variables = {k: data[k] for k in (
+                    "day", "user_id", "email", "count", "limit")}
+            else:
+                query = parse_qs(url.query, strict_parsing=True, keep_blank_values=True)
+                if set(query) != {"token"} or len(query["token"]) != 1:
+                    raise ValueError
+                token = query["token"][0]
+                if not re.fullmatch(r"[A-Za-z0-9_-]+", token):
+                    raise ValueError
+                variables = {"email": data["email"], "token": token}
+            if key == "email_verify_en":
+                key += "_cn" if url.netloc == "histopilot.cn" else ""
+            elif url.netloc == "histopilot.com":
+                key += "_com"
+            return key, variables
+        except (KeyError, ValueError):
+            raise MailSenderError("ses_template_link_invalid") from None
+
+    def send_payload(self, to, payload):
+        import registration_store
+        from tencentcloud.common.exception.tencent_cloud_sdk_exception import (
+            TencentCloudSDKException,
+        )
+
+        try:
+            recipient = registration_store.validate_email(to)
+        except registration_store.EmailVerifyError:
+            raise MailSenderError("ses_recipient_invalid") from None
+        key = payload.get("template_key")
+        data = payload.get("template_data")
+        if not isinstance(key, str) or key not in self.template_ids \
+                or not isinstance(data, dict) \
+                or not all(isinstance(k, str) and isinstance(v, str)
+                           for k, v in data.items()):
+            # 历史队列必须在切换前用 SMTP 排空，不能猜正文或跨用途发模板。
+            raise MailSenderError("ses_template_metadata_missing")
+        key, data = self._approved_template(key, data)
+        encoded = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) > 800:
+            raise MailSenderError("ses_template_data_too_large")
+        params = {
+            "FromEmailAddress": self.from_addr,
+            "Destination": [recipient],
+            "Subject": str(payload.get("subject") or ""),
+            "Template": {"TemplateID": self.template_ids[key],
+                         "TemplateData": encoded},
+            "TriggerType": 1,
+        }
+        if self.reply_to:
+            params["ReplyToAddresses"] = self.reply_to
+        if key == "user_feedback_zh":
+            # 反馈含诊断记录，不能塞进 800-byte TemplateData；保留完整正文。
+            body = str(payload.get("body") or "").encode("utf-8")
+            if len(body) > 4_000_000:
+                raise MailSenderError("ses_attachment_too_large")
+            params["Attachments"] = [{
+                "FileName": "feedback.txt",
+                "Content": base64.b64encode(body).decode("ascii"),
+            }]
+        request = self.models.SendEmailRequest()
+        request.from_json_string(json.dumps(params, ensure_ascii=False))
+        try:
+            response = self.client.SendEmail(request)
+        except TencentCloudSDKException as exc:
+            # 只有携带 RequestId 的明确拒绝才可自动重试。内部错误也保守
+            # 视为不确定；不把 SDK 自由文本、RequestId 或请求内容写入异常。
+            code = exc.get_code() or ""
+            rejected = ("AuthFailure", "UnauthorizedOperation", "InvalidParameter",
+                        "MissingParameter", "UnsupportedOperation", "LimitExceeded",
+                        "RequestLimitExceeded", "FailedOperation", "ResourceNotFound",
+                        "ResourceUnavailable")
+            if exc.get_request_id() and code.split(".")[0] in rejected:
+                raise MailSenderError(
+                    "ses_request_rejected_" + code.split(".")[0]) from None
+            raise MailSenderUncertainError("ses_response_uncertain") from None
+        except Exception:
+            raise MailSenderUncertainError("ses_response_uncertain") from None
+        if not isinstance(getattr(response, "MessageId", None), str) \
+                or not response.MessageId.strip():
+            raise MailSenderUncertainError("ses_message_id_missing")
+
+
+def _send_payload(sender, to, payload):
+    if isinstance(sender, TencentSesMailSender):
+        sender.send_payload(to, payload)
+    else:
+        sender.send(to, str(payload.get("subject") or ""),
+                    str(payload.get("body") or ""))
+
+
+def verify_template_metadata(email, token, origin, locale):
+    """与冻结验证正文同源；不从发送时 env 重建链接或语言。"""
+    import registration_antibot
+    origin = str(origin).rstrip("/")
+    language = "en" if str(locale).strip().lower() == "en" else "zh"
+    return {"template_key": "email_verify_" + language,
+            "template_data": {
+                "site": registration_antibot.site_name_for_origin(origin),
+                "email": str(email),
+                "link": origin + "/verify-email?token=" + str(token),
+                "help_link": origin + "/registration-help",
+            }}
+
+
 def sender_configured(environ=None, production=True) -> bool:
     """邮件发送通道是否已配置（email_verify_invite_activation 前置检查）。
 
@@ -593,6 +783,8 @@ def sender_configured(environ=None, production=True) -> bool:
         return bool((env.get("REGISTRATION_SMTP_HOST") or "").strip()
                     and (env.get("REGISTRATION_SMTP_USER") or "").strip()
                     and (env.get("REGISTRATION_SMTP_PASSWORD") or "").strip())
+    if kind == "tencent_ses":
+        return get_sender(env) is not None
     return False
 
 
@@ -609,6 +801,11 @@ def get_sender(environ=None):
     if kind == "smtp":
         try:
             return SmtpMailSender(env)
+        except MailSenderUnavailable:
+            return None
+    if kind == "tencent_ses":
+        try:
+            return TencentSesMailSender(env)
         except MailSenderUnavailable:
             return None
     return None
@@ -691,9 +888,7 @@ def drain_once(limit=_DRAIN_BATCH, sender=None, environ=None) -> int:
                         break
                     try:
                         payload = decrypt_payload(row["payload_enc"])
-                        subject = str(payload.get("subject") or "")
-                        body = str(payload.get("body") or "")
-                        snd.send(row["email_normalized"], subject, body)
+                        _send_payload(snd, row["email_normalized"], payload)
                     except MailSenderUncertainError as exc:
                         # 先于 MailSenderError 捕获（子类）：远端可能已接受，
                         # 置 uncertain 且绝不自动重发（uncertain 不在领取
@@ -800,9 +995,7 @@ def _drain_redeliveries(conn, snd, limit, registration_open) -> int:
                     continue
                 try:
                     payload = decrypt_payload(rrow["payload_enc"])
-                    snd.send(rrow["email_normalized"],
-                             str(payload.get("subject") or ""),
-                             str(payload.get("body") or ""))
+                    _send_payload(snd, rrow["email_normalized"], payload)
                 except MailSenderUncertainError as exc:
                     # 远端可能已接受：置 uncertain，绝不自动重发（P1-1 同规）
                     cur.execute(

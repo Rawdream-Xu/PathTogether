@@ -20,6 +20,8 @@ psycopg[binary]>=3.3.6
 # 读写均走官方实现，项目仅做薄适配（docs/upload-routing-open-source-review.md
 # §3 组件复用原则 2026-09-25：PoC 手写签名只用于实验，生产不自研签名算法）。
 cos-python-sdk-v5>=1.9.44
+# 邮件推送：官方 SES SDK（签名交给 SDK，禁用自动重试以防重复邮件）。
+tencentcloud-sdk-python-ses>=3.1.135,<4
 # 支付宝「AI 网页应用收款」赞助订单（0087，默认关闭，沙箱专用）：官方服务端
 # SDK——下单(page_execute 表单)/查询/退款/关闭与通知验签原语均走官方实现；
 # 导入路径与 page_execute 方法名以 3.7.1411 安装源码核实（support_payments.py）。
