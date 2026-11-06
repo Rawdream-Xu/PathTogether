@@ -469,7 +469,7 @@
               <div class="adm-field">
                 <label class="adm-field-label" for="adm-spend-owner-month">Owner 每月金额（CNY，可选）</label>
                 <input type="text" id="adm-spend-owner-month" placeholder="如 1000" autocomplete="off">
-                <small class="adm-field-help">owner 独立月窗口策略，不与用户共池</small>
+                <small class="adm-field-help">owner 独立月窗口策略，不与用户共池；owner 迁移到 Credit 钱包后本策略不再生效（保留用于回滚前状态）</small>
               </div>
             </div>
             <details class="adm-win-adjust" id="adm-win-demo-box">
@@ -490,7 +490,7 @@
             </details>
             <details class="adm-win-adjust" id="adm-win-owner-box">
               <summary>Owner：立即调整当前周期</summary>
-              <p class="adm-note">只改当前月窗口的额度快照：已消费/预占不回退。需二次确认并写审计；窗口版本冲突（409）时刷新后重试。</p>
+              <p class="adm-note">只改当前月窗口的额度快照：已消费/预占不回退。需二次确认并写审计；窗口版本冲突（409）时刷新后重试。<b>owner 迁移到 Credit 钱包后此窗口不再参与计费</b>（用户详情抽屉会显示「账务后端 = Credit 钱包」）。</p>
               <div class="adm-form" id="adm-win-owner-form">
                 <div class="adm-field">
                   <label class="adm-field-label" for="adm-win-owner-limit">Owner 当前周期新额度（CNY，必填）</label>

@@ -1001,7 +1001,10 @@ def test_admin_manifest_plugin_version_bumped_with_hashes():
     #（基础 + 扩容）与扩容记录（active/grace/ended、周期、自动续费、最近
     # 续费失败原因，只读）；存储编辑器文案明确 PUT 只改基础容量；hashes/pin
     # 按最终 bundle 重算。
-    assert data["pluginVersion"] == "0.4.23"  # hashes/pin 同步
+    # 0.4.24 = owner parity（2026-11-06）：owner 同样受存储配额约束——详情
+    # 抽屉对 owner 也渲染存储容量编辑器；额度策略页说明 owner 迁移 Credit
+    # 钱包后月窗口不再参与计费；hashes/pin 按最终 bundle 重算。
+    assert data["pluginVersion"] == "0.4.24"  # hashes/pin 同步
     assert "admin:settings:read" in data["adminPermissions"]
     assert "admin:settings:write" in data["adminPermissions"]
     assert "admin:slides:read" in data["adminPermissions"]

@@ -2017,9 +2017,10 @@ describe("wave 2 — 抽屉总额度动作（§4.3 / Batch B）", () => {
 		expect(body).toContain("本月预占");
 		expect(body).toContain("本月剩余");
 		expect(body).toContain("剩余 999.00 CNY");
-		// owner 不出现 total 动作与 total 词汇
+		// owner 不出现 total 动作与 total 词汇（2026-11-06 owner parity 起
+		// owner 抽屉也有存储容量编辑器，其「恢复默认基础容量」不算 total 动作）
 		expect(body).not.toContain("设置总额度");
-		expect(body).not.toContain("恢复默认");
+		expect(body).not.toContain("恢复默认总额度");
 		expect(body).not.toContain("allowance");
 		// 窗口调整编辑器存在（currentWindow.adjust 的抽屉入口）
 		const input = bus.created.find((el) => el.id === "adm-window-adjust-input");
@@ -4405,11 +4406,12 @@ describe("storage quota UI (2026-11-04)", () => {
 		expect(client!.bytesToGbText(null)).toBe("—");
 	});
 
-	it("user drawer renders storage editor only for role=user; bridge payload uses bytes", () => {
-		// 源码级锁定入口与调用：普通用户抽屉追加 renderStorageQuotaEditor，
-		// owner 不渲染；三个桥方法名与字节入参。
+	it("user drawer renders storage editor for role=user and owner; bridge payload uses bytes", () => {
+		// 源码级锁定入口与调用：普通用户与 owner 抽屉都追加
+		// renderStorageQuotaEditor（2026-11-06 owner parity：owner 同样受存储
+		// 配额约束，后台可改其基础容量）；三个桥方法名与字节入参。
 		expect(src).toContain("function renderStorageQuotaEditor(u)");
-		expect(src).toContain('if (u.role === "user")');
+		expect(src).toContain('if (u.role === "user" || u.role === "owner")');
 		expect(src).toContain("renderStorageQuotaEditor(u)");
 		expect(src).toContain('request("admin.users.storageQuota.get"');
 		expect(src).toContain('request("admin.users.storageQuota.set"');

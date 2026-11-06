@@ -2895,9 +2895,11 @@
     } else if (info.shape === "window") {
       els.drawerBody.appendChild(renderWindowAdjustEditor(u));
     }
-    // 2026-11-04：普通用户的存储容量查看/修改（owner 不受存储配额限制，
-    // 不渲染该区）。放在金额动作之后，仍是同一抽屉内的独立区块。
-    if (u.role === "user") {
+    // 2026-11-04：存储容量查看/修改。2026-11-06 owner parity 起 owner 与
+    // 普通用户同样受存储配额约束（迁移脚本建 1 TiB 基础容量），因此同样
+    // 渲染该区（服务端对 owner 目标不再返回 400）。放在金额动作之后，仍是
+    // 同一抽屉内的独立区块。
+    if (u.role === "user" || u.role === "owner") {
       els.drawerBody.appendChild(renderStorageQuotaEditor(u));
     }
     els.drawer.hidden = false;
