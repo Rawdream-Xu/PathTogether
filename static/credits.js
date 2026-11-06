@@ -317,6 +317,8 @@
       state.canTopup = !!data.can_topup;
       state.blockReason = data.topup_reason || null;
     } else if (backend === "owner_budget") {
+      // 仅未迁移的 owner（迁移后服务端返回 billing_backend="credits"，
+      // 与普通用户走同一分支；2026-11-06 owner parity）。
       state.balanceUnits = null;
       setText("credit-balance-kind", t("credit.balance.owner.title"));
       setText("credit-balance-available",

@@ -237,8 +237,9 @@
             <div id="acct-pop-detail" class="acct-pop-detail"></div>
             <div id="acct-pop-extra" class="acct-pop-detail acct-pop-extra" hidden></div>
           </div>
-          {# 存储用量（2026-11-04）：GET /api/account/storage，打开 popover 时
-             与余额一起拉取；quota_applies=false（owner）整段隐藏。 #}
+          {# 存储用量（2026-11-04；2026-11-06 owner parity）：GET
+             /api/account/storage，打开 popover 时与余额一起拉取；owner 与
+             用户同口径（quota_applies=true），本机免登录时整段隐藏。 #}
           <div id="acct-pop-storage" class="acct-pop-balance acct-pop-storage" hidden>
             <div class="acct-pop-balance-head">
               <span class="acct-pop-title" data-i18n="acct.storage.title">存储</span>
@@ -255,7 +256,8 @@
                role="status" hidden></p>
           </div>
           {# 付费存储扩容入口（0092）：新标签打开 Credit 页 #storage 锚点；
-             预览态 / owner / 非 credits 账户由 JS 隐藏。 #}
+             owner 与用户同规则（2026-11-06），预览态 / 非 credits 账户
+             由 JS 隐藏。 #}
           <a id="acct-storage-link" class="acct-settings acct-topup-link"
              href="/app/credits#storage" target="_blank" rel="noopener"
              data-i18n="acct.storage.expand" hidden>购买存储扩容</a>
@@ -563,6 +565,82 @@
           <div class="picker-footer">
             <button id="feedback-cancel" class="btn secondary small" data-i18n="acct.changepw.cancel">取消</button>
             <button id="feedback-submit" class="btn primary" data-i18n="fbk.send">发送</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 账户设置对话框（docs/owner-parity-plan-20261106.md §D）：
+           所有登录用户共用（预览态隐藏入口），不再依赖展开侧栏。内容 =
+           账户 / 安全 / Credit / 存储 / 数据共享；owner 额外多一个「管理后台」。
+           安全入口直接打开既有改密/改绑对话框；Credit 与存储用量经
+           /api/account/credits 与 /api/account/storage 只读拉取（no-store）。 -->
+      <div id="acct-settings-mask" class="picker-mask" style="display:none;">
+        <div class="picker-dialog changepw-dialog acct-settings-dialog"
+             role="dialog" aria-modal="true" aria-labelledby="acct-settings-title">
+          <div class="picker-title">
+            <span id="acct-settings-title" data-i18n="acct.settings.title">账户设置</span>
+            <button id="acct-settings-close" class="icon-btn close" aria-label="关闭" data-i18n-aria="picker.close">×</button>
+          </div>
+          <div class="changepw-body acct-settings-body">
+            <div class="acct-settings-section">
+              <p class="acct-settings-section-title" data-i18n="acct.settings.section.account">账户</p>
+              <div class="acct-settings-row">
+                <span class="acct-settings-label" data-i18n="acct.settings.email">邮箱</span>
+                <span id="acct-settings-email" class="acct-settings-value"></span>
+              </div>
+              <div class="acct-settings-row">
+                <span class="acct-settings-label" data-i18n="acct.role.label">角色</span>
+                <span id="acct-settings-role" class="acct-settings-value"></span>
+              </div>
+            </div>
+            <div class="acct-settings-section">
+              <p class="acct-settings-section-title" data-i18n="acct.settings.section.security">安全</p>
+              <div class="acct-settings-actions">
+                <button type="button" id="acct-settings-changepw" class="btn secondary small" data-i18n="acct.settings.changepw">修改密码</button>
+                <button type="button" id="acct-settings-changeemail" class="btn secondary small" data-i18n="acct.settings.changeemail">更换邮箱</button>
+              </div>
+            </div>
+            <div class="acct-settings-section">
+              <p class="acct-settings-section-title" data-i18n="acct.settings.section.credit">Credit</p>
+              <div class="acct-settings-row">
+                <span class="acct-settings-label" data-i18n="acct.settings.credits.available">可用余额</span>
+                <span id="acct-settings-credit" class="acct-settings-value" role="status"></span>
+              </div>
+              <div class="acct-settings-actions">
+                <a id="acct-settings-credit-link" class="btn secondary small"
+                   href="/app/credits" target="_blank" rel="noopener"
+                   data-i18n="acct.settings.credits.detail">Credit 明细</a>
+                <a id="acct-settings-topup-link" class="btn secondary small"
+                   href="/app/credits" target="_blank" rel="noopener"
+                   data-i18n="acct.settings.credits.topup" hidden>充值 Credit</a>
+              </div>
+            </div>
+            <div class="acct-settings-section">
+              <p class="acct-settings-section-title" data-i18n="acct.settings.section.storage">存储</p>
+              <div class="acct-settings-row">
+                <span class="acct-settings-label" data-i18n="acct.settings.storage.used">已用</span>
+                <span id="acct-settings-storage" class="acct-settings-value" role="status"></span>
+              </div>
+              <div class="acct-settings-actions">
+                <a id="acct-settings-storage-link" class="btn secondary small"
+                   href="/app/credits#storage" target="_blank" rel="noopener"
+                   data-i18n="acct.settings.storage.expand" hidden>购买存储扩容</a>
+              </div>
+            </div>
+            <div class="acct-settings-section">
+              <p class="acct-settings-section-title" data-i18n="acct.settings.section.data">数据共享</p>
+              <div class="acct-settings-actions">
+                <button type="button" id="acct-settings-datashare" class="btn secondary small" data-i18n="acct.datashare">数据共享</button>
+              </div>
+            </div>
+            <div class="acct-settings-actions acct-settings-owner-actions">
+              <a id="acct-settings-admin" class="btn secondary small"
+                 href="/admin" target="_blank" rel="noopener"
+                 data-i18n="acct.settings.admin" hidden>管理后台</a>
+            </div>
+          </div>
+          <div class="picker-footer">
+            <button id="acct-settings-done" class="btn primary small" data-i18n="acct.settings.close">关闭</button>
           </div>
         </div>
       </div>

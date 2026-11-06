@@ -4147,6 +4147,52 @@ button {
   padding: 8px 10px;
 }
 
+/* ---------- 账户设置对话框（docs/owner-parity-plan-20261106.md §D） ---------- */
+/* 所有登录用户共用；骨架复用 changepw-dialog/picker-mask。分区纵向排列，
+   账号/用量右侧对齐；入口按钮与 picker-footer 的 btn 同款。 */
+.acct-settings-dialog { width: min(460px, 92%); }
+.acct-settings-body { gap: 14px; }
+.acct-settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 0.5px solid var(--separator);
+}
+.acct-settings-section:first-child { padding-top: 0; border-top: 0; }
+.acct-settings-section-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.acct-settings-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+.acct-settings-label { color: var(--text-3, var(--text-2)); flex-shrink: 0; }
+.acct-settings-value {
+  color: var(--text);
+  text-align: right;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+.acct-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.acct-settings-actions .btn { text-decoration: none; }
+.acct-settings-actions .btn[hidden] { display: none; }
+.acct-settings-owner-actions {
+  padding-top: 10px;
+  border-top: 0.5px solid var(--separator);
+}
+.acct-settings-owner-actions:empty { display: none; }
+
 /* -----------------------------------------------------------------------
    viewer 画质档（image-transport-upgrade §3.3）：标准/精细分段与荧光保真标识。
    只做展示：不向产品界面暴露 q、采样、cache key 等实现细节。

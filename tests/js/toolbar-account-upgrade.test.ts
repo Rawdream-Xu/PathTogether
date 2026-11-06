@@ -638,7 +638,9 @@ describe("账户 popover 余额（GET /api/account/credits）", () => {
 		expect(h.els["acct-pop-storage-bar"].classList.contains("is-warn")).toBe(false);
 		expect(h.els["acct-pop-storage-bar"].classList.contains("is-danger")).toBe(false);
 
-		// owner：quota_applies=false → 整段隐藏（不显示伪造 0）
+		// 本机免登录 owner（无 user_id）：quota_applies=false → 整段隐藏
+		// （不显示伪造 0）。登录态 owner 在 owner parity 后返回 true，走同
+		// 一条渲染路径（见 storage-expansion.test.ts）。
 		const owner = bootApp();
 		owner.HP_AUTH.applyAuthInfo(
 			loggedIn({
@@ -694,6 +696,208 @@ describe("账户 popover 余额（GET /api/account/credits）", () => {
 		expect(full.els["acct-pop-storage-fill"].style.width).toBe("100%");
 		expect(full.els["acct-pop-storage-bar"].classList.contains("is-danger")).toBe(true);
 		expect(full.els["acct-pop-storage-bar"].getAttribute("aria-valuenow")).toBe("100");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 账户设置对话框（docs/owner-parity-plan-20261106.md §D，2026-11-06）
+// ---------------------------------------------------------------------------
+const CREDITS_OWNER = {
+	subject: {
+		username: "boss@x.com", display_username: "boss",
+		role: "owner", preview: false,
+	},
+	currency: "CNY",
+	billing_backend: "credits",
+	wallet: {
+		balance_units: "1000000000000",
+		reserved_units: "0",
+		refund_pending_units: "0",
+		available_units: "1000000000000",
+		issued_units: "1000000000000",
+		composition: {
+			promotional_units: "1000000000000",
+			legacy_grant_units: "0",
+			paid_units: "0",
+		},
+		restricted_reason: null,
+		migrated_at: "2026-11-06T00:00:00Z",
+	},
+	can_topup: true,
+	topup_reason: null,
+	packages: { version: 1, packages: [] },
+	topup: { enabled: true, reason: null },
+	as_of: "2026-11-06T12:00:00Z",
+};
+
+const STORAGE_OK = {
+	subject: { user_id: "a1", role: "owner", preview: false },
+	quota_applies: true,
+	base_quota_bytes: 1024 ** 4,
+	extra_quota_bytes: 0,
+	quota_bytes: 1024 ** 4,
+	used_bytes: 50 * 1024 ** 3,
+	reserved_bytes: 0,
+	remaining_bytes: 1024 ** 4 - 50 * 1024 ** 3,
+	default_quota_bytes: 10 * 1024 ** 3,
+	expansion: {
+		unit_bytes: 10 * 1024 ** 3,
+		price_units: "10000000000",
+		price_credits: "1000",
+		max_units: 10,
+		grace_days: 7,
+		active_units: 0,
+		can_purchase: true,
+		purchase_block_reason: null,
+		items: [],
+	},
+};
+
+function ownerAuth(): AuthInfo {
+	return loggedIn({
+		username: "boss@x.com", role: "owner", user_id: "a1",
+		actor: { username: "boss@x.com", role: "owner", user_id: "a1" },
+	});
+}
+
+async function openSettings(h: ReturnType<typeof bootApp>) {
+	h.els["acct-settings-btn"].dispatch("click", clickEvt());
+	await vi.waitFor(() => {
+		expect(h.fetchCalls).toContain("/api/account/credits");
+		expect(h.fetchCalls).toContain("/api/account/storage");
+	});
+}
+
+describe("账户设置对话框（§D，所有登录用户共用）", () => {
+	afterEach(() => {
+		delete (globalThis as { window?: unknown }).window;
+		delete (globalThis as { document?: unknown }).document;
+		delete (globalThis as { fetch?: unknown }).fetch;
+		delete (globalThis as { HP_ViewerCore?: unknown }).HP_ViewerCore;
+	});
+
+	it("账户设置入口打开对话框（不再只展开侧栏）并回填账户行", async () => {
+		const h = bootApp();
+		h.HP_AUTH.applyAuthInfo(loggedIn());
+		h.fetchRoutes.set("/api/account/credits", () => ({ status: 200, body: BALANCE_OK }));
+		h.fetchRoutes.set("/api/account/storage", () => ({ status: 200, body: STORAGE_OK }));
+		await openSettings(h);
+		expect(h.els["acct-settings-mask"].style.display).toBe("");
+		expect(h.els["acct-settings-email"].textContent).toBe("solarise94@gmail.com");
+		expect(h.els["acct-settings-role"].textContent).toBe("acct.role.user");
+		// 关闭：遮罩 + 关闭按钮两条路径
+		h.els["acct-settings-done"].dispatch("click");
+		expect(h.els["acct-settings-mask"].style.display).toBe("none");
+	});
+
+	it("Credit/存储数值与充值、扩容入口（can_topup 真值时显示充值）", async () => {
+		const h = bootApp();
+		h.HP_AUTH.applyAuthInfo(ownerAuth());
+		h.fetchRoutes.set("/api/account/credits", () => ({ status: 200, body: CREDITS_OWNER }));
+		h.fetchRoutes.set("/api/account/storage", () => ({ status: 200, body: STORAGE_OK }));
+		await openSettings(h);
+		await vi.waitFor(() => {
+			expect(h.els["acct-settings-credit"].textContent)
+				.toBe("100,000 credit.balance.unit");
+		});
+		expect(h.els["acct-settings-topup-link"].hidden).toBe(false);
+		// 「Credit 明细」链接常驻（模板文案走 data-i18n；此处只锁定不隐藏）
+		expect(h.els["acct-settings-credit-link"].hidden).toBe(false);
+		await vi.waitFor(() => {
+			expect(h.els["acct-settings-storage"].textContent).toBe("50 GB / 1024 GB");
+		});
+		expect(h.els["acct-settings-storage-link"].hidden).toBe(false);
+
+		// can_topup 假：充值入口隐藏，明细入口仍在
+		const noTopup = bootApp();
+		noTopup.HP_AUTH.applyAuthInfo(loggedIn());
+		noTopup.fetchRoutes.set("/api/account/credits", () => ({
+			status: 200,
+			body: { ...CREDITS_OWNER, can_topup: false, topup_reason: "disabled" },
+		}));
+		noTopup.fetchRoutes.set("/api/account/storage", () => ({ status: 200, body: STORAGE_OK }));
+		await openSettings(noTopup);
+		await vi.waitFor(() => {
+			expect(noTopup.els["acct-settings-credit"].textContent)
+				.toBe("100,000 credit.balance.unit");
+		});
+		expect(noTopup.els["acct-settings-topup-link"].hidden).toBe(true);
+	});
+
+	it("安全/数据共享入口打开既有对话框并收起设置对话框", async () => {
+		const h = bootApp();
+		h.HP_AUTH.applyAuthInfo(loggedIn());
+		h.fetchRoutes.set("/api/account/credits", () => ({ status: 200, body: BALANCE_OK }));
+		h.fetchRoutes.set("/api/account/storage", () => ({ status: 200, body: STORAGE_OK }));
+		h.fetchRoutes.set("/api/account/agreements", () => ({ status: 200, body: { research: null } }));
+		await openSettings(h);
+		h.els["acct-settings-changepw"].dispatch("click");
+		expect(h.els["acct-settings-mask"].style.display).toBe("none");
+		expect(h.els["changepw-mask"].style.display).toBe("");
+
+		h.els["acct-settings-btn"].dispatch("click");
+		h.els["acct-settings-changeemail"].dispatch("click");
+		expect(h.els["changeemail-mask"].style.display).toBe("");
+
+		h.els["acct-settings-btn"].dispatch("click");
+		h.els["acct-settings-datashare"].dispatch("click");
+		expect(h.els["datashare-mask"].style.display).toBe("");
+	});
+
+	it("owner 多一个管理后台入口；普通用户没有；预览态入口隐藏", async () => {
+		const owner = bootApp();
+		owner.HP_AUTH.applyAuthInfo(ownerAuth());
+		owner.fetchRoutes.set("/api/account/credits", () => ({ status: 200, body: CREDITS_OWNER }));
+		owner.fetchRoutes.set("/api/account/storage", () => ({ status: 200, body: STORAGE_OK }));
+		await openSettings(owner);
+		expect(owner.els["acct-settings-admin"].hidden).toBe(false);
+
+		const user = bootApp();
+		user.HP_AUTH.applyAuthInfo(loggedIn());
+		user.fetchRoutes.set("/api/account/credits", () => ({ status: 200, body: BALANCE_OK }));
+		user.fetchRoutes.set("/api/account/storage", () => ({ status: 200, body: STORAGE_OK }));
+		await openSettings(user);
+		expect(user.els["acct-settings-admin"].hidden).toBe(true);
+
+		const preview = bootApp();
+		preview.HP_AUTH.applyAuthInfo(loggedIn({
+			preview: { user_id: "u9", username: "u9@x.com", role: "user" },
+		}));
+		expect(preview.els["acct-settings-btn"].hidden).toBe(true);
+	});
+
+	it("owner 与 user 的弹层渲染结果一致（同一钱包数据）", async () => {
+		const owner = bootApp();
+		owner.HP_AUTH.applyAuthInfo(ownerAuth());
+		owner.fetchRoutes.set("/api/account/credits", () => ({ status: 200, body: CREDITS_OWNER }));
+		owner.fetchRoutes.set("/api/account/storage", () => ({ status: 200, body: STORAGE_OK }));
+		await openAcctPop(owner);
+		await vi.waitFor(() => {
+			expect(owner.els["acct-pop-remaining"].textContent).toBe("100,000");
+		});
+
+		const user = bootApp();
+		user.HP_AUTH.applyAuthInfo(loggedIn());
+		user.fetchRoutes.set("/api/account/credits", () => ({
+			status: 200,
+			body: { ...CREDITS_OWNER, subject: BALANCE_OK.subject },
+		}));
+		user.fetchRoutes.set("/api/account/storage", () => ({ status: 200, body: STORAGE_OK }));
+		await openAcctPop(user);
+		await vi.waitFor(() => {
+			expect(user.els["acct-pop-remaining"].textContent).toBe("100,000");
+		});
+
+		for (const key of ["acct-pop-remaining", "acct-pop-unit",
+			"acct-pop-scope", "acct-pop-detail", "acct-pop-extra",
+			"acct-topup-link"]) {
+			expect(owner.els[key].textContent).toBe(user.els[key].textContent);
+			expect(owner.els[key].hidden).toBe(user.els[key].hidden);
+		}
+		expect(owner.els["acct-pop-usage-fill"].style.width)
+			.toBe(user.els["acct-pop-usage-fill"].style.width);
+		expect(owner.els["acct-topup-link"].textContent)
+			.toBe("acct.credits.topup");
 	});
 });
 

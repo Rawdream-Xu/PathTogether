@@ -664,18 +664,25 @@ test.describe("账户 chip + popover（§3.5）", () => {
 		await expect(page.locator("#acct-pop-usage")).toBeHidden();
 	});
 
-	test("「账户设置」入口滚动到侧栏既有改密/改绑区并展开侧栏", async ({ page }) => {
+	test("「账户设置」入口打开对话框（不再依赖展开侧栏）", async ({ page }) => {
 		await page.setViewportSize({ width: 1600, height: 900 });
 		await serveFixture(page);
 		await page.goto(FIXTURE_HOST + "/fixture");
-		// 桌面默认侧栏收起
+		// 桌面默认侧栏收起——旧行为是展开侧栏，看起来像「点了没反应」
 		await expect(page.locator("#sidebar")).toHaveClass(/collapsed/);
 		await page.locator("#acct-btn").click();
 		await page.locator("#acct-settings-btn").click();
-		// 侧栏被展开（沿用既有改密/改绑入口；滚动目标存在）
-		await expect(page.locator("#sidebar")).not.toHaveClass(/collapsed/);
-		await expect(page.locator("#changepw-btn")).toBeVisible();
+		const mask = page.locator("#acct-settings-mask");
+		await expect(mask).toBeVisible();
 		await expect(page.locator("#acct-pop")).toBeHidden();
+		await expect(page.locator("#acct-settings-email"))
+			.toHaveText("solarise94@gmail.com");
+		// 侧栏保持收起（对话框不依赖侧栏）
+		await expect(page.locator("#sidebar")).toHaveClass(/collapsed/);
+		// 安全入口打开既有对话框
+		await page.locator("#acct-settings-changepw").click();
+		await expect(mask).toBeHidden();
+		await expect(page.locator("#changepw-mask")).toBeVisible();
 	});
 });
 

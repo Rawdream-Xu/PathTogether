@@ -1640,6 +1640,22 @@
     feedbackPreview: $("feedback-preview"),
     feedbackError: $("feedback-error"),
     feedbackSuccess: $("feedback-success"),
+    // 账户设置对话框（docs/owner-parity-plan-20261106.md §D）：所有登录用户
+    // 共用；安全入口打开既有改密/改绑对话框，数据共享打开既有对话框。
+    acctSettingsMask: $("acct-settings-mask"),
+    acctSettingsClose: $("acct-settings-close"),
+    acctSettingsDone: $("acct-settings-done"),
+    acctSettingsEmail: $("acct-settings-email"),
+    acctSettingsRole: $("acct-settings-role"),
+    acctSettingsCredit: $("acct-settings-credit"),
+    acctSettingsCreditLink: $("acct-settings-credit-link"),
+    acctSettingsTopupLink: $("acct-settings-topup-link"),
+    acctSettingsStorage: $("acct-settings-storage"),
+    acctSettingsStorageLink: $("acct-settings-storage-link"),
+    acctSettingsChangePw: $("acct-settings-changepw"),
+    acctSettingsChangeEmail: $("acct-settings-changeemail"),
+    acctSettingsDatashare: $("acct-settings-datashare"),
+    acctSettingsAdmin: $("acct-settings-admin"),
     // AI 面板外框拖动/调整大小（改版第四轮 §1.4；demo 面板无这些 id → 空引用）
     aiPanel: $("ai-panel"),
     aiPanelHeader: $("ai-panel-header"),
@@ -14664,9 +14680,10 @@
     }
   }
 
-  // 存储用量（2026-11-04；2026-11-06 付费扩容）：与余额同一 popover 打开时
-  // 拉取；只读自助接口（/api/account/storage，不接受 user_id）。
-  // quota_applies=false（owner）→ 整段隐藏。head 值 = 已用 / 有效容量
+  // 存储用量（2026-11-04；2026-11-06 付费扩容 + owner parity）：与余额同一
+  // popover 打开时拉取；只读自助接口（/api/account/storage，不接受 user_id）。
+  // quota_applies=false（本机免登录 / 非 PG）→ 整段隐藏；登录态 owner 与
+  // 用户同口径（quota_applies=true）。head 值 = 已用 / 有效容量
   // （基础 + 扩容）；副行显示「含扩容 X」与 grace 警示；扩容入口在
   // purchase_block_reason 不属于 owner/legacy/preview 时显示。
   function loadAccountStorage() {
@@ -14819,15 +14836,160 @@
     });
   }
 
-  function openAccountSettings() {
+  // ---------- 账户设置对话框（docs/owner-parity-plan-20261106.md §D） ----------
+  // 所有登录用户共用（预览态入口隐藏）；替换旧的「展开侧栏并滚到改密按钮」
+  // 行为——打开切片时侧栏是收起的，旧行为看起来像「点了没反应」。
+  // 内容：账户（邮箱/角色）、安全（改密/改绑 → 既有对话框）、Credit（可用
+  // 余额 + 明细/充值链接）、存储（已用/有效容量 + 扩容入口）、数据共享
+  // （既有对话框）、owner 额外「管理后台」。数值只读，写入仍走各自对话框。
+  function acctSettingsSetText(el, text) {
+    if (el) el.textContent = text === null || text === undefined ? "—" : text;
+  }
+
+  function acctSettingsCreditText(data) {
+    data = data || {};
+    if (data.billing_backend === "credits") {
+      var available = formatCreditsWhole(
+        (data.wallet || {}).available_units);
+      return available === null ? null : available + " " + t("credit.balance.unit");
+    }
+    var remaining = formatCreditsWhole(data.remaining_nano_cny);
+    return remaining === null ? null : remaining + " " + t("credit.balance.unit");
+  }
+
+  function acctSettingsRenderCredit(data) {
+    acctSettingsSetText(els.acctSettingsCredit,
+                        acctSettingsCreditText(data));
+    if (els.acctSettingsTopupLink) {
+      els.acctSettingsTopupLink.hidden = !data || !data.can_topup;
+    }
+  }
+
+  function acctSettingsLoadCredit() {
+    acctSettingsSetText(els.acctSettingsCredit, t("acct.balance.loading"));
+    if (els.acctSettingsTopupLink) els.acctSettingsTopupLink.hidden = true;
+    return apiFetch("/api/account/credits").then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (body) {
+        return { status: r.status, body: body || {} };
+      });
+    }).then(function (res) {
+      if (res.status !== 200 || !res.body || !res.body.subject) {
+        acctSettingsSetText(els.acctSettingsCredit,
+                            t("acct.settings.credits.unavailable"));
+        return;
+      }
+      acctSettingsRenderCredit(res.body);
+    }).catch(function () {
+      acctSettingsSetText(els.acctSettingsCredit,
+                          t("acct.settings.credits.unavailable"));
+    });
+  }
+
+  function acctSettingsStorageText(data) {
+    if (!data || !data.quota_applies) return null;
+    var used = storageGbText(data.used_bytes);
+    var quota = storageGbText(data.quota_bytes);
+    if (used === null || quota === null) return null;
+    return used + " / " + quota;
+  }
+
+  function acctSettingsLoadStorage() {
+    acctSettingsSetText(els.acctSettingsStorage,
+                        t("acct.storage.loading"));
+    if (els.acctSettingsStorageLink) {
+      els.acctSettingsStorageLink.hidden = true;
+    }
+    return apiFetch("/api/account/storage").then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (body) {
+        return { status: r.status, body: body || {} };
+      });
+    }).then(function (res) {
+      var data = res.body || {};
+      if (res.status !== 200) {
+        acctSettingsSetText(els.acctSettingsStorage,
+                            t("acct.storage.unavailable"));
+        return;
+      }
+      var text = acctSettingsStorageText(data);
+      acctSettingsSetText(els.acctSettingsStorage,
+                          text === null ? t("acct.storage.unavailable") : text);
+      if (els.acctSettingsStorageLink) {
+        var expansion = data.expansion || null;
+        var reason = expansion && expansion.purchase_block_reason;
+        var blocked = reason === "wallet_not_credits" ||
+          reason === "preview_readonly" || reason === "account_restricted";
+        var preview = !!(data.subject && data.subject.preview);
+        els.acctSettingsStorageLink.hidden =
+          !expansion || blocked || preview;
+      }
+    }).catch(function () {
+      acctSettingsSetText(els.acctSettingsStorage,
+                          t("acct.storage.unavailable"));
+    });
+  }
+
+  function acctSettingsOpen() {
+    if (!els.acctSettingsMask) return;
     if (acctPopCtl) acctPopCtl.close();
-    if (!sidebarCtrl) return;
-    // 沿用既有改密/改绑入口：展开侧栏（手机开抽屉）并滚到侧栏账户区
-    sidebarCtrl.expand();
-    var target = els.changepwBtn || els.changeemailBtn;
-    if (target && typeof target.scrollIntoView === "function") {
-      try { target.scrollIntoView({ block: "center" }); }
-      catch (e) { try { target.scrollIntoView(); } catch (e2) {} }
+    closeSidebarDrawerUnderOverlay();
+    // 账户行来自已缓存的 auth info（applyAuthInfo 同步写入弹层）。
+    acctSettingsSetText(els.acctSettingsEmail,
+                        (els.acctPopEmail && els.acctPopEmail.textContent) || "");
+    acctSettingsSetText(els.acctSettingsRole,
+                        t(currentRole === "owner"
+                          ? "acct.role.owner" : "acct.role.user"));
+    if (els.acctSettingsAdmin) {
+      els.acctSettingsAdmin.hidden = !!previewState || actorRole !== "owner";
+    }
+    els.acctSettingsMask.style.display = "";
+    acctSettingsLoadCredit();
+    acctSettingsLoadStorage();
+    if (els.acctSettingsClose && els.acctSettingsClose.focus) {
+      setTimeout(function () {
+        try { els.acctSettingsClose.focus(); } catch (e) {}
+      }, 30);
+    }
+  }
+
+  function acctSettingsClose() {
+    if (!els.acctSettingsMask) return;
+    var wasOpen = els.acctSettingsMask.style.display !== "none";
+    els.acctSettingsMask.style.display = "none";
+    if (wasOpen && els.acctSettingsBtn && els.acctSettingsBtn.focus) {
+      try { els.acctSettingsBtn.focus(); } catch (e) {}
+    }
+  }
+
+  function initAcctSettings() {
+    if (!els.acctSettingsMask) return;   // demo 壳不渲染
+    els.acctSettingsClose.addEventListener("click", acctSettingsClose);
+    els.acctSettingsDone.addEventListener("click", acctSettingsClose);
+    els.acctSettingsMask.addEventListener("click", function (e) {
+      if (e.target === els.acctSettingsMask) { acctSettingsClose(); }
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" &&
+          els.acctSettingsMask.style.display !== "none") {
+        acctSettingsClose();
+      }
+    });
+    if (els.acctSettingsChangePw) {
+      els.acctSettingsChangePw.addEventListener("click", function () {
+        acctSettingsClose();
+        changepwOpen();
+      });
+    }
+    if (els.acctSettingsChangeEmail) {
+      els.acctSettingsChangeEmail.addEventListener("click", function () {
+        acctSettingsClose();
+        changeemailOpen();
+      });
+    }
+    if (els.acctSettingsDatashare) {
+      els.acctSettingsDatashare.addEventListener("click", function () {
+        acctSettingsClose();
+        datashareOpen();
+      });
     }
   }
 
@@ -14896,7 +15058,7 @@
       },
     });
     if (els.acctSettingsBtn) {
-      els.acctSettingsBtn.addEventListener("click", openAccountSettings);
+      els.acctSettingsBtn.addEventListener("click", acctSettingsOpen);
     }
     // 矩形设置 popover：开合由工具激活状态驱动（toggleRectTool/exitRoi）；
     // 这里只补「点击外部关闭 popover（工具保持激活）」的语义。
@@ -15441,6 +15603,9 @@
 
     // 反馈问题对话框（改版第四轮 §3；侧栏底部 + 账户弹层双入口）
     initFeedbackDialog();
+
+    // 账户设置对话框（docs/owner-parity-plan-20261106.md §D；所有登录用户）
+    initAcctSettings();
 
     // user max_steps 只读同步（AI 预算管理 UI 已迁入 admin 插件，PR5）
     initAiMaxStepsSync();
