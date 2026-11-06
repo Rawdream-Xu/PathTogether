@@ -109,6 +109,20 @@ python credit_payments.py reconcile        # 或等 sweep 摘要
 3. 恢复后按 §4 重放恢复点之后的付款/退款/消费事件，不能只验证服务能启动；
 4. 若已开始真实充值/消费，按 §4 走「向前修复」而不是恢复旧库。
 
+**发布顺序与在途上传（重要）**：
+
+- 本次发布让 owner 立刻受存储配额约束（`upload_guard.quota_applies` 不再
+  按 role 排除 owner）。若镜像已更新但 **owner 迁移尚未执行**，owner 没有
+  `upload_user_quotas` 行 → 首次上传按 env 默认 **10 GiB** 建行，而不是
+  1 TiB。因此必须在开放使用前先跑 `owner-plan` / `owner-apply`（§1.4），
+  或至少用后台把 owner 的基础容量调到 1 TiB。
+- 迁移前已有的 owner 在途上传任务（无本地预约）会在恢复扫描
+  （`renew_active_local_reservations`）中被判定 `local_reservation_invalid`
+  并终止，需重新上传；请在迁移窗口内确认 owner 没有进行中的上传。
+- 同理，owner 的转换产物（conversion settle）会开始累加
+  `upload_user_quotas.used_bytes`（与用户一致）；迁移前已发布的历史文件
+  不计入（没有行/没有记账），这是预期行为。
+
 ## 2. 定时任务
 
 | 任务 | 建议频率 | 命令 | 说明 |
