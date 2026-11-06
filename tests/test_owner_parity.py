@@ -614,3 +614,24 @@ def test_topup_availability_with_production_env(monkeypatch, tmp_path):
             "enabled": True, "reason": None}
     finally:
         support_payments.reset_runtime_cache()
+
+
+def test_owner_can_create_topup_order(topup_env, monkeypatch):
+    """owner 与 user 一样能建充值单（资格闸之后订单/支付 URL 全链路）。"""
+    _seed_prices()
+    owner = _owner()
+    _migrate(owner)
+    monkeypatch.setattr(
+        support_payments, "build_page_pay_url",
+        lambda *args, **kwargs: "https://pay.example.test/owner-order")
+    packages = credit_payments.packages_payload()
+    package = packages["packages"][0]
+    result = credit_payments.create_topup_order(
+        owner["user_id"], package_id=package["package_id"],
+        package_version=packages["version"],
+        idempotency_key="owner-topup-" + uuid.uuid4().hex[:8],
+        return_url="http://localhost/app/credits/orders/{order_id}")
+    assert result["duplicate"] is False
+    assert result["order"]["payment_state"] == "paying"
+    assert result["order"]["credits"] == package["credits"]
+    assert result["pay_url"] == "https://pay.example.test/owner-order"
