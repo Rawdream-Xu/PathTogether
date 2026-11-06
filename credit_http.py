@@ -135,9 +135,10 @@ def _allowance_payload(allow):
 def wallet(identity, *, preview):
     """GET /api/account/credits → ``(payload, status)``。
 
-    user+credits：钱包快照 + can_topup + 套餐 + 充值可用性；
-    user+legacy：旧总额度（CNY nano 字符串，不换算成 Credit）；
-    owner：当月窗口（peek 不建行）。
+    2026-11-06 owner parity：**先按账户账务后端分流**——只要
+    ``billing_backend == credits``，不论 role（owner/user）都返回同一个钱包
+    快照 + can_topup + 套餐 + 充值可用性；只有未迁移的 owner 才保留旧月窗口
+    路径（兼容与回滚），legacy user 走一次性总额度（CNY nano 字符串）。
     """
     ident = identity or {}
     uid = str(ident.get("user_id") or "")
@@ -146,6 +147,26 @@ def wallet(identity, *, preview):
     as_of = _now_z()
 
     try:
+        if uid:
+            snapshot = credit_store.wallet_snapshot(uid)
+            if snapshot is not None and \
+                    snapshot.get("billing_backend") == credit_store.BACKEND_CREDITS:
+                user = user_store.get_user(uid)
+                can_topup, reason = credit_payments.can_topup(
+                    user, preview=bool(preview))
+                package_payload = credit_payments.packages_payload()
+                return {
+                    "subject": subject,
+                    "billing_backend": "credits",
+                    "currency": "CNY",
+                    "wallet": _stringify_wallet(snapshot),
+                    "can_topup": bool(can_topup),
+                    "topup_reason": reason,
+                    "packages": package_payload,
+                    "topup": credit_payments.topup_availability(),
+                    "as_of": as_of,
+                }, 200
+
         if role == user_store.ROLE_OWNER:
             win = spend_store.peek_current_window("owner", uid)
             if win is not None:
@@ -177,25 +198,6 @@ def wallet(identity, *, preview):
                 "period_end": period[1],
                 "can_topup": False,
                 "topup_reason": "not_user",
-                "as_of": as_of,
-            }, 200
-
-        snapshot = credit_store.wallet_snapshot(uid)
-        if snapshot is not None and \
-                snapshot.get("billing_backend") == credit_store.BACKEND_CREDITS:
-            user = user_store.get_user(uid)
-            can_topup, reason = credit_payments.can_topup(
-                user, preview=bool(preview))
-            package_payload = credit_payments.packages_payload()
-            return {
-                "subject": subject,
-                "billing_backend": "credits",
-                "currency": "CNY",
-                "wallet": _stringify_wallet(snapshot),
-                "can_topup": bool(can_topup),
-                "topup_reason": reason,
-                "packages": package_payload,
-                "topup": credit_payments.topup_availability(),
                 "as_of": as_of,
             }, 200
 
@@ -392,15 +394,13 @@ _LEDGER_SQL = (
 def ledger(identity, args):
     """GET /api/account/credits/ledger → ``(payload, status)``。
 
-    仅当前 user 的 credits 账户、仅 ``credits_v1`` 流水。非 credits 用户返回
-    409 ``credit_wallet_not_enabled``（明确「没有钱包」而非「没有记录」——
-    避免把 legacy 账户误呈现为空账本）。
+    当前 effective subject 的 credits 账户、仅 ``credits_v1`` 流水（2026-11-06
+    owner parity 起不再按 role 拒绝：owner 迁移后与用户看到同一个账本）。
+    非 credits 账户返回 409 ``credit_wallet_not_enabled``（明确「没有钱包」
+    而非「没有记录」——避免把 legacy 账户误呈现为空账本）。
     """
     ident = identity or {}
     uid = str(ident.get("user_id") or "")
-    role = ident.get("role") or user_store.ROLE_USER
-    if role != user_store.ROLE_USER:
-        return _err("当前账户未启用 Credit 钱包", "credit_wallet_not_enabled", 409)
     try:
         limit = _parse_limit(_args_get(args, "limit"),
                              default=LEDGER_DEFAULT_LIMIT)
@@ -566,8 +566,9 @@ def create_storage_expansion(identity, body, idempotency_key, *, preview=False):
     """POST /api/account/storage/expansions → ``{expansion, duplicate}``。
 
     body 形状 / Idempotency-Key 在 HTTP 层先校验（400 invalid_request）；
-    余额不足 / 超出份数上限 / 受限 / legacy / owner / 预览态由
-    storage_expansion 抛出并按 code/http_status 映射。
+    余额不足 / 超出份数上限 / 受限 / legacy（未开通钱包，含未迁移 owner）/
+    预览态由 storage_expansion 抛出并按 code/http_status 映射。已迁移的
+    owner 与普通用户规则完全相同（2026-11-06 owner parity）。
     """
     ident = identity or {}
     uid = str(ident.get("user_id") or "")

@@ -1163,6 +1163,7 @@ def _create_synthetic_credit_hold_tx(cur, acct, event, *, installation_id,
     ``reason`` 为 :data:`RECONCILIATION_MISSING_AUTHORIZATION` 或
     :data:`RECONCILIATION_MIGRATION_BOUNDARY_UNVERIFIED`；``charge`` 仅
     priced 事件有值（记入 ``actual_nano_cny`` 供核对，不产生扣费）。
+    ``subject_type`` 取事件权威主体（owner/user；2026-11-06 owner parity）。
     """
     hold_id = _HOLD_ID_PREFIX + secrets.token_hex(12)
     metadata = {"synthetic": True, "request_hash": None,
@@ -1177,10 +1178,11 @@ def _create_synthetic_credit_hold_tx(cur, acct, event, *, installation_id,
         " reserved_nano_cny, enforcement_mode, denial_reason, "
         " billing_backend, reconciliation_reason, reconciliation_at, "
         " event_id, actual_nano_cny) "
-        "VALUES (%s,%s,%s,'user',%s,%s,%s,%s,NULL,NULL,false,"
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NULL,NULL,false,"
         "'pending_reconciliation',%s,%s,0,%s,NULL,'credits',%s,%s,%s,%s) "
         "RETURNING " + _HOLD_SEL,
-        (hold_id, event["call_id"], acct["account_id"], event["subject_id"],
+        (hold_id, event["call_id"], acct["account_id"],
+         event["subject_type"], event["subject_id"],
          installation_id, event["session_id"], event["model"], now,
          psycopg.types.json.Jsonb(metadata), mode, reason, now,
          event["event_id"],
@@ -1607,9 +1609,9 @@ def _ingest_usage_event_tx(cur, event, *, installation_id, plugin_id,
     credit_hold_out = credit_hold
     missing_authorization = False
     if route_backend == "credits":
-        if subject_type != "user":
+        if subject_type not in ("user", "owner"):
             raise UsageSubjectConflictError(
-                "Credit 账户事件的权威主体必须为 user",
+                "Credit 账户事件的权威主体必须为 user/owner",
                 resolved=(subject_type, subject_id))
         created_missing_authorization_hold = False
         if credit_hold is None:
@@ -2152,7 +2154,8 @@ def _credit_route_tx(cur, *, call_id, subject_type, subject_id,
     """无锁判定一次调用/事件应走 legacy 还是 Credit 账务（spec §5.1/原方案 §9.2）。
 
     优先级：已有 hold（call_id 唯一）以 ``hold.billing_backend`` 为准；
-    否则 ``subject_type='user'`` 且账户 ``billing_backend='credits'``：
+    否则 ``subject_type`` 为 owner|user（2026-11-06 owner parity）且账户
+    ``billing_backend='credits'``：
       - ``credit_migrated_at`` 为空（注册即 credits）→ credits；
       - 已迁移且 ``occurred_at`` 非空（ingest 路径）→ 取**可信服务端运行
         起始时间**（``ai_run_bindings.created_at``，回退
@@ -2174,7 +2177,7 @@ def _credit_route_tx(cur, *, call_id, subject_type, subject_id,
     """
     hold = _fetch_hold_by_call(cur, call_id) if call_id else None
     account = None
-    if subject_type == "user" and subject_id:
+    if subject_type in ("user", "owner") and subject_id:
         account = _credit().get_account_by_user_tx(cur, subject_id)
     account_is_credits = bool(
         account is not None
@@ -2557,9 +2560,10 @@ def _authorize_hold_tx(cur, body, *, installation_id, plugin_id, now,
          "user_id": body.get("user_id")},
         installation_id)
 
-    # -- 步骤 4a：Credit 路由（spec §5.2）：role=user 且账户 credits →
-    #    独立分支；永远强制，与 spend_enforcement_mode 无关。 --
-    if subject_type == "user":
+    # -- 步骤 4a：Credit 路由（spec §5.2）：subject 为 owner|user 且账户
+    #    credits（2026-11-06 owner parity 起含已迁移的 owner）→ 独立分支；
+    #    永远强制，与 spend_enforcement_mode 无关。 --
+    if subject_type in ("user", "owner"):
         account = _credit().get_account_by_user_tx(cur, subject_id)
         if account is not None \
                 and account["billing_backend"] == _credit().BACKEND_CREDITS:
