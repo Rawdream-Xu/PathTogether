@@ -373,6 +373,10 @@ def test_schema_migrations_recorded(conn):
         # 付费存储扩容（2026-11-06）：storage_debit 流水 + storage_expansions
         # + upload_user_quotas.extra_quota_bytes。
         "0092_storage_expansions.sql",
+        # owner parity（2026-11-06）：billing_holds_credits_shape_check 的
+        # subject_type 词表由 'user' 放宽为 'user'|'owner'——owner 迁移
+        # Credit 钱包后同样走 hold 预占/结算。
+        "0093_owner_credit_holds.sql",
     ]
 
 

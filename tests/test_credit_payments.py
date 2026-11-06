@@ -306,8 +306,17 @@ def test_can_topup_rules(pay_env, rt):
         False, "user_disabled")
     user_store.set_user_disabled(user["user_id"], False)
 
+    # 2026-11-06 owner parity：owner 与受邀用户同一充值规则——未开通钱包
+    # 仍是 wallet_not_credits；开通 credits 钱包后允许充值。
     owner = {"user_id": "usr_owner", "role": "owner", "disabled": False}
-    assert cp.can_topup(owner, preview=False) == (False, "not_user")
+    assert cp.can_topup(owner, preview=False) == (
+        False, "wallet_not_credits")
+    owner_user = user_store.create_user(
+        "topup-owner@x.com", "ownerpass123456", role="owner")
+    ch.provision_user(owner_user["user_id"], grant_units=0)
+    assert cp.can_topup(
+        user_store.get_user(owner_user["user_id"]), preview=False) == (
+            True, None)
 
     legacy_user = ch.new_user()
     _execute(
