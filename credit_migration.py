@@ -63,6 +63,29 @@ MIGRATION_AUDIT_ACTION = "credit.wallet_migrated"
 #: 新用户后端切换审计动作
 NEW_USER_BACKEND_AUDIT_ACTION = "credit.new_user_backend_changed"
 
+# --------------------------------------------------------------------------- #
+# owner 迁移（2026-11-06 owner parity；docs/owner-parity-plan-20261106.md §A）
+# --------------------------------------------------------------------------- #
+#: owner 迁移赠送（Credits；promotional 批次，不按月重置）
+OWNER_GRANT_CREDITS = 100_000
+#: owner 赠送批次来源键模板（同一 owner 只发行一次；幂等重跑返回原批次）
+OWNER_SOURCE_KEY_TEMPLATE = "owner-promotional:%s:v1"
+#: owner 迁移快照标识（写入 credit_migration.source）
+OWNER_MIGRATION_SOURCE = "owner_parity_v1"
+#: owner 迁移审计动作
+OWNER_MIGRATION_AUDIT_ACTION = "credit.owner_migrated"
+#: owner 基础存储容量（1 TiB；行不存在时建行，不改 env 默认 10 GiB）
+OWNER_BASE_QUOTA_BYTES = 1024 ** 4
+#: owner 迁移赠送原因文案（流水 reason）
+OWNER_GRANT_REASON = "owner parity migration grant"
+#: owner plan 状态词表（顺序即报告顺序）
+OWNER_PLAN_STATUSES = (
+    "ready",
+    "already_migrated",
+    "grant_mismatch",
+    "not_owner",
+)
+
 #: plan 状态词表（顺序即报告顺序）
 PLAN_STATUSES = (
     "ready",
@@ -720,6 +743,426 @@ def verify():
                 reconcile_out["discrepancy_count"],
         },
         "reconcile": reconcile_out,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# owner 迁移：只迁 role=owner，发 100,000 Credits promotional，切 credits
+# （docs/owner-parity-plan-20261106.md §A2）
+# --------------------------------------------------------------------------- #
+def _require_credits_amount(credits):
+    if not _is_int(credits) or credits <= 0:
+        raise CreditMigrationError("credits 需为正整数（Credits）")
+    return int(credits)
+
+
+def _owner_users_tx(cur, user_id=None):
+    """选中的 owner 行（指定 user_id 时同时返回角色供状态判定）。"""
+    if user_id:
+        cur.execute(
+            "SELECT user_id, role, disabled FROM users WHERE user_id=%s",
+            (user_id,))
+    else:
+        cur.execute(
+            "SELECT user_id, role, disabled FROM users WHERE role='owner' "
+            "ORDER BY user_id")
+    return [dict(row) for row in cur.fetchall()]
+
+
+def _owner_grant_lot_tx(cur, account_id, user_id):
+    """按 owner 来源键读赠送批次（不存在 → None）。"""
+    if account_id is None:
+        return None
+    cur.execute(
+        "SELECT lot_id, kind, issued_units, remaining_units "
+        "  FROM credit_lots WHERE account_id=%s AND source_key=%s",
+        (account_id, OWNER_SOURCE_KEY_TEMPLATE % user_id))
+    row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
+def _owner_window_snapshot_tx(cur, user_id):
+    """owner 旧月窗口快照（最新一行；只读，不建行；时间转 ISO 字符串）。"""
+    cur.execute(
+        "SELECT window_id, limit_nano_snapshot, spent_nano_cny, "
+        "       reserved_nano_cny, window_start, window_end "
+        "  FROM ai_spend_windows "
+        " WHERE subject_type='owner' AND subject_id=%s "
+        " ORDER BY window_start DESC LIMIT 1", (user_id,))
+    row = cur.fetchone()
+    if row is None:
+        return None
+    out = dict(row)
+    for key in ("limit_nano_snapshot", "spent_nano_cny", "reserved_nano_cny"):
+        if out.get(key) is not None:
+            out[key] = int(out[key])
+    for key in ("window_start", "window_end"):
+        value = out.get(key)
+        if hasattr(value, "isoformat"):
+            out[key] = value.isoformat()
+    return out
+
+
+def _owner_quota_tx(cur, user_id):
+    """owner 存储配额行（不存在 → None；只读不建行）。"""
+    cur.execute(
+        "SELECT quota_bytes, extra_quota_bytes, used_bytes, reserved_bytes "
+        "  FROM upload_user_quotas WHERE user_id=%s", (user_id,))
+    row = cur.fetchone()
+    if row is None:
+        return None
+    out = {key: int(value) for key, value in dict(row).items()}
+    out["quota_bytes"] = out["quota_bytes"] + out["extra_quota_bytes"]
+    return out
+
+
+def _owner_plan_row_tx(cur, user, *, credits):
+    """单个 owner 的 plan 行。"""
+    user_id = user["user_id"]
+    grant_units = credits * credit_store.UNITS_PER_CREDIT
+    account = credit_store.get_account_by_user_tx(cur, user_id)
+    backend = account["billing_backend"] if account is not None else None
+    lot = _owner_grant_lot_tx(
+        cur, account["account_id"] if account is not None else None,
+        user_id)
+    quota = _owner_quota_tx(cur, user_id)
+    window = _owner_window_snapshot_tx(cur, user_id)
+    if (user.get("role") or "") != "owner":
+        status = "not_owner"
+    elif backend == credit_store.BACKEND_CREDITS:
+        if lot is not None and int(lot["issued_units"]) == grant_units:
+            status = "already_migrated"
+        else:
+            status = "grant_mismatch"
+    elif lot is not None:
+        status = "grant_mismatch"
+    else:
+        status = "ready"
+    return {
+        "user_id": user_id,
+        "role": user.get("role"),
+        "disabled": bool(user.get("disabled")),
+        "billing_backend": backend,
+        "account_id": account["account_id"] if account is not None else None,
+        "grant_units": grant_units,
+        "grant_credits": credits,
+        "existing_grant_units": (int(lot["issued_units"])
+                                 if lot is not None else None),
+        "legacy_window": window,
+        "quota": quota,
+        # 验收断言：owner 已用量必须远低于 1 TiB 基础容量。无配额行时视为
+        # 0（迁移会按 1 TiB 建行）；有行时 used+reserved 必须装得下。
+        "quota_ok": (True if quota is None
+                     else quota["used_bytes"] + quota["reserved_bytes"]
+                     <= quota["quota_bytes"]),
+        "status": status,
+    }
+
+
+def owner_plan_hash(rows, *, credits):
+    """owner plan 的 canonical SHA-256（含 credits 参数，防止换额度重放）。"""
+    ordered = sorted(rows, key=lambda row: row["user_id"])
+    payload = [
+        [
+            row["user_id"],
+            row["role"],
+            row["billing_backend"],
+            row["existing_grant_units"],
+            row["grant_units"],
+            row["status"],
+            int(credits),
+        ]
+        for row in ordered
+    ]
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        allow_nan=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _owner_plan_payload_tx(cur, *, user_id, credits):
+    users = _owner_users_tx(cur, user_id)
+    if user_id and not users:
+        raise CreditMigrationError(
+            "user_id 不存在：%s" % user_id)
+    rows = [_owner_plan_row_tx(cur, user, credits=credits) for user in users]
+    counts = {status: 0 for status in OWNER_PLAN_STATUSES}
+    for row in rows:
+        counts[row["status"]] = counts.get(row["status"], 0) + 1
+    return {
+        "rows": rows,
+        "counts": counts,
+        "credits": int(credits),
+        "grant_units": sum(row["grant_units"] for row in rows
+                           if row["status"] == "ready"),
+        "quota_ok": all(row["quota_ok"] for row in rows),
+        "plan_hash": owner_plan_hash(rows, credits=credits),
+    }
+
+
+def owner_plan(*, user_id=None, credits=OWNER_GRANT_CREDITS):
+    """只读盘点 owner 迁移计划（dry-run 用；不写任何行）。"""
+    credits = _require_credits_amount(credits)
+    if user_id is not None:
+        user_id = _require_text(user_id, "user_id")
+    conn = _connect()
+    try:
+        with pg_store.transaction(conn) as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                return _owner_plan_payload_tx(
+                    cur, user_id=user_id, credits=credits)
+    finally:
+        conn.close()
+
+
+def _ensure_owner_quota_row_tx(cur, user_id):
+    """owner 基础容量行（1 TiB）：仅在不存在时创建 → ``"created"|"existing"``。
+
+    管理员已调整过的行不被覆盖（幂等）；env 默认值保持 10 GiB 不变。
+    """
+    cur.execute(
+        "INSERT INTO upload_user_quotas (user_id, quota_bytes) "
+        "VALUES (%s, %s) ON CONFLICT (user_id) DO NOTHING RETURNING user_id",
+        (user_id, OWNER_BASE_QUOTA_BYTES))
+    created = cur.fetchone() is not None
+    return "created" if created else "existing"
+
+
+def _owner_apply_one(conn, row, expected_hash, actor_user_id, credits):
+    """单个 owner 的独立事务；返回结果 dict（异常由调用方兜底）。"""
+    user_id = row["user_id"]
+    grant_units = int(row["grant_units"])
+    credits = int(credits)
+
+    def run(cur):
+        account = credit_store.get_account_by_user_tx(cur, user_id)
+        if account is not None:
+            account = credit_store.lock_account_tx(
+                cur, account["account_id"])
+        if account is not None \
+                and account["billing_backend"] == credit_store.BACKEND_CREDITS:
+            lot = _owner_grant_lot_tx(cur, account["account_id"], user_id)
+            if lot is not None and int(lot["issued_units"]) == grant_units:
+                return {"result": "already_migrated",
+                        "account_id": account["account_id"],
+                        "grant_units": grant_units,
+                        "quota_action": _ensure_owner_quota_row_tx(
+                            cur, user_id)}
+            return {"result": "changed_since_plan",
+                    "reason": "credits_without_matching_grant"}
+
+        # 迁移时刻 = 事务 now()（同事务内与 credit_migrated_at 完全一致，
+        # verify 的 created_at < migrated_at 口径因此无边界抖动）。
+        cur.execute("SELECT now() AS ts")
+        migrated_at = cur.fetchone()["ts"]
+        legacy_sum, legacy_count = 0, 0
+        if account is not None:
+            # 与 verify()/_verify_account_tx 完全同口径（created_at < 迁移时刻）
+            cur.execute(
+                "SELECT COALESCE(SUM(amount_nano_cny), 0)::bigint AS total, "
+                "       COUNT(*)::bigint AS n "
+                "  FROM billing_ledger_entries "
+                " WHERE account_id=%s AND ledger_scope='legacy' "
+                "   AND created_at < %s",
+                (account["account_id"], migrated_at))
+            legacy_row = cur.fetchone()
+            legacy_sum = int(legacy_row["total"])
+            legacy_count = int(legacy_row["n"])
+        window = _owner_window_snapshot_tx(cur, user_id)
+        migration = {
+            # verify() 口径：owner 不转换旧窗口余额，legacy_grant 发行量为 0。
+            "legacy_grant_units": 0,
+            "legacy_ledger_sum_nano": legacy_sum,
+            "legacy_ledger_count": legacy_count,
+            "grant_credits": credits,
+            "grant_units": grant_units,
+            "promotional_units": grant_units,
+            "source": OWNER_MIGRATION_SOURCE,
+            "source_version": MIGRATION_SOURCE_VERSION,
+            "legacy_window": window,
+            "plan_hash": expected_hash,
+            "migrated_by": actor_user_id,
+            "migrated_at": migrated_at.isoformat(),
+        }
+        account = credit_store.provision_credit_account_tx(
+            cur, user_id, grant_units=grant_units,
+            source_key=OWNER_SOURCE_KEY_TEMPLATE % user_id,
+            reason=OWNER_GRANT_REASON, kind="promotional",
+            actor_user_id=actor_user_id, migration=migration)
+        quota_action = _ensure_owner_quota_row_tx(cur, user_id)
+        share_store_pg.record_audit_tx(
+            cur, OWNER_MIGRATION_AUDIT_ACTION,
+            actor_user_id=actor_user_id, actor_role="owner",
+            target_type="billing_account", target_id=account["account_id"],
+            detail={
+                "user_id": user_id,
+                "grant_credits": credits,
+                "grant_units": grant_units,
+                "legacy_ledger_sum_nano": legacy_sum,
+                "legacy_ledger_count": legacy_count,
+                "quota_action": quota_action,
+                "plan_hash": expected_hash,
+            })
+        return {
+            "result": "migrated",
+            "account_id": account["account_id"],
+            "grant_units": grant_units,
+            "legacy_ledger_sum_nano": legacy_sum,
+            "legacy_ledger_count": legacy_count,
+            "quota_action": quota_action,
+        }
+
+    with pg_store.transaction(conn) as c:
+        with c.cursor() as cur:
+            outcome = run(cur)
+    return outcome
+
+
+def owner_apply(expected_hash, *, actor_user_id, user_id=None,
+                credits=OWNER_GRANT_CREDITS, dry_run=False):
+    """按已确认 hash 执行 owner 迁移（幂等；dry-run 只读）。
+
+    前置（写路径；任一不满足 → 不写任何行）：
+      1. ``ai_dispatch_maintenance`` 精确为 true（迁移期间无新调用）；
+      2. 重算 owner plan 的 hash == ``expected_hash``。
+
+    ``dry_run=True`` 时维护闸不参与判定（不写任何行），只返回 plan 预览。
+    每个 owner 独立事务：锁账户 → 记录旧 ledger/窗口快照 → 切 credits +
+    发行 100,000 Credits promotional 批次（source_key
+    ``owner-promotional:<user_id>:v1``）→ 建 1 TiB 基础容量行（仅当缺失）→
+    audit。finally 附 ``credit_store.reconcile_report`` 摘要。
+
+    回滚：0088 的 ``billing_accounts_backend_guard`` 明确禁止 credits →
+    legacy（一次性迁移）；回滚按运维文档执行——停 AI 派发、确认没有 credits
+    消费后恢复迁移前的数据库备份与旧镜像。见
+    docs/credit-wallet-ops-runbook-20261027.md。
+    """
+    expected_hash = _require_text(expected_hash, "expected_hash")
+    actor_user_id = _require_text(actor_user_id, "actor_user_id")
+    credits = _require_credits_amount(credits)
+    if user_id is not None:
+        user_id = _require_text(user_id, "user_id")
+
+    conn = _connect()
+    try:
+        if not dry_run:
+            _acquire_session_lock(conn)
+        try:
+            with pg_store.transaction(conn) as c:
+                with c.cursor() as cur:
+                    cur.execute(
+                        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                    maintenance = _maintenance_enabled_tx(cur)
+                    plan_payload = _owner_plan_payload_tx(
+                        cur, user_id=user_id, credits=credits)
+            if dry_run:
+                return {
+                    "ok": True,
+                    "dry_run": True,
+                    "aborted": None,
+                    "expected_hash": expected_hash,
+                    "plan_hash": plan_payload["plan_hash"],
+                    "hash_matches": (plan_payload["plan_hash"]
+                                     == expected_hash),
+                    "counts": plan_payload["counts"],
+                    "rows": plan_payload["rows"],
+                }
+            if not maintenance:
+                return _owner_aborted_report(
+                    "maintenance_off", expected_hash=expected_hash,
+                    plan_payload=plan_payload)
+            if plan_payload["plan_hash"] != expected_hash:
+                return _owner_aborted_report(
+                    "hash_mismatch", expected_hash=expected_hash,
+                    plan_payload=plan_payload)
+
+            results = []
+            for row in plan_payload["rows"]:
+                status = row["status"]
+                if status == "already_migrated":
+                    results.append({
+                        "user_id": row["user_id"], "status": status,
+                        "result": "already_migrated",
+                        "grant_units": row["grant_units"],
+                    })
+                    continue
+                if status != "ready":
+                    results.append({
+                        "user_id": row["user_id"], "status": status,
+                        "result": "skipped",
+                        "grant_units": row["grant_units"],
+                    })
+                    continue
+                try:
+                    outcome = _owner_apply_one(
+                        conn, row, expected_hash, actor_user_id, credits)
+                except Exception as exc:  # 单 owner 失败只回滚该 owner
+                    results.append({
+                        "user_id": row["user_id"], "status": status,
+                        "result": "error", "grant_units": row["grant_units"],
+                        "error": str(getattr(exc, "code",
+                                             type(exc).__name__)),
+                    })
+                    continue
+                results.append({
+                    "user_id": row["user_id"], "status": status,
+                    "grant_units": row["grant_units"], **outcome,
+                })
+        finally:
+            if not dry_run:
+                _release_session_lock(conn)
+    finally:
+        conn.close()
+
+    summary = {
+        "owners": len(results),
+        "migrated": sum(1 for r in results if r["result"] == "migrated"),
+        "already_migrated": sum(
+            1 for r in results if r["result"] == "already_migrated"),
+        "skipped": sum(1 for r in results if r["result"] == "skipped"),
+        "changed_since_plan": sum(
+            1 for r in results if r["result"] == "changed_since_plan"),
+        "errors": sum(1 for r in results if r["result"] == "error"),
+    }
+    migrated_grant = sum(r["grant_units"] for r in results
+                         if r["result"] == "migrated")
+    summary.update(_units_payload(migrated_grant))
+    reconcile_out = None
+    if summary["migrated"] or summary["already_migrated"]:
+        reconcile_out = _reconcile_summary(credit_store.reconcile_report())
+    return {
+        "ok": summary["errors"] == 0 and summary["changed_since_plan"] == 0
+              and (reconcile_out is None or reconcile_out["ok"]),
+        "dry_run": False,
+        "aborted": None,
+        "expected_hash": expected_hash,
+        "plan_hash": plan_payload["plan_hash"],
+        "counts": plan_payload["counts"],
+        "results": results,
+        "summary": summary,
+        "reconcile": reconcile_out,
+    }
+
+
+def _owner_aborted_report(aborted, *, expected_hash, plan_payload=None):
+    return {
+        "ok": False,
+        "dry_run": False,
+        "aborted": aborted,
+        "expected_hash": expected_hash,
+        "plan_hash": (plan_payload or {}).get("plan_hash"),
+        "counts": (plan_payload or {}).get("counts"),
+        "rows": (plan_payload or {}).get("rows") or [],
+        "results": [],
+        "summary": {
+            "owners": len((plan_payload or {}).get("rows") or []),
+            "migrated": 0, "already_migrated": 0, "skipped": 0,
+            "changed_since_plan": 0, "errors": 0,
+            "grant_units": 0, "grant_credits": "0", "grant_cny": "0",
+        },
+        "reconcile": None,
     }
 
 
