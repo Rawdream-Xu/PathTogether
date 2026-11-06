@@ -41,9 +41,32 @@ def _sql(fn):
         conn.close()
 
 
+def _mk_owner(user_id, quota=1024 ** 4):
+    """2026-11-06 owner parity：owner 登录账号与用户同口径受配额约束——
+    准入需要一个真实 users 行（upload_user_quotas.user_id 外键）。
+
+    本文件用多个合成 owner id 做容量/FIFO 用例，而库约束只允许**一个**启用
+    owner（users_single_enabled_owner_key）；这些合成行一律 disabled=true
+    （配额判定只看身份/角色，不看 enabled），真实单 owner 语义不受影响。
+    """
+    def op(cur):
+        cur.execute(
+            "INSERT INTO users (user_id, login_id, display_name, role, "
+            "disabled, created_at) VALUES (%s, %s, %s, 'owner', true, "
+            "now()) ON CONFLICT (user_id) DO NOTHING",
+            (user_id, user_id, user_id))
+        cur.execute(
+            "INSERT INTO upload_user_quotas (user_id, quota_bytes) "
+            "VALUES (%s, %s) ON CONFLICT (user_id) DO NOTHING",
+            (user_id, quota))
+    _sql(op)
+
+
 def _mkjob(owner="own", role="owner", size=500_000, key=None, name="a.svs"):
     if key is None:
         key = "idem-%s" % size
+    if role == "owner" and owner:
+        _mk_owner(owner)
     return ist.create_waiting_job(
         owner, role, name, name, "svs", size, idempotency_key=key)[0]
 
@@ -68,7 +91,8 @@ def _mk_user(user_id, quota=20 * 1024 ** 3):
 # --------------------------------------------------------------------------- #
 # 创建 / 准入 / 幂等
 # --------------------------------------------------------------------------- #
-def test_create_waiting_then_admit_owner_no_quota():
+def test_create_waiting_then_admit_owner_reserves_quota():
+    """2026-11-06 owner parity：owner 与用户同口径，准入即预占本地配额。"""
     job = _mkjob(size=500_000)
     assert job["state"] == ist.WAITING
     assert job["pool_reserved_bytes"] == 0
@@ -77,7 +101,12 @@ def test_create_waiting_then_admit_owner_no_quota():
     assert out["outcome"] == "admitted"
     assert out["job"]["state"] == ist.PREPARING
     assert out["job"]["pool_reserved_bytes"] == 500_000
-    assert out["job"]["local_reservation_id"] is None  # owner 不走本地配额
+    assert out["job"]["local_reservation_id"] is not None  # owner 也预占配额
+    row = _sql(lambda cur: (
+        cur.execute("SELECT reserved_bytes FROM upload_user_quotas "
+                    "WHERE user_id='own'"),
+        cur.fetchone())[1])
+    assert row["reserved_bytes"] == 500_000
     assert cos_pool_store.get_pool_state()["reserved_bytes"] == 500_000
     assert out["job"]["job_deadline_at"] > out["job"]["created_at"]
     # 重复准入：已非 waiting → 幂等返回现状

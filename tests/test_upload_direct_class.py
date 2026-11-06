@@ -601,7 +601,26 @@ def _mk_user(user_id, quota=20 * 1024 ** 3):
     _sql(op)
 
 
+def _mk_owner(user_id, quota=1024 ** 4):
+    """2026-11-06 owner parity：owner 登录账号与用户同口径受配额约束——
+    准入需要真实 users 行（upload_user_quotas.user_id 外键）。合成 id 用
+    disabled=true（库只允许一个启用 owner；配额判定不看 enabled）。"""
+    def op(cur):
+        cur.execute(
+            "INSERT INTO users (user_id, login_id, display_name, role, "
+            "disabled, created_at) VALUES (%s, %s, %s, 'owner', true, "
+            "now()) ON CONFLICT (user_id) DO NOTHING",
+            (user_id, user_id, user_id))
+        cur.execute(
+            "INSERT INTO upload_user_quotas (user_id, quota_bytes) "
+            "VALUES (%s, %s) ON CONFLICT (user_id) DO NOTHING",
+            (user_id, quota))
+    _sql(op)
+
+
 def _mkjob(owner, role, size, name, ext, direct_class=None, kind="native"):
+    if role == "owner" and owner:
+        _mk_owner(owner)
     return ist.create_waiting_job(
         owner, role, name, name, ext, size,
         idempotency_key="K%d" % next(_seq), direct_class=direct_class,

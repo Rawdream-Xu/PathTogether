@@ -417,12 +417,14 @@ def classify_producer(row):
 
 
 def _upload_quota_duty(row):
-    """R15：上传任务配额身份合同（与 upload_guard.quota_applies 同语义）。
+    """R15：上传任务配额身份合同（创建时快照优先，NULL 走历史回退）。
 
     创建时快照（0074 quota_mode）优先——角色事后经 SQL 变更不影响历史
-    裁决；存量 NULL 按当前 users.role：空 owner=本地免登录豁免；非 user
-    角色豁免；无用户行（非空 owner）= 不可证明 → None（核账阻断人工核
-    对，不自动终止）。"""
+    裁决。存量 NULL（2026-11-06 owner parity 之前创建的任务）：那时只有
+    role=user 是配额主体，owner 身份合法无预约；因此 NULL 行只在当前
+    users.role='user' 时算 duty，owner 仍按历史语义豁免——**不得**对迁移
+    前的老上传追溯补费/终止。空 owner=本地免登录豁免；无用户行（非空
+    owner）= 不可证明 → None（核账阻断人工核对，不自动终止）。"""
     qm = row.get("quota_mode")
     if qm in ("duty", "exempt"):
         return qm == "duty"

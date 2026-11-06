@@ -142,11 +142,13 @@ def test_active_job_with_foreign_binding_terminates_without_touching_it():
     assert _res(other) == ("reserved", "upload_task", "upt_foreign")
 
 
-def test_exempt_identity_jobs_reported_exempt():
+def test_owner_jobs_renew_like_user_jobs():
+    """2026-11-06 owner parity：登录态 owner 与用户同口径——有绑定预约时
+    续租为 renewed（exempt 只剩历史/本机无 user_id 行，无法经 API 创建）。"""
     job = h._mkjob(owner="own", role="owner", size=150)
     h._admit(job["job_id"])
     results = ist.renew_active_local_reservations()
-    assert results[job["job_id"]] == "exempt"
+    assert results[job["job_id"]] == "renewed"
 
 
 # --------------------------------------------------------------------------- #

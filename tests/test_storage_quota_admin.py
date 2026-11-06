@@ -7,9 +7,10 @@
     值与 dogfood 不动；重跑幂等；used > quota 时 reserve 正常拒绝
     （不崩溃、不下溢）；
   - admin API：GET/PUT/restore-default 的 owner 门控、参数边界、行惰性创建、
-    used/reserved 保留、审计（upload.user_quota_update）；
-  - 自助只读 GET /api/account/storage（role=user 返回实际配额；owner 不适用；
-    无行时不产生行）；
+    used/reserved 保留、审计（upload.user_quota_update）；owner 目标同样可读可改
+    （2026-11-06 owner parity）；
+  - 自助只读 GET /api/account/storage（role=owner|user 返回实际配额；
+    本机免登录不适用；无行时不产生行）；
   - 配额类 ingestion 终态响应附带实际 quota_bytes（前端友好文案取数）。
 
 运行：cd 项目根 && python3 -m pytest tests/test_storage_quota_admin.py -q
@@ -274,14 +275,23 @@ def test_admin_storage_quota_set_creates_missing_row():
         "quota_bytes": 2 * GiB, "used_bytes": 0, "reserved_bytes": 0}
 
 
-def test_admin_storage_quota_rejects_owner_and_missing_user():
+def test_admin_storage_quota_allows_owner_and_rejects_missing_user():
+    """2026-11-06 owner parity：owner 与用户同口径，后台可改其基础容量。"""
     owner, _ = _make_users()
     client = _client()
     _login(client, owner)
     owner_base = "/api/admin/v1/users/%s/storage-quota" % owner["user_id"]
-    assert client.get(owner_base).status_code == 400
-    assert client.put(owner_base, json={"quota_bytes": DEFAULT}).status_code == 400
-    assert client.post(owner_base + "/restore-default").status_code == 400
+    got = client.get(owner_base)
+    assert got.status_code == 200
+    assert got.get_json()["quota_applies"] is True
+    assert got.get_json()["base_quota_bytes"] == DEFAULT
+    put = client.put(owner_base, json={"quota_bytes": 2 * DEFAULT})
+    assert put.status_code == 200
+    assert put.get_json()["quota_bytes"] == 2 * DEFAULT
+    assert _quota(owner["user_id"])["quota_bytes"] == 2 * DEFAULT
+    restored = client.post(owner_base + "/restore-default")
+    assert restored.status_code == 200
+    assert restored.get_json()["base_quota_bytes"] == DEFAULT
     assert client.get(
         "/api/admin/v1/users/usr_missing/storage-quota").status_code == 404
 
@@ -312,13 +322,23 @@ def test_account_storage_for_user_returns_actual_quota_without_creating_row():
     assert again["remaining_bytes"] == 2 * GiB
 
 
-def test_account_storage_owner_not_applicable():
+def test_account_storage_owner_applies_like_user():
+    """2026-11-06 owner parity：owner 与受邀用户同口径受存储配额约束。
+
+    无配额行时按 env 默认呈现（**不建行**）；配额行由迁移脚本建 1 TiB。
+    """
     owner, _ = _make_users()
     client = _client()
     _login(client, owner)
     body = client.get("/api/account/storage").get_json()
-    assert body["quota_applies"] is False
-    assert body["quota_bytes"] is None
+    assert body["quota_applies"] is True
+    assert body["quota_bytes"] == DEFAULT
+    assert body["used_bytes"] == 0
+    assert _quota(owner["user_id"]) is None
+    # 扩容状态块与用户一致（不是 owner 专属的 null）
+    assert body["expansion"] is not None
+    assert body["expansion"]["can_purchase"] is False
+    assert body["expansion"]["purchase_block_reason"] == "wallet_not_credits"
 
 
 # --------------------------------------------------------------------------- #
@@ -339,8 +359,20 @@ def test_attach_ingestion_quota_uses_actual_row():
         "reserved_bytes": 512 * 1024 ** 2,
         "default_quota_bytes": DEFAULT,
     }
-    # owner 不附加（不受配额限制）
+    # 2026-11-06 owner parity：owner 与用户同口径附加实际配额
     body = {}
     app_mod._attach_ingestion_quota(
         body, {"owner_user_id": uid, "owner_role": "owner"})
+    assert body == {
+        "base_quota_bytes": 6 * GiB,
+        "extra_quota_bytes": 0,
+        "quota_bytes": 6 * GiB,
+        "used_bytes": 5 * GiB,
+        "reserved_bytes": 512 * 1024 ** 2,
+        "default_quota_bytes": DEFAULT,
+    }
+    # 本机免登录（无 owner_user_id）不附加
+    body = {}
+    app_mod._attach_ingestion_quota(
+        body, {"owner_user_id": "", "owner_role": "owner"})
     assert body == {}

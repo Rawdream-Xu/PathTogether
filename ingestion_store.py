@@ -565,7 +565,9 @@ def _try_admit_txn(cur, job_id, *, disk_watermark_ok=True):
         raise _AdmissionDeferred("global_active_limit")
 
     reservation_id = None
-    quota_applies = (job["owner_role"] == "user"
+    # 2026-11-06 owner parity：owner 登录账号与受邀用户同口径受存储配额约束
+    # （本机免登录 owner_role=owner 且 owner_user_id 为空 → 仍然豁免）。
+    quota_applies = (job["owner_role"] in upload_guard.QUOTA_ROLES
                      and bool(job["owner_user_id"]))
     if quota_applies:
         try:
@@ -1763,9 +1765,11 @@ def renew_active_local_reservations():
         conn.close()
     for row in rows:
         jid = row["job_id"]
-        if row["owner_role"] != "user" or \
+        if row["owner_role"] not in upload_guard.QUOTA_ROLES or \
                 not (row["owner_user_id"] or "").strip():
-            # 配额豁免身份（owner/本地态）单独显式跳过，不混入异常路径。
+            # 配额豁免身份（本机免登录 owner 无 user_id）单独显式跳过，
+            # 不混入异常路径。2026-11-06 owner parity：登录态 owner 与
+            # 普通用户同口径，必须持有有效本地预约。
             results[jid] = "exempt"
             continue
         terminated = False

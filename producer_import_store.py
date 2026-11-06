@@ -537,8 +537,8 @@ def staging_data_path(import_id, commit_token, format_ext, *, root=None):
 
 
 def import_quota_applies(owner_user_id):
-    """grant.user 是否为配额主体（role=user；owner/本地免登录跳过——
-    upload_guard.quota_applies 同口径）。"""
+    """grant.user 是否为配额主体（role=owner|user；仅本机免登录跳过——
+    upload_guard.quota_applies 同口径，2026-11-06 owner parity）。"""
     import user_store
     try:
         u = user_store.get_user(owner_user_id or "")

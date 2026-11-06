@@ -24,7 +24,11 @@ def _err(exc):
 
 
 def _quota_hook(ident):
-    """role=user 身份走 PG 配额预占（spec §6.3：事务化预占配额再派发）。"""
+    """配额主体身份走 PG 配额预占（spec §6.3：事务化预占配额再派发）。
+
+    2026-11-06 owner parity：owner 登录账号同样计入配额（upload_guard.
+    quota_applies 统一判定）；本机免登录（无 user_id）仍不预占。
+    """
 
     def hook(user_id, nbytes):
         out = upload_guard.reserve_upload(user_id, nbytes)

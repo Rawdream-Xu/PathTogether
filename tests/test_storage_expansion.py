@@ -319,10 +319,12 @@ def test_purchase_blocked_for_restricted_owner_legacy_disabled_preview():
     with pytest.raises(se.StorageAccountRestrictedError):
         _purchase(disabled_user, 1)
 
+    # 2026-11-06 owner parity：owner 与普通用户同规则——没有 Credit 钱包
+    # （未迁移）时同样按 wallet_not_credits 拒绝，不再是 owner_not_applicable。
     owner = _owner()
-    with pytest.raises(se.StorageOwnerNotApplicableError) as excinfo:
+    with pytest.raises(se.StorageWalletNotCreditsError) as excinfo:
         se.purchase(owner["user_id"], 1, _key(), now=NOW0)
-    assert excinfo.value.code == "owner_not_applicable"
+    assert excinfo.value.code == "wallet_not_credits"
 
     legacy = ch.new_user("legacy-buy")
     with pytest.raises(se.StorageWalletNotCreditsError) as excinfo:
@@ -681,13 +683,15 @@ def test_http_purchase_errors_and_csrf():
     assert legacy_resp.status_code == 403
     assert legacy_resp.get_json()["code"] == "wallet_not_credits"
 
+    # 未迁移的 owner：与 legacy 用户同口径（wallet_not_credits），不再有
+    # owner_not_applicable（2026-11-06 owner parity）。
     owner = _owner()
     owner_client = _login(owner)
     owner_resp = owner_client.post(
         "/api/account/storage/expansions", json={"units": 1},
         headers={"Idempotency-Key": _key()})
-    assert owner_resp.status_code == 400
-    assert owner_resp.get_json()["code"] == "owner_not_applicable"
+    assert owner_resp.status_code == 403
+    assert owner_resp.get_json()["code"] == "wallet_not_credits"
 
     # 未带 CSRF 的原始 client → 400 csrf_required
     raw = app_mod.app.test_client()

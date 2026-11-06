@@ -11,7 +11,8 @@
 - 默认自动续费；扣费失败进入 7 天宽限期（容量保留、每轮 sweep 重试）；
   宽限结束仍失败则退回基础容量，**不删除任何文件**；
 - 关闭自动续费后当期到期即结束，不进宽限期；
-- 不按比例退款；owner / legacy / 预览态 / 受限账户不能购买。
+- 不按比例退款；legacy / 预览态 / 受限账户不能购买（2026-11-06 owner
+  parity 起 owner 与受邀用户规则完全相同）。
 
 账务约定（与 credit_store 一致）：
 
@@ -135,14 +136,6 @@ class StoragePreviewReadonlyError(billing_store.BillingError):
     code = "preview_readonly"
     retryable = False
     http_status = 403
-
-
-class StorageOwnerNotApplicableError(billing_store.BillingError):
-    """owner 不受存储配额限制，也不提供扩容（400）。"""
-
-    code = "owner_not_applicable"
-    retryable = False
-    http_status = 400
 
 
 class StorageExpansionNotFoundError(billing_store.BillingError):
@@ -403,13 +396,15 @@ def _renewal_entry_hash(*, account_id, expansion_id, renewal_no, price_units):
 
 def _purchase_block_reason(*, preview, user, account, restriction,
                            live_units, available_units, price):
-    """购买/展示准入判定（顺序即优先级；返回 None 表示可购买）。"""
+    """购买/展示准入判定（顺序即优先级；返回 None 表示可购买）。
+
+    2026-11-06 owner parity：owner 与受邀用户规则完全相同（不再有
+    owner_not_applicable；owner 也受存储配额约束并可购买扩容）。
+    """
     if preview:
         return "preview_readonly"
     if not isinstance(user, dict) or not user.get("user_id"):
         return "wallet_not_credits"
-    if (user.get("role") or user_store.ROLE_USER) != user_store.ROLE_USER:
-        return "owner_not_applicable"
     if user.get("disabled"):
         return "account_restricted"
     if account is None \
@@ -508,9 +503,6 @@ def purchase(user_id, units, idempotency_key, *, preview=False, now=None,
     if not isinstance(user, dict) or not user.get("user_id"):
         raise StorageWalletNotCreditsError(
             "用户不存在或未启用 Credit 钱包", reason="wallet_not_credits")
-    if (user.get("role") or user_store.ROLE_USER) != user_store.ROLE_USER:
-        raise StorageOwnerNotApplicableError(
-            "owner 不受存储配额限制，不提供扩容购买")
     if user.get("disabled"):
         raise StorageAccountRestrictedError(
             "账户已停用", reason="user_disabled")

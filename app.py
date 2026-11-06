@@ -6268,12 +6268,13 @@ def api_account_balance():
 
     subject 只取 current_identity()（预览态 = effective subject，§3.5 余额
     随被预览者）；URL/body 不接受 user_id（不提供查他人余额的口子）。
-    user = 一次性总额度（get_total_allowance 只读）；credits 用户（0088）改
-    返回 ``billing_backend:"credits"`` + ``spend_target:"credit_wallet"`` +
-    ``upgrade_required:true``，**不返回** ``*_nano_cny``（旧 UI 不能把
-    Credit 错标为 ¥）；owner = 当前月窗口
-    （peek_current_window **不建行**——点开账户不改变账务；窗口未开时以
-    策略限额 + 0 用量呈现）。金额一律十进制字符串（JS 大整数安全）；
+    先按**账务后端**分流：credits 账户（0088；2026-11-06 owner parity 起含
+    已迁移的 owner）返回 ``billing_backend:"credits"`` +
+    ``spend_target:"credit_wallet"`` + ``upgrade_required:true``，**不返回**
+    ``*_nano_cny``（旧 UI 不能把 Credit 错标为 ¥）。未迁移的 owner = 当前月
+    窗口（peek_current_window **不建行**——点开账户不改变账务；窗口未开时以
+    策略限额 + 0 用量呈现）；legacy user = 一次性总额度
+    （get_total_allowance 只读）。金额一律十进制字符串（JS 大整数安全）；
     Cache-Control: no-store。额度缺失 → 400 spend_total_allowance_missing
     （绝不呈现为 ¥0）；数据层异常 → 503。不含供应商余额/策略内部 ID/key。
     """
@@ -6301,10 +6302,12 @@ def api_account_balance():
     subject = {"username": username, "display_username": local_part,
                "role": role, "preview": preview}
     try:
-        if role == user_store.ROLE_USER:
-            # Credit 用户（0088）：旧 CNY 字段会把 Credit 值错标成 ¥，故只返回
-            # 可识别信息（billing_backend + upgrade_required）；新 UI 用
-            # /api/account/credits。**绝不**返回 *_nano_cny 键。
+        # Credit 账户（0088）：**先按账务后端判定**（2026-11-06 owner parity：
+        # 只要 billing_backend == credits，不论 owner/user 都返回同一形状）。
+        # 旧 CNY 字段会把 Credit 值错标成 ¥，故只返回可识别信息
+        # （billing_backend + upgrade_required）；新 UI 用 /api/account/credits。
+        # **绝不**返回 *_nano_cny 键。
+        if uid:
             credit_wallet = credit_store.wallet_snapshot(uid)
             if credit_wallet is not None and \
                     credit_wallet.get("billing_backend") == \
@@ -6372,17 +6375,17 @@ def api_account_balance():
 
 @app.route("/api/account/storage", methods=["GET"])
 def api_account_storage():
-    """只读自助存储用量（2026-11-04；2026-11-06 付费扩容）。
+    """只读自助存储用量（2026-11-04；2026-11-06 付费扩容 + owner parity）。
 
     subject 只取 current_identity()（预览态 = effective subject；与
-    /api/account/balance 同口径），不接受 user_id 参数。role=user 返回其
-    实际配额与用量（配额行不存在时返回 env 默认值，**不建行**）；owner /
-    本地免登录 / 非 PG 后端 → quota_applies=false（owner 不受存储配额限制）。
+    /api/account/balance 同口径），不接受 user_id 参数。role=owner|user
+    返回其实际配额与用量（配额行不存在时返回 env 默认值，**不建行**）；
+    本机免登录 owner（无 user_id）/ 非 PG 后端 → quota_applies=false。
     字节数为整数（< 2^53，JS 安全）；Cache-Control: no-store。
 
     0092 起 ``quota_bytes`` 是**有效配额**（基础 + 付费扩容）；
     ``base_quota_bytes`` / ``extra_quota_bytes`` 分列，``expansion`` 给出
-    每份价格、已购份数、可购买性与扩容列表（owner 无此块 → null）。
+    每份价格、已购份数、可购买性与扩容列表（owner 与用户同一规则）。
     """
     guard = _require_own_active_account_or_none()
     if guard is not None:
@@ -6403,7 +6406,10 @@ def _account_storage_payload(ident):
     uid = str(ident.get("user_id") or "")
     role = ident.get("role") or user_store.ROLE_USER
     preview = _preview_subject() is not None
-    quota_applies = (role == user_store.ROLE_USER and bool(uid)
+    # 2026-11-06 owner parity：owner 与受邀用户同一判定（upload_guard.
+    # quota_applies）；本机免登录（无 user_id）仍不适用。
+    quota_applies = (upload_guard.quota_applies(
+                         {"role": role, "user_id": uid})
                      and upload_guard.quota_features_available())
     default_quota = int(upload_guard.UPLOAD_USER_QUOTA_BYTES)
     if not quota_applies:
@@ -12959,8 +12965,9 @@ def admin_v1_users_storage_quota_get(user_id):
     基础 + 扩容）/ used_bytes / reserved_bytes / remaining_bytes /
     quota_applies / default_quota_bytes / 硬边界 / expansions（只读）。
     配额行不存在时按当前 env 默认惰性创建（与首次上传预占同语义），因此返回
-    的 quota_bytes 恒为具体数值。owner 不适用存储配额 → 400（与总额度端点
-    的 owner 互斥形态一致）。
+    的 quota_bytes 恒为具体数值。2026-11-06 owner parity 起 owner 也适用存储
+    配额（迁移脚本建 1 TiB 基础容量行），此端点对 owner 与 user 同口径；
+    只有无账号态的本地免登录（无 user 行）不适用。
     """
     auth = _require_owner_admin_v1()
     if auth:
@@ -12970,10 +12977,10 @@ def admin_v1_users_storage_quota_get(user_id):
     target = user_store.get_user(user_id)
     if target is None:
         return _admin_v1_error(404, "user_not_found", "用户不存在")
-    if target.get("role") != user_store.ROLE_USER:
+    if target.get("role") not in upload_guard.QUOTA_ROLES:
         return _admin_v1_error(
             400, "invalid_request",
-            "存储配额仅适用于 role=user（owner 不受存储配额限制）")
+            "存储配额仅适用于 role=user/owner（本机免登录无账号态不适用）")
     try:
         row = upload_guard.get_quota_row(user_id)
         expansions = storage_expansion.list_for_user(user_id)
@@ -13002,10 +13009,10 @@ def admin_v1_users_storage_quota_set(user_id):
     target = user_store.get_user(user_id)
     if target is None:
         return _admin_v1_error(404, "user_not_found", "用户不存在")
-    if target.get("role") != user_store.ROLE_USER:
+    if target.get("role") not in upload_guard.QUOTA_ROLES:
         return _admin_v1_error(
             400, "invalid_request",
-            "存储配额仅适用于 role=user（owner 不受存储配额限制）")
+            "存储配额仅适用于 role=user/owner（本机免登录无账号态不适用）")
     body = request.get_json(silent=True) or {}
     quota = body.get("quota_bytes")
     if isinstance(quota, bool) or not isinstance(quota, int):
@@ -13039,10 +13046,10 @@ def admin_v1_users_storage_quota_restore(user_id):
     target = user_store.get_user(user_id)
     if target is None:
         return _admin_v1_error(404, "user_not_found", "用户不存在")
-    if target.get("role") != user_store.ROLE_USER:
+    if target.get("role") not in upload_guard.QUOTA_ROLES:
         return _admin_v1_error(
             400, "invalid_request",
-            "存储配额仅适用于 role=user（owner 不受存储配额限制）")
+            "存储配额仅适用于 role=user/owner（本机免登录无账号态不适用）")
     try:
         row = upload_guard.restore_user_quota_default(
             user_id,
@@ -15692,9 +15699,12 @@ def _attach_ingestion_quota(body, job):
     """配额类终态附加 base/extra/quota/used/reserved（只读不建行）。
 
     ``quota_bytes`` 为有效配额（基础 + 付费扩容）；前端超限文案仍取它。
+    2026-11-06 owner parity：owner 登录账号同样适用（本机免登录无
+    owner_user_id → 跳过）。
     """
     uid = job.get("owner_user_id") or ""
-    if not uid or (job.get("owner_role") or "") != user_store.ROLE_USER:
+    if not uid or (job.get("owner_role") or "") \
+            not in upload_guard.QUOTA_ROLES:
         return
     if not upload_guard.quota_features_available():
         return
@@ -16041,9 +16051,11 @@ def api_ingestion_parts_sign(job_id):
             error="任务当前状态 %s 不接受分块签名" % job["state"],
             code="ingestion_state_conflict"), 409
     # 0072 生命周期（plan §4.3）：不给失去容量责任的任务签发新授权——
-    # quota 适用身份必须持有绑定有效（reserved）的本地预约；缺失/已结算
-    # 即不变量异常，fail-closed 拒签（恢复扫描/核账处置）。
-    if job["owner_role"] == "user" and (job["owner_user_id"] or "").strip():
+    # quota 适用身份（owner|user，2026-11-06 owner parity）必须持有绑定有效
+    # （reserved）的本地预约；缺失/已结算即不变量异常，fail-closed 拒签
+    # （恢复扫描/核账处置）。
+    if job["owner_role"] in upload_guard.QUOTA_ROLES \
+            and (job["owner_user_id"] or "").strip():
         rid = (job.get("local_reservation_id") or "").strip()
         res = upload_guard.get_reservation(rid) if rid else None
         if not rid or res is None or \
@@ -18711,7 +18723,10 @@ def _ai_reserve_run_budget(user_ctx, request_id):
       run_binding_unavailable fail-closed 不转发 sidecar）；session 的 attach
       在 _ai_budget_lifecycle.on_accepted（``attach_run_binding_session``）。
     - 软闸回退（shadow / registered 下 demo）：现有 reserve_turn 行为**逐字
-      保留**（owner 的 reset 回退底板）——预占/超限 429/ai_access 闸全不变。
+      保留**（未迁移 owner 的 reset 回退底板）——预占/超限 429/ai_access 闸
+      全不变。2026-11-06 owner parity：已迁移（billing_backend=credits）的
+      owner 与受邀用户同口径，由 :func:`_ai_credit_wallet_gate` 强制走
+      Credit 钱包分支。
 
     其余分支与既有语义一致：
       - platform 凭据：reserve_turn 原子预占（PostgreSQL 唯一后端，无
@@ -18724,10 +18739,14 @@ def _ai_reserve_run_budget(user_ctx, request_id):
         return None, None, None
     subject_type, subject_id = _ai_budget_subject(user_ctx)
     credit_forced = False
-    if subject_type == "user":
-        denied = _user_ai_access_denied(subject_id)
-        if denied is not None:
-            return None, denied, None
+    if subject_type in ("user", "owner"):
+        # 2026-11-06 owner parity：owner 与受邀用户同一套钱包闸——已迁移
+        # （billing_backend=credits）的 owner 必须走 Credit 预占/扣费；
+        # 未迁移的 owner 仍走下面的月窗口分支（兼容与回滚）。
+        if subject_type == "user":
+            denied = _user_ai_access_denied(subject_id)
+            if denied is not None:
+                return None, denied, None
         credit_forced, credit_error = _ai_credit_wallet_gate(subject_id)
         if credit_error is not None:
             return None, credit_error, None

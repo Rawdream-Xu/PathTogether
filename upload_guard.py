@@ -35,10 +35,10 @@
   - 计数流与磁盘水位：纯进程内实现，json/dual/postgres 全部生效；
   - 配额 / 在途 / 每小时限流：仅 ``STORAGE_BACKEND=postgres`` 权威
     （platform_features.require_pg_backend fail-closed）。适用主体是
-    ``role=user``（受邀账号，docs §3.3 的威胁模型）；owner 是运维者本人，
-    不受限（owner 想自我约束时可直接向 upload_user_quotas 插行并改
-    app 层判定）。AUTH_ENABLED=False 的本地免登录形态（user_id 为空）
-    同样跳过——本地单机开发语义与现状一致。json 后端 + role=user 的
+    ``role=owner|user`` 且有 user_id（2026-11-06 owner parity：管理员本人的
+    登录账号与受邀用户完全一致，受同一套配额约束；基础容量由迁移脚本按
+    1 TiB 建行，后台可改）。AUTH_ENABLED=False 的本地免登录形态（user_id
+    为空）仍跳过——本地单机开发语义与现状一致。json 后端 + 适用主体 的
     上传按仓库既定哲学 fail-closed 返回 503（与 POST /login 在 json 后端
     503 同款），绝不退化进程内计数。
 
@@ -70,10 +70,11 @@ def _env_int(name, default):
 #: 注意：边缘代理（frp/nginx）的 body 上限必须与此值一致（docs §3.3-1）。
 UPLOAD_MAX_REQUEST_BYTES = _env_int("UPLOAD_MAX_REQUEST_BYTES", 10 * 1024 ** 3)
 
-#: 每用户空间配额字节上限（PG 权威，仅 role=user）。默认 10 GiB：新用户
+#: 每用户空间配额字节上限（PG 权威，role=owner|user）。默认 10 GiB：新用户
 #: 默认值；早期真实用户由 0091 迁移提到 50 GiB（2026-11-05 产品决定，先不
-#: 过度限制）。[测] 按 deploy-host 可用磁盘与单用户合理保有量复核。
-#: owner 不受本配额限制；管理员可经 admin API 为单个用户单独调高（硬边界见
+#: 过度限制）；owner 由迁移脚本建 1 TiB 基础容量行（2026-11-06 owner parity）。
+#: [测] 按 deploy-host 可用磁盘与单用户合理保有量复核。
+#: 管理员可经 admin API 为单个用户单独调高（硬边界见
 #: ``UPLOAD_USER_QUOTA_MIN_BYTES`` / ``UPLOAD_USER_QUOTA_MAX_BYTES``）。
 UPLOAD_USER_QUOTA_BYTES = _env_int("UPLOAD_USER_QUOTA_BYTES", 10 * 1024 ** 3)
 
@@ -247,12 +248,21 @@ def quota_features_available() -> bool:
     return platform_features.current_backend() == "postgres"
 
 
+#: 受存储配额约束的角色（2026-11-06 owner parity：owner 与受邀用户一致；
+#: 只有本机免登录 / 无 user_id 的部署态才豁免）。
+QUOTA_ROLES = ("owner", "user")
+
+
 def quota_applies(ident) -> bool:
-    """该身份是否需要走 PG 配额：role=user（受邀账号；owner/本地免登录跳过）。
+    """该身份是否需要走 PG 配额：role=owner|user 且有 user_id。
 
     ident 为 app.current_identity() 形态的 dict（{"role", "user_id"}）。
+    2026-11-06 起 owner（管理员本人的登录账号）与普通用户同口径受配额约束
+    ——应用页与用户完全一致，便于管理员亲自验收；AUTH_ENABLED=False 的
+    本地免登录形态（user_id 为空）仍跳过。
     """
-    return bool(ident) and ident.get("role") == "user" and bool(ident.get("user_id"))
+    return (bool(ident) and ident.get("role") in QUOTA_ROLES
+            and bool(ident.get("user_id")))
 
 
 def _connect():

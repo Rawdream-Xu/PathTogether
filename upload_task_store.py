@@ -412,9 +412,12 @@ def _task_row(task):
 def _quota_mode_snapshot(conn, owner_user_id):
     """创建时配额身份快照（0074；R15 核账合同）。
 
-    与 upload_guard.quota_applies 同一身份语义：本地免登录（空 owner）与
-    非 user 角色 → 'exempt'（合法无预约）；role=user → 'duty'。无用户行
-    时按 'duty' 落库（宁可多记责任），核账侧对不可证明身份另行阻断。"""
+    与 upload_guard.quota_applies 同一身份语义：本地免登录（空 owner）→
+    'exempt'（合法无预约）；role=owner|user → 'duty'（2026-11-06 owner
+    parity：管理员登录账号与普通用户同口径）。无用户行时按 'duty' 落库
+    （宁可多记责任），核账侧对不可证明身份另行阻断。"""
+    import upload_guard
+
     uid = str(owner_user_id or "")
     if not uid:
         return "exempt"
@@ -423,7 +426,8 @@ def _quota_mode_snapshot(conn, owner_user_id):
         row = cur.fetchone()
     if row is None:
         return "duty"
-    return "duty" if (row["role"] or "") == "user" else "exempt"
+    return "duty" if (row["role"] or "") in upload_guard.QUOTA_ROLES \
+        else "exempt"
 
 
 def _pg_insert(task, conn=None):
