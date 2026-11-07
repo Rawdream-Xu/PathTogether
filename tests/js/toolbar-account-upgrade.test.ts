@@ -498,7 +498,7 @@ describe("账户 popover 余额（GET /api/account/credits）", () => {
 		});
 	});
 
-	it("credits：可用数 + 累计发放分母；预占/受限副行；充值入口文案随 can_topup", async () => {
+	it("credits：可用数 + 「已使用」副行（无进度条）；预占/受限副行；充值入口文案随 can_topup", async () => {
 		const h = bootApp();
 		h.HP_AUTH.applyAuthInfo(loggedIn());
 		h.fetchRoutes.set("/api/account/credits", () => ({
@@ -527,10 +527,10 @@ describe("账户 popover 余额（GET /api/account/credits）", () => {
 		});
 		expect(h.els["acct-pop-scope"].textContent).toBe("acct.credits.scope");
 		expect(h.els["acct-pop-detail"].textContent).toBe(
-			"acct.credits.used({\"used\":\"17,000\",\"issued\":\"100,000\"})");
-		// (100,000 - 83,000) / 100,000 = 17%
-		expect(h.els["acct-pop-usage-fill"].style.width).toBe("17%");
-		expect(h.els["acct-pop-usage"].getAttribute("aria-valuenow")).toBe("17");
+			"acct.credits.used({\"used\":\"16,999\"})");
+		// 已使用 = 累计发放 100,000 − 可用 83,000 − 在途预留 1（预留另行列出）；
+		// 余额没有固定上限（会随充值增长），credits 账户不画进度条
+		expect(h.els["acct-pop-usage"].hidden).toBe(true);
 		expect(h.els["acct-pop-extra"].textContent).toContain("acct.credits.reserved");
 		expect(h.els["acct-pop-extra"].hidden).toBe(false);
 		expect(h.els["acct-topup-link"].hidden).toBe(false);
@@ -561,7 +561,7 @@ describe("账户 popover 余额（GET /api/account/credits）", () => {
 		});
 		expect(noTopup.els["acct-topup-link"].getAttribute("data-i18n")).toBe("acct.credits.history");
 		expect(noTopup.els["acct-topup-link"].hidden).toBe(false);
-		// issued_units 缺失 → 进度条与副行隐藏（不伪造分母）
+		// issued_units 缺失 → 副行隐藏（不伪造已使用量）
 		expect(noTopup.els["acct-pop-usage"].hidden).toBe(true);
 		expect(noTopup.els["acct-pop-usage-fill"].style.width).toBe("0%");
 		expect(noTopup.els["acct-pop-detail"].textContent).toBe("");

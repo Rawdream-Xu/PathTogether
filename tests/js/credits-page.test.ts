@@ -407,11 +407,11 @@ describe("账户 popover：credits/legacy/owner", () => {
 			expect(h.els["acct-pop-unit"].hidden).toBe(false);
 		});
 		expect(h.els["acct-pop-scope"].textContent).toBe("acct.credits.scope");
-		// 大数字与副行均取整：issued 2.2345→2 / available 1.2345→1，
-		// used = 2 - 1 = 1（两数相加恒等于 issued 整数）
+		// 已使用 = 2.2345 − 1.2345 − 在途预留 1 = 0（精确相减后向下取整）；
+		// credits 账户不画进度条
 		expect(h.els["acct-pop-detail"].textContent).toBe(
-			"acct.credits.used({\"used\":\"1\",\"issued\":\"2\"})");
-		expect(h.els["acct-pop-usage"].hidden).toBe(false);
+			"acct.credits.used({\"used\":\"0\"})");
+		expect(h.els["acct-pop-usage"].hidden).toBe(true);
 		const extra = h.els["acct-pop-extra"].textContent;
 		expect(extra).toContain("acct.credits.reserved");
 		expect(extra).toContain("credit.restricted.pending_reconciliation");
@@ -447,9 +447,9 @@ describe("账户 popover：credits/legacy/owner", () => {
 		await vi.waitFor(() => {
 			expect(h.els["acct-pop-remaining"].textContent).toBe("3,878");
 		});
-		// issued 5,000.25→5,000 / available 3,878.69→3,878 → used 1,122
+		// 5,000.25 − 3,878.69 = 1,121.56 → 已使用 1,121
 		expect(h.els["acct-pop-detail"].textContent).toBe(
-			"acct.credits.used({\"used\":\"1,122\",\"issued\":\"5,000\"})");
+			"acct.credits.used({\"used\":\"1,121\"})");
 
 		// 非零但 < 1：大数字显示专用文案，不显示 0
 		const tiny = bootApp();

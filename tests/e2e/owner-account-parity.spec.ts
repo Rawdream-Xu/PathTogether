@@ -138,7 +138,9 @@ test("owner 登录后弹层显示 Credit/存储条/充值，账户设置对话�
 	await expect(page.locator("#acct-pop-scope")).toHaveText("Credit 钱包");
 	await expect(page.locator("#acct-pop-remaining")).toHaveText("100,000");
 	await expect(page.locator("#acct-pop-unit")).toHaveText("Credits");
-	await expect(page.locator("#acct-pop-usage")).toBeVisible();
+	// credits 余额没有固定上限：不画进度条，副行只写「已使用」
+	await expect(page.locator("#acct-pop-usage")).toBeHidden();
+	await expect(page.locator("#acct-pop-detail")).toHaveText("已使用 0 Credits");
 	await expect(page.locator("#acct-pop-storage")).toBeVisible();
 	await expect(page.locator("#acct-pop-storage-value")).toHaveText("50 GB / 1024 GB");
 	await expect(page.locator("#acct-pop-storage-bar")).toBeVisible();

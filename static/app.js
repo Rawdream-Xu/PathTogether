@@ -14579,29 +14579,24 @@
       els.acctPopScope.textContent = t("acct.credits.scope");
     }
     acctSetAmount(formatCreditsWhole(wallet.available_units));
-    // 大数字 = 可用（整数，向下取整）；进度分母 = 累计发放（issued_units，
-    // 缺失/0 时隐藏条与副行）。副行同样取整：used = issued_int - available_int，
-    // 保证屏上两个数字相加等于 issued_int。进度条仍用精确 BigInt。
-    var available = acctBig(wallet.available_units);
-    var issued = acctBig(wallet.issued_units);
-    var used = null;
-    if (available !== null && issued !== null && issued > 0n) {
-      used = issued > available ? issued - available : 0n;
-    }
-    if (els.acctPopDetail) els.acctPopDetail.textContent = "";
-    if (used !== null && acctMeterPaint(
-        els.acctPopUsage, els.acctPopUsageFill, used, issued)) {
-      if (els.acctPopDetail) {
-        var issuedInt = acctWholeCredits(wallet.issued_units);
-        var availableInt = acctWholeCredits(wallet.available_units);
-        var usedInt = issuedInt > availableInt ? issuedInt - availableInt : 0n;
+    // 大数字 = 可用余额（整数，向下取整）。余额没有固定上限（充值会让累计
+    // 发放一直变大），所以 credits 账户不画进度条，副行只写「已使用 X」：
+    // 累计发放 − 可用 − 在途预留 − 退款冻结（后两项另行列出，不重复计入），
+    // 用精确 BigInt 相减后再向下取整，最小 0。issued_units 缺失时不显示副行
+    // （不伪造）。
+    acctUsageMeterHide();
+    if (els.acctPopDetail) {
+      els.acctPopDetail.textContent = "";
+      var issued = acctBig(wallet.issued_units);
+      var available = acctBig(wallet.available_units);
+      if (issued !== null && available !== null) {
+        var usedUnits = issued - available
+          - (acctBig(wallet.reserved_units) || 0n)
+          - (acctBig(wallet.refund_pending_units) || 0n);
         els.acctPopDetail.textContent = t("acct.credits.used", {
-          used: acctGroupThousands(usedInt.toString()),
-          issued: acctGroupThousands(issuedInt.toString()),
+          used: acctGroupThousands(acctWholeCredits(usedUnits.toString()).toString()),
         });
       }
-    } else {
-      acctUsageMeterHide();
     }
     if (els.acctPopExtra) {
       var rows = [];
