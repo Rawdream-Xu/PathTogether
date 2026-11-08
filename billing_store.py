@@ -1310,8 +1310,9 @@ def _apply_credit_hold_settlement_tx(cur, *, acct, hold, event_id, status,
     if hold_status == "released":
         if event_id is not None and hold.get("event_id") == event_id:
             # 同一事件的重复投递：release 终态幂等，不改任何标记
-            # （尤其是不能把 no_final_usage 覆盖成 usage_after_release）。
-            return "released", hold
+            # （尤其是不能把 no_final_usage 覆盖成 usage_after_release）；
+            # updated=None → 调用方不重复写 settle audit。
+            return "released", None
         # release 后迟到用量：不扣费，只留非阻塞待办标记。
         cur.execute(
             "UPDATE billing_holds SET reconciliation_reason=%s, "
