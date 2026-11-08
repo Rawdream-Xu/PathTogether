@@ -1026,6 +1026,33 @@
     return "匿名访客（未命中爬虫规则）";
   }
 
+  // 国家/地区展示（2026-11-08）：Intl.DisplayNames 输出中文名 + ISO 码，
+  // 如「美国（US）」；运行环境缺 Intl.DisplayNames 或调用抛错时回退原始
+  // 码（不隐藏数据，也不把未知码渲染成空）。
+  var regionDisplayNames;
+  var regionDisplayNamesReady = false;
+  function regionLabel(code) {
+    var raw = String(code == null ? "" : code);
+    if (!raw) return "—";
+    try {
+      if (!regionDisplayNamesReady) {
+        regionDisplayNamesReady = true;
+        if (typeof Intl !== "undefined" && Intl
+            && typeof Intl.DisplayNames === "function") {
+          regionDisplayNames = new Intl.DisplayNames(["zh-CN"],
+            { type: "region" });
+        }
+      }
+      if (regionDisplayNames) {
+        var name = regionDisplayNames.of(raw);
+        if (name && name !== raw) return name + "（" + raw + "）";
+      }
+    } catch (e) {
+      regionDisplayNames = null;
+    }
+    return raw;
+  }
+
   function renderSiteEntryNote(res) {
     var warn = $("adm-site-entry-warn");
     var note = $("adm-site-entry-note");
@@ -1146,8 +1173,29 @@
       countriesBlock.hidden = !meaningful;
       if (meaningful) {
         fillTop("adm-site-countries-tbody", rows,
-          function (r) { return r.country_code; },
+          function (r) { return regionLabel(r.country_code); },
           function (r) { return r.visits; });
+      }
+    }
+    // CC BY 4.0 署名（2026-11-08）：仅 geo_source 存在时显示；全程
+    // createElement/createTextNode，服务端字符串不拼 innerHTML。
+    var attribution = $("adm-site-countries-attribution");
+    if (attribution) {
+      attribution.textContent = "";
+      var geoSource = res.geo_source;
+      if (geoSource && typeof geoSource === "object") {
+        attribution.hidden = false;
+        attribution.appendChild(document.createTextNode("IP 地理位置数据："));
+        var geoLink = document.createElement("a");
+        geoLink.setAttribute("href",
+          String(geoSource.url || "https://db-ip.com"));
+        geoLink.setAttribute("target", "_blank");
+        geoLink.setAttribute("rel", "noopener noreferrer");
+        geoLink.textContent = "DB-IP";
+        attribution.appendChild(geoLink);
+        attribution.appendChild(document.createTextNode("（CC BY 4.0）"));
+      } else {
+        attribution.hidden = true;
       }
     }
 

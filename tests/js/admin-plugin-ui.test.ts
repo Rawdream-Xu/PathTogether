@@ -747,12 +747,122 @@ describe("wave 2 — 概览页收敛 + 站点访问卡（§4.2 / D2-3）", () =>
 		expect(bus.els["adm-site-kinds"].textContent).toContain("疑似爬虫");
 		// geo_configured=false：国家块隐藏
 		expect(bus.els["adm-site-countries-block"].hidden).toBe(true);
+		// 无 geo_source：不渲染 DB-IP 署名
+		expect(bus.els["adm-site-countries-attribution"].hidden).toBe(true);
 		// 站点卡禁止出现用户/邀请/注册/转化内容
 		const siteAll = ["adm-site-kpis", "adm-site-daily-tbody", "adm-site-kinds",
 			"adm-site-recent-tbody", "adm-site-empty"]
 			.map((id) => bus.els[id].textContent).join("\n");
 		expect(siteAll).not.toContain("转化");
 		expect(siteAll).not.toContain("注册用户");
+	});
+
+	it("站点访问卡：geo 已配置时国家/地区显示中文名 + ISO 码，并渲染 DB-IP 署名", async () => {
+		const bus = loadPluginUiWithBus();
+		boot(bus);
+		bus.client!.showPage("overview");
+		await ticks(4);
+		replyMethod(bus, NONCE, "admin.overview.get", {
+			ok: true, result: { users: { total: 1 }, billing: { available: false } },
+		});
+		replyMethod(bus, NONCE, "admin.siteStats.get", {
+			ok: true,
+			result: {
+				generated_at: 1700000000,
+				today: { visits: 12, unique_visitors: 7, bots: 1 },
+				d7: { visits: 12, unique_visitors: 7, bots: 1 },
+				d30: { visits: 12, unique_visitors: 7, bots: 1 },
+				daily: [],
+				top_referrers: [], top_pages: [],
+				top_countries: [
+					{ country_code: "US", visits: 9 },
+					{ country_code: "CN", visits: 4 },
+				],
+				visitor_kinds: { anonymous_human: 10, signed_in_human: 1, suspected_bot: 1 },
+				recent: [],
+				entry_hosts: ["histopilot.com"],
+				host_filter_configured: true,
+				legacy: { d30_visits: 0 },
+				geo_configured: true,
+				geo_source: {
+					name: "DB-IP", url: "https://db-ip.com",
+					license: "CC BY 4.0", build_epoch: 1730000000,
+				},
+			},
+		});
+		await ticks(6);
+		expect(bus.els["adm-site-countries-block"].hidden).toBe(false);
+		// Intl.DisplayNames(['zh-CN'])：中文名 + ISO 码（如「美国（US）」）
+		const countries = bus.els["adm-site-countries-tbody"].textContent;
+		expect(countries).toContain("美国（US）");
+		expect(countries).toContain("中国（CN）");
+		// CC BY 4.0 署名（DOM 构建，非 innerHTML）
+		const attribution = bus.els["adm-site-countries-attribution"];
+		expect(htmlSrc).toContain('id="adm-site-countries-attribution"');
+		expect(attribution.hidden).toBe(false);
+		expect(attribution.textContent).toContain("IP 地理位置数据：");
+		expect(attribution.textContent).toContain("DB-IP");
+		expect(attribution.textContent).toContain("（CC BY 4.0）");
+		const link = bus.created.find((el) => el.tagName === "A");
+		expect(link).toBeTruthy();
+		expect(link!.getAttribute("href")).toBe("https://db-ip.com");
+		expect(link!.getAttribute("target")).toBe("_blank");
+		expect(link!.getAttribute("rel")).toBe("noopener noreferrer");
+	});
+
+	it("站点访问卡：Intl.DisplayNames 缺失或抛错时回退原始 ISO 码", async () => {
+		const realIntl = Intl;
+		const variants: Array<Record<string, unknown>> = [
+			{ DisplayNames: undefined },
+			{ DisplayNames: class { of() { throw new Error("no region data"); } } },
+		];
+		for (const variant of variants) {
+			vi.stubGlobal("Intl",
+				Object.assign(Object.create(realIntl), variant));
+			try {
+				const bus = loadPluginUiWithBus();
+				boot(bus);
+				bus.client!.showPage("overview");
+				await ticks(4);
+				replyMethod(bus, NONCE, "admin.overview.get", {
+					ok: true,
+					result: { users: { total: 1 }, billing: { available: false } },
+				});
+				replyMethod(bus, NONCE, "admin.siteStats.get", {
+					ok: true,
+					result: {
+						generated_at: 1700000000,
+						today: { visits: 1, unique_visitors: 1, bots: 0 },
+						d7: { visits: 1, unique_visitors: 1, bots: 0 },
+						d30: { visits: 1, unique_visitors: 1, bots: 0 },
+						daily: [],
+						top_referrers: [], top_pages: [],
+						top_countries: [{ country_code: "US", visits: 1 }],
+						visitor_kinds: {
+							anonymous_human: 1, signed_in_human: 0, suspected_bot: 0,
+						},
+						recent: [],
+						entry_hosts: ["histopilot.com"],
+						host_filter_configured: true,
+						legacy: { d30_visits: 0 },
+						geo_configured: true,
+						geo_source: {
+							name: "DB-IP", url: "https://db-ip.com",
+							license: "CC BY 4.0", build_epoch: null,
+						},
+					},
+				});
+				await ticks(6);
+				const countries = bus.els["adm-site-countries-tbody"].textContent;
+				expect(countries).toContain("US");
+				expect(countries).not.toContain("美国");
+				// 署名仍渲染（geo_source 存在）
+				expect(bus.els["adm-site-countries-attribution"].hidden)
+					.toBe(false);
+			} finally {
+				vi.unstubAllGlobals();
+			}
+		}
 	});
 
 	it("站点访问卡：入口白名单未配置亮警示条（fail-closed 可见），不静默", async () => {

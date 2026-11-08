@@ -26,3 +26,7 @@ tencentcloud-sdk-python-ses>=3.1.135,<4
 # SDK——下单(page_execute 表单)/查询/退款/关闭与通知验签原语均走官方实现；
 # 导入路径与 page_execute 方法名以 3.7.1411 安装源码核实（support_payments.py）。
 alipay-sdk-python==3.7.1411
+# 站点访问统计：本地离线 IP→国家码 MMDB 读取（官方 MaxMind DB reader；
+# 数据文件是运维放置的 DB-IP "IP to Country Lite"，CC BY 4.0；不做第三方
+# 网络定位调用，2026-11-08）。
+maxminddb>=3.2,<4

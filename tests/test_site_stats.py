@@ -66,6 +66,7 @@ import os
 import sys
 import threading
 import time
+import types
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -99,7 +100,7 @@ DASHBOARD_KEYS = {
     "generated_at", "today", "d7", "d30", "daily", "top_referrers",
     "top_pages", "top_countries", "recent",
     "visitor_kinds", "entry_hosts", "host_filter_configured", "legacy",
-    "geo_configured",
+    "geo_configured", "geo_source",
 }
 WINDOW_KEYS = {"visits", "unique_visitors", "bots"}
 DAILY_KEYS = {"date", "visits", "unique_visitors", "bots"}
@@ -128,9 +129,11 @@ def _isolate(tmp_path, monkeypatch):
     for name in ("SITE_STATS_HMAC_SECRET_FILE", "PUBLIC_BASE_URL",
                  "PUBLIC_ORIGINS", "SERVER_NAME", "SITE_STATS_ENTRY_HOSTS",
                  "COS_FAST_RELAY_URL",
-                 "SITE_STATS_INTERNAL_REFERRER_HOSTS"):
+                 "SITE_STATS_INTERNAL_REFERRER_HOSTS",
+                 "SITE_STATS_GEOIP_DB"):
         monkeypatch.delenv(name, raising=False)
     sss._reset_warn_state()
+    sss._reset_geo_state()      # 离线国家库 reader 不跨用例泄漏（2026-11-08）
     sss.stop_worker()          # 先停 worker（app import 可能已自起；见 app.py）
     # conftest truncate 与 in-flight flush 之间可能落下前用例残余——
     # 本文件大量精确计数断言，显式清一次 site_visit_events 兜底
@@ -1085,6 +1088,7 @@ def test_dashboard_stats_counts_and_readonly(secret):
         {"page_key": "register", "visits": 1}]
     assert stats["top_countries"] == []
     assert stats["geo_configured"] is False
+    assert stats["geo_source"] is None
     # recent 按时间倒序，且逐行携带访问域名
     occurred = [r["occurred_at"] for r in stats["recent"]]
     assert occurred == sorted(occurred, reverse=True)
@@ -1441,6 +1445,260 @@ def test_dashboard_stats_excludes_expired_window_and_never_purges(secret):
 
 
 # --------------------------------------------------------------------------- #
+# 8b. 离线 IP→国家码（2026-11-08，DB-IP Lite MMDB；测试不提交真实库文件）
+# --------------------------------------------------------------------------- #
+class _FakeGeoReader:
+    """最小 maxminddb Reader 替身：``.get(ip)`` + ``.metadata()``。"""
+
+    def __init__(self, records=None, build_epoch=1700000000):
+        self.records = dict(records or {})
+        self.build_epoch = build_epoch
+        self.calls = []
+        self.closed = False
+
+    def get(self, ip):
+        self.calls.append(ip)
+        value = self.records.get(ip)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    def metadata(self):
+        return types.SimpleNamespace(build_epoch=self.build_epoch)
+
+    def close(self):  # pragma: no cover - 仅用于断言不会被显式调用
+        self.closed = True
+
+
+def _use_geo(monkeypatch, reader):
+    monkeypatch.setattr(sss, "_open_geo_database", lambda _path: reader)
+
+
+@pytest.fixture
+def geo_db(tmp_path, monkeypatch):
+    """假 MMDB 文件 + env；真实打开动作由 ``_open_geo_database`` 桩替代。"""
+    path = tmp_path / "dbip-country-lite-test.mmdb"
+    path.write_bytes(b"fake-mmdb-v1")
+    monkeypatch.setenv("SITE_STATS_GEOIP_DB", str(path))
+    sss._reset_geo_state()
+    return path
+
+
+def test_geo_disabled_env_unset_keeps_unknown_and_no_source(secret):
+    """未配置 SITE_STATS_GEOIP_DB：与 D2 首发行为完全一致。"""
+    ev = _ev(remote_addr="8.8.8.8")
+    assert ev["country_code"] == "unknown"
+    stats = sss.dashboard_stats(now=BASE_TIME)
+    assert stats["geo_configured"] is False
+    assert stats["geo_source"] is None
+
+
+def test_geo_public_ipv4_ipv6_and_ipv4_mapped(secret, geo_db, monkeypatch):
+    reader = _FakeGeoReader({
+        "8.8.8.8": {"country": {"iso_code": "US"}},
+        "2001:4860:4860::8888": {"country": {"iso_code": "JP"}},
+    })
+    _use_geo(monkeypatch, reader)
+    assert _ev(remote_addr="8.8.8.8")["country_code"] == "US"
+    assert _ev(remote_addr="2001:4860:4860::8888")["country_code"] == "JP"
+    ev = _ev(remote_addr="::ffff:8.8.8.8")
+    assert ev["country_code"] == "US"
+    # IPv4-mapped 归一到 IPv4 查询键；原始 IP 不进入事件
+    assert reader.calls[-1] == "8.8.8.8"
+    assert "8.8.8.8" not in json.dumps(ev)
+
+
+def test_geo_non_public_addresses_unknown_without_lookup(secret, geo_db,
+                                                        monkeypatch):
+    reader = _FakeGeoReader({"8.8.8.8": {"country": {"iso_code": "US"}}})
+    _use_geo(monkeypatch, reader)
+    for ip in ("10.1.2.3", "172.16.0.9", "192.168.1.1", "127.0.0.1",
+               "169.254.1.1", "224.0.0.1", "240.0.0.1", "0.0.0.0",
+               "::1", "fe80::1", "ff02::1", "::"):
+        assert _ev(remote_addr=ip)["country_code"] == "unknown", ip
+    assert reader.calls == []                 # 内网/保留地址不触发库查询
+
+
+def test_geo_unparseable_or_empty_ip_unknown(secret, geo_db, monkeypatch):
+    reader = _FakeGeoReader({"8.8.8.8": {"country": {"iso_code": "US"}}})
+    _use_geo(monkeypatch, reader)
+    assert sss._country_for_ip("not-an-ip") == "unknown"
+    assert sss._country_for_ip("") == "unknown"
+    assert sss._country_for_ip(None) == "unknown"
+    assert reader.calls == []
+
+
+def test_geo_missing_country_or_malformed_iso_unknown(secret, geo_db,
+                                                      monkeypatch):
+    """record 只有 continent / registered_country 或 iso_code 形态非法：
+    一律 unknown（**不**回退其它字段）。"""
+    reader = _FakeGeoReader({"8.8.8.8": {}})
+    _use_geo(monkeypatch, reader)
+    bad_records = (
+        {},                                        # 无记录内容
+        {"continent": {"code": "NA"}},             # 只有大洲
+        {"registered_country": {"iso_code": "US"}},  # 只有注册国
+        {"country": None},
+        {"country": {}},
+        {"country": {"iso_code": "us"}},           # 小写
+        {"country": {"iso_code": "USA"}},          # 三位
+        {"country": {"iso_code": "U1"}},
+        {"country": {"iso_code": 1}},
+        {"country": {"iso_code": None}},
+    )
+    for record in bad_records:
+        reader.records["8.8.8.8"] = record
+        assert _ev(remote_addr="8.8.8.8")["country_code"] == "unknown", record
+
+
+def test_geo_lookup_exception_degrades_to_unknown(secret, geo_db, monkeypatch):
+    reader = _FakeGeoReader({"8.8.8.8": RuntimeError("corrupt db")})
+    _use_geo(monkeypatch, reader)
+    ev = _ev(remote_addr="8.8.8.8")
+    assert ev is not None
+    assert ev["country_code"] == "unknown"     # 单条异常不抛进请求路径
+    stats = sss.dashboard_stats(now=BASE_TIME)
+    assert stats["geo_configured"] is True     # reader 本身仍可用
+
+
+def test_geo_dashboard_configured_exposes_source(secret, geo_db, monkeypatch):
+    reader = _FakeGeoReader({}, build_epoch=1730000000)
+    _use_geo(monkeypatch, reader)
+    stats = sss.dashboard_stats(now=BASE_TIME)
+    assert stats["geo_configured"] is True
+    assert stats["geo_source"] == {
+        "name": "DB-IP",
+        "url": "https://db-ip.com",
+        "license": "CC BY 4.0",
+        "build_epoch": 1730000000,
+    }
+
+
+def test_geo_dashboard_build_epoch_none_when_metadata_unavailable(
+        secret, geo_db, monkeypatch):
+    class _NoMetadataReader(_FakeGeoReader):
+        def metadata(self):
+            raise RuntimeError("bad metadata")
+
+    _use_geo(monkeypatch, _NoMetadataReader())
+    stats = sss.dashboard_stats(now=BASE_TIME)
+    assert stats["geo_configured"] is True
+    assert stats["geo_source"]["build_epoch"] is None
+
+
+def test_dashboard_top_countries_aggregates_non_unknown(secret):
+    """top_countries 只聚合非 unknown 国家码并排除 unknown。"""
+    _flush([
+        _fake_event(country_code="CN", daily_visitor_hash="1" * 64),
+        _fake_event(country_code="CN", daily_visitor_hash="2" * 64),
+        _fake_event(country_code="US", daily_visitor_hash="3" * 64),
+        _fake_event(country_code="unknown", daily_visitor_hash="4" * 64),
+    ])
+    stats = sss.dashboard_stats(now=BASE_TIME)
+    assert stats["top_countries"] == [
+        {"country_code": "CN", "visits": 2},
+        {"country_code": "US", "visits": 1},
+    ]
+
+
+def test_geo_reader_reloads_when_file_signature_changes(
+        secret, tmp_path, monkeypatch):
+    """月度原子替换：签名 (mtime_ns, size, inode) 变化才重开；相同签名不重开。"""
+    path = tmp_path / "dbip.mmdb"
+    path.write_bytes(b"v1")
+    monkeypatch.setenv("SITE_STATS_GEOIP_DB", str(path))
+    sss._reset_geo_state()
+    monkeypatch.setattr(sss, "_GEO_SIGNATURE_CHECK_SECONDS", 0.0)
+    r1 = _FakeGeoReader(
+        {"8.8.8.8": {"country": {"iso_code": "US"}}}, build_epoch=1)
+    r2 = _FakeGeoReader(
+        {"8.8.8.8": {"country": {"iso_code": "CN"}}}, build_epoch=2)
+    opened = []
+    readers = iter([r1, r2])
+
+    def opener(db_path):
+        opened.append(db_path)
+        return next(readers)
+
+    monkeypatch.setattr(sss, "_open_geo_database", opener)
+    assert _ev(remote_addr="8.8.8.8")["country_code"] == "US"
+    assert _ev(remote_addr="8.8.8.8")["country_code"] == "US"
+    assert len(opened) == 1                    # 签名未变：复用 reader
+    path.write_bytes(b"v2-larger")             # 模拟原子 rename 后的新库
+    assert _ev(remote_addr="8.8.8.8")["country_code"] == "CN"
+    assert len(opened) == 2
+    assert sss.dashboard_stats(now=BASE_TIME)["geo_source"]["build_epoch"] == 2
+    # 旧 reader 不被显式 close（并发读者安全；由 GC 回收）
+    assert r1.closed is False
+
+
+def test_geo_reopen_failure_keeps_previous_reader(
+        secret, tmp_path, monkeypatch):
+    path = tmp_path / "dbip.mmdb"
+    path.write_bytes(b"v1")
+    monkeypatch.setenv("SITE_STATS_GEOIP_DB", str(path))
+    sss._reset_geo_state()
+    monkeypatch.setattr(sss, "_GEO_SIGNATURE_CHECK_SECONDS", 0.0)
+    good = _FakeGeoReader(
+        {"8.8.8.8": {"country": {"iso_code": "US"}}})
+
+    def opener(_db_path):
+        raise OSError("new db is corrupt")
+
+    monkeypatch.setattr(sss, "_open_geo_database", opener)
+    # 第一次打开也失败 → unknown（无旧 reader 可退）
+    assert _ev(remote_addr="8.8.8.8")["country_code"] == "unknown"
+
+    monkeypatch.setattr(sss, "_open_geo_database", lambda _p: good)
+    assert _ev(remote_addr="8.8.8.8")["country_code"] == "US"
+    # 新库替换后重开失败：继续用旧 reader，统计不中断
+    path.write_bytes(b"v2-larger")
+    monkeypatch.setattr(sss, "_open_geo_database", opener)
+    assert _ev(remote_addr="8.8.8.8")["country_code"] == "US"
+    assert good.closed is False
+
+
+def test_geo_missing_file_degrades(secret, tmp_path, monkeypatch):
+    monkeypatch.setenv("SITE_STATS_GEOIP_DB",
+                       str(tmp_path / "absent-country.mmdb"))
+    sss._reset_geo_state()
+    assert _ev(remote_addr="8.8.8.8")["country_code"] == "unknown"
+    stats = sss.dashboard_stats(now=BASE_TIME)
+    assert stats["geo_configured"] is False
+    assert stats["geo_source"] is None
+
+
+def test_geo_reader_open_is_thread_safe(secret, geo_db, monkeypatch):
+    """并发首用只打开一次（锁串行化），所有线程拿到同一结果。"""
+    reader = _FakeGeoReader({"8.8.8.8": {"country": {"iso_code": "US"}}})
+    opened = []
+
+    def opener(db_path):
+        opened.append(db_path)
+        time.sleep(0.01)
+        return reader
+
+    monkeypatch.setattr(sss, "_open_geo_database", opener)
+    results = []
+    errors = []
+
+    def worker():
+        try:
+            results.append(sss._country_for_ip("8.8.8.8"))
+        except Exception as exc:  # pragma: no cover - 失败即测试红
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+    assert not errors
+    assert results == ["US"] * 8
+    assert len(opened) == 1
+
+
+# --------------------------------------------------------------------------- #
 # 9. worker / 队列降级矩阵
 # --------------------------------------------------------------------------- #
 def test_enqueue_without_worker_returns_false():
@@ -1594,6 +1852,7 @@ def test_app_admin_site_stats_owner_only(monkeypatch):
     for row in payload["daily"]:
         assert set(row.keys()) == DAILY_KEYS
     assert payload["geo_configured"] is False
+    assert payload["geo_source"] is None
     # 无写副作用：调用前后 site 表行数不变（不创建事件、不清理）
     n_before = _site_count()
     resp = client.get("/api/admin/v1/site-stats")

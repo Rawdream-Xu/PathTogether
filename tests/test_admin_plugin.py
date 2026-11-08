@@ -1004,7 +1004,10 @@ def test_admin_manifest_plugin_version_bumped_with_hashes():
     # 0.4.24 = owner parity（2026-11-06）：owner 同样受存储配额约束——详情
     # 抽屉对 owner 也渲染存储容量编辑器；额度策略页说明 owner 迁移 Credit
     # 钱包后月窗口不再参与计费；hashes/pin 按最终 bundle 重算。
-    assert data["pluginVersion"] == "0.4.24"  # hashes/pin 同步
+    # 0.4.25 = 站点统计国家/地区（2026-11-08）：top_countries 以中文地区名 +
+    # ISO 码展示（Intl.DisplayNames，缺能力回退原始码），并在表下按 CC BY 4.0
+    # 署名为 IP 地理位置来源 DB-IP；hashes/pin 按最终 bundle 重算。
+    assert data["pluginVersion"] == "0.4.25"  # hashes/pin 同步
     assert "admin:settings:read" in data["adminPermissions"]
     assert "admin:settings:write" in data["adminPermissions"]
     assert "admin:slides:read" in data["adminPermissions"]

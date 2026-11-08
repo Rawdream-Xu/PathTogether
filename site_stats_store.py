@@ -26,7 +26,10 @@ direct 展示（历史存量行不做数据迁移，仅读取层修正，与裸 
   非 2xx-3xx / 非 HTML / 含 query token 或资源 ID → None；返回 dict 键固定
   page_key/occurred_at/dedup_bucket/request_host/referrer_domain/utm_source/
   country_code/daily_visitor_hash/visitor_kind/bot_name（即落库最小事件，无原始
-  IP/UA/query/token/资源 ID——原始值在本函数内计算派生后即丢弃）；
+  IP/UA/query/token/资源 ID——原始值在本函数内计算派生后即丢弃）。
+  country_code 由**本地离线** MMDB 派生（2026-11-08：``SITE_STATS_GEOIP_DB``
+  指向 DB-IP "IP to Country Lite"；不调任何第三方网络接口，IP 不落库、
+  不写入日志）；env 未配置/库不可用时恒为 ``unknown``；
 - ``enqueue_visit(event) -> bool``：有界进程内队列 put_nowait；队列满 /
   worker 未启动 / 后端不可用 → False（丢该条），**永不抛异常**；
 - ``start_worker()``：后台批量写线程，幂等（PostgreSQL 为唯一后端）；
@@ -53,6 +56,13 @@ direct 展示（历史存量行不做数据迁移，仅读取层修正，与裸 
 - ``purge_expired(*, now=None) -> int``：显式 retention 清理，只删
   ``expires_at`` 到期的 site events，返回删除行数。
 
+地理信息（2026-11-08，产品批准增加国家/地区，admin-only 展示）：``build_event``
+用 ``SITE_STATS_GEOIP_DB`` 指向的本地 DB-IP Lite MMDB 把请求 IP 归约为两位
+国家码（ISO 3166-1 alpha-2，大写）；离线查询、无第三方调用。``dashboard_stats``
+的 ``geo_configured`` = 当前 reader 可用；可用时另返回 ``geo_source``
+（name/url/license/build_epoch）供后台按 CC BY 4.0 署名，不可用时为 None。
+未配置 env 时与原行为完全一致。
+
 降级矩阵（页面服务永不受影响；统计允许少计）：
 
 ==========================================  ==============================
@@ -69,6 +79,12 @@ Host 缺失（None/空）/ 未命中白名单          build_event → None（�
                                             日志——外部扫描拒绝是常态）
 remote_addr 缺失/不可解析                   build_event → None（无法算
                                             日轮换匿名哈希）
+SITE_STATS_GEOIP_DB 未配置/为空            country_code 恒 unknown，
+                                            dashboard geo_configured=False、
+                                            geo_source=None（当前行为）
+SITE_STATS_GEOIP_DB 库缺失/打不开/损坏     country_code → unknown + 节流
+                                            warning；已有 reader 在月度
+                                            替换失败时继续服务旧库
 worker 未启动                               enqueue False
 队列满（容量 _QUEUE_CAPACITY）              enqueue False（丢该条）
 DB 连接失败 / 超时 / 写失败                 丢整批 + 节流 warning，worker
@@ -86,6 +102,9 @@ stop_worker / 进程退出                      队列残余丢弃
   停止采集并告警，页面继续服务；**不复用 session secret（SECRET_KEY）**，
   无任何回退链；
 - 疑似爬虫只是站长观测标签，不是安全封禁依据（UI 必须写"疑似爬虫"）；
+- country_code 只来自本地离线 MMDB 派生（2026-11-08），不调用第三方定位
+  接口；IP 只在内存中用于查询，不写队列/日志/数据库，也不落任何 IP 派生
+  值（国家码是唯一保留的地理派生）；
 - 队列只持有 build_event 输出的最小事件 dict；原始 IP/UA 绝不进入队列、
   日志或崩溃转储（本模块所有日志只含事件条数与异常类型名）。
 
@@ -168,7 +187,7 @@ VISITOR_KINDS = ("anonymous_human", "signed_in_human", "suspected_bot")
 DEDUP_BUCKET_SECONDS = 600
 #: 原始事件保留天数（expires_at = occurred_at + 90 天）
 RETENTION_DAYS = 90
-#: D2 首发国家码恒量（不调第三方定位；将来离线库另做镜像/许可证 review）
+#: 无法确定国家时的固定值（0030 CHECK 允许未知或两位字母码）
 COUNTRY_CODE_FALLBACK = "unknown"
 
 # --------------------------------------------------------------------------- #
@@ -209,6 +228,19 @@ SITE_STATS_INTERNAL_REFERRER_HOSTS_ENV = "SITE_STATS_INTERNAL_REFERRER_HOSTS"
 
 #: 白名单项（与 0053 CHECK 同一口径）的 hostname 形态
 _ENTRY_HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")
+
+#: 离线 IP→国家码库（2026-11-08，产品批准）：绝对路径指向 DB-IP
+#: "IP to Country Lite" MMDB（CC BY 4.0，月度发布）。未配置/空 = 关闭
+#: 地理定位（country_code 恒 unknown，与 D2 首发行为完全一致）。只做本地
+#: 文件查询，不调用任何第三方网络接口；IP 不在日志/DB/队列中出现。
+SITE_STATS_GEOIP_DB_ENV = "SITE_STATS_GEOIP_DB"
+
+#: MMDB 文件签名复查间隔：生产按月以原子 rename 替换同一路径，读端最多
+#: 延迟这么久看到新库；也限制缺失/损坏库时的 stat + 告警频率。
+_GEO_SIGNATURE_CHECK_SECONDS = 60.0
+
+#: ISO 3166-1 alpha-2 大写校验（DB-IP 返回大写；不接受小写/其它形态）
+_COUNTRY_ISO_RE = re.compile(r"^[A-Z]{2}$")
 
 #: 统计日界时区：Asia/Shanghai 无夏令时，固定 UTC+8 等价（避免依赖容器
 #: tzdata）；与 spend_store 的业务周期时区口径一致（DB 存 UTC）。
@@ -707,6 +739,182 @@ def _classify_user_agent(user_agent):
 
 
 # --------------------------------------------------------------------------- #
+# 离线 IP → 国家码（2026-11-08，DB-IP "IP to Country Lite"，CC BY 4.0）
+#
+# 数据源是运维预先放置在本机的 .mmdb（SITE_STATS_GEOIP_DB 绝对路径），
+# **不调用任何第三方定位网络接口**。读取按需打开（模块 import 零副作用）、
+# 单锁串行化打开/换库；文件签名（st_mtime_ns/st_size/st_ino）每 60 秒至多
+# 复查一次，生产按月原子 rename 替换后新请求逐步用上新库。
+#
+# 可用性只是"锦上添花"：env 未配置、文件缺失、打开失败、单条查询异常一律
+# 返回 unknown；任何异常绝不进入页面响应或统计写路径（日志只有异常类型名）。
+# --------------------------------------------------------------------------- #
+_GEO_LOCK = threading.Lock()
+#: 当前 reader 及最近一次成功打开的路径/签名/复查时刻（monotonic）
+_GEO_STATE = {
+    "path": None,
+    "signature": None,      # (st_mtime_ns, st_size, st_ino)
+    "checked_at": 0.0,      # 上次 stat/签名复查的 monotonic 时刻
+    "reader": None,
+}
+
+
+def _open_geo_database(path):
+    """打开 MMDB 的唯一入口（测试注入点：monkeypatch 本函数返回 fake reader）。
+
+    延迟 import maxminddb：依赖未装/镜像缺包时本模块仍可导入，地理定位自动
+    降级为 unknown，而不是让统计模块整体不可用。MODE_AUTO 在官方 C 扩展
+    可用时用 mmap 扩展，否则回退纯 Python mmap/file。
+    """
+    import maxminddb
+    return maxminddb.open_database(path, maxminddb.MODE_AUTO)
+
+
+def _reset_geo_state():
+    """测试辅助：丢弃当前 reader 与签名状态（不 close，见 _geo_reader）。"""
+    with _GEO_LOCK:
+        _GEO_STATE.update(path=None, signature=None, checked_at=0.0,
+                          reader=None)
+
+
+def _geo_db_path():
+    """返回配置的库绝对路径；未配置/空/相对路径 → None（geo 关闭）。"""
+    path = (os.environ.get(SITE_STATS_GEOIP_DB_ENV) or "").strip()
+    if not path:
+        return None
+    if not os.path.isabs(path):
+        _throttled_warn(
+            "geo_path_invalid",
+            "site_stats: %s 不是绝对路径，地理定位关闭（country_code 记为 "
+            "unknown）" % SITE_STATS_GEOIP_DB_ENV)
+        return None
+    return path
+
+
+def _geo_reader():
+    """返回当前可用 MMDB reader；不可用 → None（永不抛异常）。
+
+    生命周期：首次调用打开；之后每次调用最多每 ``_GEO_SIGNATURE_CHECK_SECONDS``
+    秒 stat 一次并比较 (st_mtime_ns, st_size, st_ino)——签名变化才重开。
+    重开失败保留旧 reader（月度替换中途/新库损坏时统计不中断）；旧 reader
+    **不显式 close**：MODE_AUTO/MMAP 下 close() 与其它线程在途 get() 竞争
+    可能导致查询异常，改为替换引用后由 GC 在最后一个引用释放时关闭。
+    """
+    path = _geo_db_path()
+    if path is None:
+        return None
+    now_mono = time.monotonic()
+    with _GEO_LOCK:
+        state = _GEO_STATE
+        # 至多每 60 秒复查一次：缺失/坏库也不会按请求频率 stat + 告警；
+        # 首次调用 checked_at=0，必然检查。
+        if (now_mono - state["checked_at"]) < _GEO_SIGNATURE_CHECK_SECONDS:
+            return state["reader"]
+        state["checked_at"] = now_mono
+        try:
+            st = os.stat(path)
+            signature = (st.st_mtime_ns, st.st_size, st.st_ino)
+        except Exception as exc:
+            if state["reader"] is not None:
+                _throttled_warn(
+                    "geo_stat_failed",
+                    "site_stats: IP 国家库暂时不可读（%s），继续使用已有 "
+                    "reader" % type(exc).__name__)
+                return state["reader"]
+            _throttled_warn(
+                "geo_unavailable",
+                "site_stats: IP 国家库不可读（%s），country_code 记为 "
+                "unknown" % type(exc).__name__)
+            return None
+        if (state["reader"] is not None and state["path"] == path
+                and state["signature"] == signature):
+            return state["reader"]
+        try:
+            reader = _open_geo_database(path)
+        except Exception as exc:
+            if state["reader"] is not None:
+                _throttled_warn(
+                    "geo_reload_failed",
+                    "site_stats: IP 国家库重载失败（%s），继续使用已有 "
+                    "reader" % type(exc).__name__)
+                return state["reader"]
+            _throttled_warn(
+                "geo_open_failed",
+                "site_stats: IP 国家库打开失败（%s），country_code 记为 "
+                "unknown" % type(exc).__name__)
+            return None
+        # 原子替换：并发读者拿到的旧/新 reader 都完整可用。
+        state["reader"] = reader
+        state["path"] = path
+        state["signature"] = signature
+        return reader
+
+
+def _geo_build_epoch(reader):
+    """reader.metadata().build_epoch（DB-IP 库的构建时间）；取不到 → None。"""
+    try:
+        meta = reader.metadata()
+        epoch = (meta.get("build_epoch") if isinstance(meta, dict)
+                 else getattr(meta, "build_epoch", None))
+        return int(epoch) if epoch is not None else None
+    except Exception:
+        return None
+
+
+def _geo_source(reader):
+    """dashboard 的 geo_source 归属信息（CC BY 4.0 要求署名）；不可用 → None。"""
+    if reader is None:
+        return None
+    return {
+        "name": "DB-IP",
+        "url": "https://db-ip.com",
+        "license": "CC BY 4.0",
+        "build_epoch": _geo_build_epoch(reader),
+    }
+
+
+def _country_for_ip(ip_text):
+    """请求 IP → 两位大写国家码；无法确定 → ``unknown``（永不抛异常）。
+
+    口径（2026-11-08）：
+    - 非公网地址（private/loopback/link-local/reserved/multicast/
+      unspecified）不做库查询，直接 unknown（避免把内网/测试网段映射成
+      某个国家）；
+    - IPv4-mapped IPv6（::ffff:a.b.c.d）按 IPv4 查询；
+    - 只读 ``record["country"]["iso_code"]`` 并校验 ``^[A-Z]{2}$``；**不**
+      回退 continent/registered_country（语义不同，宁可 unknown）；
+    - 记录缺失、字段形态异常、库损坏/查询异常 → unknown。
+
+    IP 文本只在本函数内存中使用，不写日志、不落库。
+    """
+    try:
+        raw = (ip_text or "").strip()
+        if not raw:
+            return COUNTRY_CODE_FALLBACK
+        ip = ipaddress.ip_address(raw)
+    except (TypeError, ValueError):
+        return COUNTRY_CODE_FALLBACK
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    if (ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+        return COUNTRY_CODE_FALLBACK
+    reader = _geo_reader()
+    if reader is None:
+        return COUNTRY_CODE_FALLBACK
+    try:
+        record = reader.get(str(ip))
+        country = record.get("country") if isinstance(record, dict) else None
+        iso_code = country.get("iso_code") if isinstance(country, dict) else None
+        if isinstance(iso_code, str) and _COUNTRY_ISO_RE.match(iso_code):
+            return iso_code
+    except Exception:
+        # 单条查询/损坏库异常只影响该条事件，绝不进入请求路径
+        return COUNTRY_CODE_FALLBACK
+    return COUNTRY_CODE_FALLBACK
+
+
+# --------------------------------------------------------------------------- #
 # build_event（纯函数；跨代理契约）
 # --------------------------------------------------------------------------- #
 def build_event(*, path, query_string, referrer, remote_addr, user_agent,
@@ -725,6 +933,8 @@ def build_event(*, path, query_string, referrer, remote_addr, user_agent,
     utm_source, country_code, daily_visitor_hash, visitor_kind, bot_name。
     request_host 为命中的白名单 hostname（目标域名决定「是不是本服务访问」；
     Referer 只表示「从哪里跳过来」，两者语义不同，互不替代）。
+    country_code 来自本地离线库（``SITE_STATS_GEOIP_DB``；2026-11-08），
+    未配置/不可用/内网地址时恒 ``unknown``；原始 remote_addr 用后即弃。
     """
     # 1. 状态码：仅 2xx/3xx（要求真实 int，拒绝 "200" 之类的宽松转换）
     if not isinstance(status_code, int) or isinstance(status_code, bool):
@@ -789,7 +999,7 @@ def build_event(*, path, query_string, referrer, remote_addr, user_agent,
         "request_host": request_host,
         "referrer_domain": _referrer_domain(referrer),
         "utm_source": utm_source,
-        "country_code": COUNTRY_CODE_FALLBACK,
+        "country_code": _country_for_ip(remote_addr),
         "daily_visitor_hash": _daily_visitor_hash(secret, day_str, prefix),
         "visitor_kind": visitor_kind,
         "bot_name": bot_name,
@@ -1171,7 +1381,9 @@ def dashboard_stats(*, now=None):
     =False）时主口径恒为空；迁移前历史行（request_host IS NULL）不进入主
     口径，仅在 legacy.d30_visits 计数。
 
-    geo_configured 恒 False（D2 country_code 恒 unknown，未配置离线定位库）。
+    geo_configured（2026-11-08）：本地离线 IP 国家库（SITE_STATS_GEOIP_DB）
+    当前可用时为 True；此时附 ``geo_source``（DB-IP 署名/许可/库构建时间），
+    否则 False + None。未配置 env 时与原契约完全一致。
     """
     moment = now if now is not None else datetime.now(timezone.utc)
     if moment.tzinfo is None:
@@ -1189,6 +1401,7 @@ def dashboard_stats(*, now=None):
         start = d30_start if key == "d30" else (
             d7_start if key == "d7" else today_start)
         windows[key] = _window_agg(start, today_end, hosts)
+    geo_reader = _geo_reader()
     return {
         "generated_at": moment_utc.isoformat(),
         "today": windows["today"],
@@ -1238,7 +1451,10 @@ def dashboard_stats(*, now=None):
         "entry_hosts": hosts,
         "host_filter_configured": entry_hosts is not None,
         "legacy": {"d30_visits": _legacy_window_count(d30_start, today_end)},
-        "geo_configured": False,
+        # 2026-11-08：离线库可用性 + CC BY 4.0 署名信息（admin 插件据此
+        # 展示国家块与归属；不可用时前端隐藏国家块）
+        "geo_configured": geo_reader is not None,
+        "geo_source": _geo_source(geo_reader),
     }
 
 
