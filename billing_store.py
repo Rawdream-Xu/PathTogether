@@ -1124,6 +1124,12 @@ RECONCILIATION_MIGRATION_BOUNDARY_UNVERIFIED = "migration_boundary_unverified"
 CREDIT_USAGE_WITHOUT_HOLD_METRIC = "credit_usage_without_hold_total"
 RESOLUTION_LATE_USAGE_SETTLED = "late_usage_settled"
 RESOLUTION_CLIENT_RELEASE_AFTER_EXPIRY = "client_release_after_expiry"
+#: 已发出调用但未收到 provider 最终 usage（用户点「停止」/断流）：按产品
+#: 裁决（2026-11-08）直接释放预占、不扣费，留下非阻塞记录。
+RESOLUTION_RELEASED_NO_FINAL_USAGE = "released_no_final_usage"
+#: 上述释放写入的 reconciliation_reason（unpriced 事件原因前缀）。
+RECONCILIATION_UNPRICED_NO_FINAL_USAGE = (
+    "unpriced_usage:%s" % UNPRICED_NO_FINAL_USAGE)
 
 
 def _input_has_usage_evidence(event):
@@ -1260,6 +1266,34 @@ def _mark_credit_hold_pending_tx(cur, hold, *, event_id, reason, now,
     return _hold_out(row)
 
 
+def _finalize_credit_hold_released_tx(cur, acct, hold, *, resolution, now,
+                                      event_id=None, reconciliation_reason=None,
+                                      reconciliation_at=None):
+    """归还预占并置 ``released``（客户端释放 / 无最终用量 / 到期扫描共用）。
+
+    可选参数只在非空时写入：普通 release 不绑定 event、不改已有 reconciliation
+    字段；无最终用量/到期扫描则同时绑定 event、原因与处置时间，保证重放幂等
+    且保留非阻塞的管理记录。
+    """
+    credit = _credit()
+    credit.release_hold_tx(cur, acct, hold)
+    cur.execute(
+        "UPDATE billing_holds SET status='released', settled_at=%s, "
+        "event_id=COALESCE(%s, event_id), "
+        "reconciliation_reason=COALESCE(%s, reconciliation_reason), "
+        "reconciliation_at=COALESCE(%s, reconciliation_at), "
+        "resolution=COALESCE(%s, resolution), "
+        "resolved_at=CASE WHEN %s::text IS NULL THEN resolved_at ELSE %s END "
+        "WHERE hold_id=%s AND status IN ('open','pending_reconciliation') "
+        "RETURNING " + _HOLD_SEL,
+        (now, event_id, reconciliation_reason, reconciliation_at,
+         resolution, resolution, now, hold["hold_id"]))
+    row = cur.fetchone()
+    if row is None:
+        raise HoldNotOpenError("hold 已被并发终局化", hold_id=hold["hold_id"])
+    return _hold_out(row)
+
+
 def _apply_credit_hold_settlement_tx(cur, *, acct, hold, event_id, status,
                                      charge, unpriced_reason,
                                      has_usage_evidence, source, now):
@@ -1274,6 +1308,10 @@ def _apply_credit_hold_settlement_tx(cur, *, acct, hold, event_id, status,
     hold_status = hold["status"]
 
     if hold_status == "released":
+        if event_id is not None and hold.get("event_id") == event_id:
+            # 同一事件的重复投递：release 终态幂等，不改任何标记
+            # （尤其是不能把 no_final_usage 覆盖成 usage_after_release）。
+            return "released", hold
         # release 后迟到用量：不扣费，只留非阻塞待办标记。
         cur.execute(
             "UPDATE billing_holds SET reconciliation_reason=%s, "
@@ -1304,11 +1342,25 @@ def _apply_credit_hold_settlement_tx(cur, *, acct, hold, event_id, status,
         return "pending_reconciliation", updated
 
     # unpriced：有用量证据（真实发生但无法计价）或 settle 终态声明 → 待核对；
-    # /usage-events 的无证据事件只作证据入库，不改 hold（随后的 release 或
-    # 到期扫描决定终局），保证 outbox 与 settle release 先后顺序无关。
-    if not has_usage_evidence and source == "usage":
+    # /usage-events 的无证据事件默认只作证据入库，不改 hold（随后的 release 或
+    # 到期扫描决定终局），保证 outbox 与 settle release 先后顺序无关。唯一例外
+    # 是 no_final_usage（2026-11-08 裁决）：调用已发出但没有 provider 最终用量
+    # （用户点「停止」/断流/崩溃），两条投递路径都直接归还预占、不扣费、不锁
+    # 账户，只留下非阻塞的核对记录。
+    effective_reason = unpriced_reason or UNPRICED_NO_FINAL_USAGE
+    if (not has_usage_evidence and source == "usage"
+            and effective_reason != UNPRICED_NO_FINAL_USAGE):
         return None, None
-    reason = "unpriced_usage:%s" % (unpriced_reason or UNPRICED_NO_FINAL_USAGE)
+    if effective_reason == UNPRICED_NO_FINAL_USAGE:
+        # event_id 绑定本事件，保证 settle / usage-events 重放幂等。
+        updated = _finalize_credit_hold_released_tx(
+            cur, acct, hold,
+            resolution=RESOLUTION_RELEASED_NO_FINAL_USAGE,
+            event_id=event_id,
+            reconciliation_reason=RECONCILIATION_UNPRICED_NO_FINAL_USAGE,
+            reconciliation_at=now, now=now)
+        return "released", updated
+    reason = "unpriced_usage:%s" % effective_reason
     updated = _mark_credit_hold_pending_tx(
         cur, hold, event_id=event_id, reason=reason, now=now)
     return "pending_reconciliation", updated
@@ -2927,19 +2979,8 @@ def _credit_settle_result(row, *, settlement, duplicate=False,
 def _credit_release_hold_tx(cur, acct, row, *, resolution, installation_id,
                             now):
     """Credit hold release（open，或 pending(无事件) 的客户端释放）。"""
-    credit = _credit()
-    credit.release_hold_tx(cur, acct, row)
-    cur.execute(
-        "UPDATE billing_holds SET status='released', settled_at=%s, "
-        "resolution=COALESCE(%s, resolution), "
-        "resolved_at=CASE WHEN %s::text IS NULL THEN resolved_at ELSE %s END "
-        "WHERE hold_id=%s AND status IN ('open','pending_reconciliation') "
-        "RETURNING " + _HOLD_SEL,
-        (now, resolution, resolution, now, row["hold_id"]))
-    updated = cur.fetchone()
-    if updated is None:
-        raise HoldNotOpenError("hold 已被并发终局化", hold_id=row["hold_id"])
-    updated = _hold_out(updated)
+    updated = _finalize_credit_hold_released_tx(
+        cur, acct, row, resolution=resolution, now=now)
     _credit_hold_settle_audit_tx(
         cur, updated, settlement="released", now=now,
         installation_id=installation_id)
@@ -2977,12 +3018,12 @@ def _settle_credit_hold_tx(cur, probe, payload, *, installation_id, plugin_id,
     |---|---|---|
     | open | release | release → released |
     | open | {event_id} | SettlePayloadRequiredError |
-    | open / pending(无事件) | usage_event | ingest → settled/pending |
+    | open / pending(无事件) | usage_event | ingest → settled/pending/released |
     | pending(无事件) | release | 释放 → released（client_release_after_expiry）|
     | pending(有事件) | 同 event | 幂等 pending duplicate |
     | pending(有事件) | 其他 | HoldConflictError |
     | settled | 同 event | duplicate；否则 conflict |
-    | released | release | duplicate；usage_event → HoldNotOpenError |
+    | released | release / 同 event | duplicate；其他 usage_event → HoldNotOpenError |
     """
     credit = _credit()
     payload_kind, payload = payload
@@ -3046,6 +3087,11 @@ def _settle_credit_hold_tx(cur, probe, payload, *, installation_id, plugin_id,
 
     if status == "released":
         if payload_kind == "release":
+            return _credit_settle_result(
+                row, settlement="released", duplicate=True)
+        if claimed is not None and row["event_id"] == claimed:
+            # 无最终用量/到期扫描释放后，同一 usage_event 的重投递：幂等
+            # 返回 released，不改 reconciliation 标记、不再扣费。
             return _credit_settle_result(
                 row, settlement="released", duplicate=True)
         raise HoldNotOpenError(

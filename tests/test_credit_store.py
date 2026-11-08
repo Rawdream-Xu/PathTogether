@@ -11,7 +11,7 @@
   - release / freeze / unfreeze / cash_refund；
   - 对账 ok 与注入漂移检测；
   - 双连接并发抢最后一个可用余额（屏障同步，无超分配/无死锁/非负）；
-  - 到期扫描只标记 credits 且超出 grace 的 open hold，保留预占；
+  - 到期扫描只处理 credits 且超出 grace 的 open hold，归还预占并置 released；
   - 待核对处置 retry/release/waive + 幂等重放；
   - 0088 数据库写入守卫。
 """
@@ -684,7 +684,7 @@ def test_concurrent_allocate_last_balance_exactly_one_wins():
 # --------------------------------------------------------------------------- #
 # 8. 到期扫描
 # --------------------------------------------------------------------------- #
-def test_scan_expired_credit_holds_flags_only_past_grace_and_keeps_reservation():
+def test_scan_expired_credit_holds_releases_only_past_grace_and_returns_reservation():
     now = _now()
     user = ch.new_user()
     account = ch.provision_user(user["user_id"], grant_units=1000)
@@ -707,34 +707,51 @@ def test_scan_expired_credit_holds_flags_only_past_grace_and_keeps_reservation()
 
     result = credit_store.scan_expired_credit_holds(now=now,
                                                     grace_seconds=1800)
-    assert result == {"flagged": 1}
-    flagged = ch.fetch_hold(expired["hold_id"])
-    assert flagged["status"] == "pending_reconciliation"
-    assert flagged["reconciliation_reason"] == \
+    assert result == {"flagged": 0, "released": 1}
+    released = ch.fetch_hold(expired["hold_id"])
+    assert released["status"] == "released"
+    assert released["reconciliation_reason"] == \
         credit_store.RECONCILIATION_EXPIRED_WITHOUT_FINAL_STATE
-    assert flagged["reconciliation_at"] is not None
+    assert released["resolution"] == \
+        credit_store.RESOLUTION_RELEASED_EXPIRED_WITHOUT_FINAL_STATE
+    assert released["reconciliation_at"] is not None
+    assert released["resolved_at"] is not None
+    assert released["settled_at"] is not None
     assert ch.fetch_hold(within_grace["hold_id"])["status"] == "open"
     assert ch.fetch_hold(future["hold_id"])["status"] == "open"
     assert ch.fetch_hold(legacy["hold_id"])["status"] == "open"
     assert ch.fetch_hold(already_pending["hold_id"])["metadata"][
         "reconciliation_reason"] == "manual"
-    # 预占保留（不释放）
-    assert ch.fetch_account(account_id)["credit_reserved_units"] == 500
-    assert len(ch.fetch_hold_allocations(expired["hold_id"])) == 1
+    # 预占归还：只剩 within_grace 的 200；过期 hold 的分配标记为已释放
+    assert ch.fetch_account(account_id)["credit_reserved_units"] == 200
+    allocation = ch.fetch_hold_allocations(expired["hold_id"])[0]
+    assert allocation["allocated_units"] == 300
+    assert allocation["consumed_units"] == 0
+    assert allocation["released_units"] == 300
+    assert credit_store.reconcile_report(now=now)["ok"] is True
+    # 账户仍因手工插入的 pending hold 受限（扫描本身不新增 pending）
+    assert credit_store.wallet_snapshot(user["user_id"])[
+        "restricted_reason"] == "pending_reconciliation"
 
     conn = ch.connect()
     try:
         with ch.tx(conn) as cur:
             cur.execute(
+                "SELECT detail FROM audit_events WHERE action = %s",
+                (credit_store.CREDIT_HOLD_RELEASED_EXPIRED_ACTION,))
+            rows = [dict(row) for row in cur.fetchall()]
+            assert len(rows) == 1
+            assert rows[0]["detail"]["released_units"] == 300
+            cur.execute(
                 "SELECT COUNT(*)::bigint AS n FROM audit_events "
                 "WHERE action = %s",
                 (credit_store.CREDIT_HOLD_FLAGGED_PENDING_ACTION,))
-            assert int(cur.fetchone()["n"]) == 1
+            assert int(cur.fetchone()["n"]) == 0
     finally:
         conn.close()
-    # 重跑不重复标记
+    # 重跑不重复释放
     assert credit_store.scan_expired_credit_holds(
-        now=now, grace_seconds=1800) == {"flagged": 0}
+        now=now, grace_seconds=1800) == {"flagged": 0, "released": 0}
 
 
 # --------------------------------------------------------------------------- #

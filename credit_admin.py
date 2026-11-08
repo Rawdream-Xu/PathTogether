@@ -314,8 +314,10 @@ def user_wallet_detail(user_id):
                     "SELECT " + _HOLD_ADMIN_COLUMNS + " FROM billing_holds "
                     "WHERE account_id = %s AND ("
                     "  status = 'pending_reconciliation' OR "
-                    "  (status = 'released' AND "
-                    "   reconciliation_reason = 'usage_after_release')"
+                    "  (status = 'released' AND reconciliation_reason IN ("
+                    "     'usage_after_release', "
+                    "     'unpriced_usage:no_final_usage', "
+                    "     'expired_without_final_state'))"
                     ") ORDER BY (status = 'pending_reconciliation') DESC, "
                     "created_at DESC LIMIT 50", (account_id,))
                 holds = [_hold_admin_view(dict(row)) for row in cur.fetchall()]

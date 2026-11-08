@@ -137,7 +137,7 @@ python credit_payments.py reconcile        # 或等 sweep 摘要
 
 | 任务 | 建议频率 | 命令 | 说明 |
 |---|---|---|---|
-| 充值补偿扫描 | 每 2 分钟 | `python credit_payments.py sweep` | 未付订单退避查单；paid 未 credited 重试入账；`requested` 退款重新执行、`sending/unknown` 查询；**包含到期 Credit hold 扫描**（`scan_expired_credit_holds`，超时只标待核对、不释放预占）；输出 `reconcile_report` 摘要。 |
+| 充值补偿扫描 | 每 2 分钟 | `python credit_payments.py sweep` | 未付订单退避查单；paid 未 credited 重试入账；`requested` 退款重新执行、`sending/unknown` 查询；**包含到期 Credit hold 扫描**（`scan_expired_credit_holds`，超时未终局直接释放预占、不扣费、不锁账户，audit `credit.hold_released_expired`）；输出 `reconcile_report` 摘要。 |
 | 每日对账 | 每日 1 次（低峰） | `python credit_payments.py reconcile` | 只读输出钱包/批次/流水/订单/退款差异；不自动修数据。 |
 | 单订单查询 | 排障时 | `python credit_payments.py query --order-id <ct...>` | 主动查单并按证据入账（幂等）。 |
 | 单退款查询 | 排障时 | `python credit_payments.py refund-query --refund-id <crf_...>` | 查询渠道退款结果并落终态。 |

@@ -2441,6 +2441,7 @@ def sweep(now=None):
         "refunds_refunded": 0,
         "refund_errors": 0,
         "holds_flagged": 0,
+        "holds_released": 0,
         "storage_expansions": {},
         "reconcile_ok": None,
         "reconcile_discrepancy_kinds": [],
@@ -2513,8 +2514,9 @@ def sweep(now=None):
                         refund_id)
 
     try:
-        stats["holds_flagged"] = int(
-            credit_store.scan_expired_credit_holds(now=now).get("flagged", 0))
+        hold_scan = credit_store.scan_expired_credit_holds(now=now)
+        stats["holds_flagged"] = int(hold_scan.get("flagged", 0))
+        stats["holds_released"] = int(hold_scan.get("released", 0))
     except Exception:
         _LOG.exception("credit sweep hold expiry scan failed")
 

@@ -108,7 +108,7 @@ ID 前缀：`lot_<24hex>`、`cla_<24hex>`、`ct<24hex>`（订单号 = 支付宝 
 
 ### 4.4 Hold 到期扫描与对账
 
-- `scan_expired_credit_holds(now=None, grace_seconds=None) -> {"flagged": n}`：查 `billing_backend='credits' AND status='open' AND expires_at < now - grace`（env `CREDIT_HOLD_EXPIRY_GRACE_SECONDS`，缺省 1800）；逐账户：锁账户 → 锁这些 hold（ORDER BY hold_id）→ 重读仍为 open → `status='pending_reconciliation'`、`reconciliation_reason='expired_without_final_state'`、`reconciliation_at=now`；**不释放预占**；audit。
+- `scan_expired_credit_holds(now=None, grace_seconds=None) -> {"flagged": 0, "released": n}`：查 `billing_backend='credits' AND status='open' AND expires_at < now - grace`（env `CREDIT_HOLD_EXPIRY_GRACE_SECONDS`，缺省 1800）；逐账户：锁账户 → 锁这些 hold（ORDER BY hold_id）→ 重读仍为 open → **归还预占**并置 `status='released'`、`reconciliation_reason='expired_without_final_state'`、`resolution='released_expired_without_final_state'`、`reconciliation_at/resolved_at/settled_at=now`；audit `credit.hold_released_expired`。`flagged` 恒为 0，仅为兼容旧调用方保留（2026-11-08 产品裁决，见 §13.4）。
 - `reconcile_report(now=None) -> {"ok": bool, "discrepancies": [...], "summary": {...}}`（只读）：每个 credits 账户 balance = credits_v1 流水合计 = 批次 remaining 合计；reserved = 有效 hold 分配合计 = 批次 reserved 合计；refund_pending = 批次 refund_pending = 冻结退款 units 合计；每批次 remaining = 分配合计；每条 credits_v1 流水金额 = 分配合计；每笔 credited 订单恰一条 topup 流水 + 一个 paid lot（反之亦然）；每笔 refunded 退款恰一条 cash_refund；paid 未 credited（超过 10 分钟）；超 24h 未处置的 pending_reconciliation；迁移账户 legacy_grant 发行 = 迁移快照；迁移后迟到 legacy usage_debit。差异项形如 `{"kind", "account_id", "ref", "expected", "actual"}`，不含用户标识以外的敏感字段。
 
 ### 4.5 待核对处置（管理员）
@@ -151,9 +151,9 @@ Credit 路径**永远强制**，与 `spend_enforcement_mode` 无关。
 | pending(event_id 非空) | 同 event | 幂等返回 pending（`duplicate=True`），**不重试结算** |
 | pending(event_id 非空) | release / 其他 event | `HoldConflictError` |
 | settled | 同 event | duplicate；否则 `HoldConflictError` |
-| released | release | duplicate；usage_event → `HoldNotOpenError` |
+| released | release / 同 event | duplicate；其他 usage_event → `HoldNotOpenError` |
 
-pending(event_id 为空)（到期扫描标记）随后收到合法用量并结算成功时：`status='settled'`、`resolution='late_usage_settled'`、`resolved_at=now`（`reconciliation_reason` 保留为历史），账户限制随之解除。
+pending(event_id 为空)（旧版到期扫描或管理员遗留）随后收到合法用量并结算成功时：`status='settled'`、`resolution='late_usage_settled'`、`resolved_at=now`（`reconciliation_reason` 保留为历史），账户限制随之解除。2026-11-08 起到期扫描不再产生 pending(无事件)（见 §13.4）。
 
 ### 5.4 入库内核 `_ingest_usage_event_tx`
 
@@ -164,9 +164,9 @@ pending(event_id 为空)（到期扫描标记）随后收到合法用量并结�
   - hold 为 open / pending(无事件) → priced：`settle_hold_charge_tx(charge_units=charge)`（charge=0 时只释放，hold settled、actual=0）；
   - unpriced 分两类（“有用量证据” = 事件五个 token 字段任一非空）：
     - **有用量证据**（真实发生但无法计价，如 `no_active_price_book` / `arithmetic_mismatch` / 时钟越界且带 token）→ 不扣费，hold → pending（`reconciliation_reason='unpriced_usage:<unpriced_reason>'`，event_id 记入，保留预占）；无 hold 时建零预占待核对 hold（见下）。两条投递路径一致。
-    - **无用量证据**（五字段全空，含 `no_final_usage`）：settle 路径（`credit_ctx` 非空，客户端声明这是终态用量）→ 同上置 pending（`unpriced_usage:<reason>`）；`/usage-events` 路径 → **不改 hold**、不建 synthetic hold，事件仅作证据入库，`credit_settlement=None`（hold 由随后的 release 或到期扫描决定）。这样 usage outbox 与 settle release 的先后顺序不影响结果。
+    - **无用量证据**（五字段全空）：2026-11-08 产品裁决后，`no_final_usage` **两条投递路径都直接释放**——归还预占、hold `released`（`reconciliation_reason='unpriced_usage:no_final_usage'`、`resolution='released_no_final_usage'`、`event_id=本事件`、`reconciliation_at/resolved_at/settled_at=now`，不扣费）；先到者释放、后到者 duplicate `released`，usage outbox 与 settle 的先后顺序不影响结果。其他无证据的 unpriced 原因（如 `occurred_at_out_of_range`）仍只入库、不改 hold，由随后的 release 或到期扫描终局；其他 unpriced 原因带用量证据时（`arithmetic_mismatch` / `clock_skew_future` / `occurred_at_out_of_range` / `no_active_price_book`）仍置 pending。
   - insufficient → hold `pending_reconciliation`（`reconciliation_reason='insufficient_balance'`、`credit_shortfall_units`、`event_id`、`actual_nano_cny=charge`），**保留预占**；
-  - hold 已 released → 不扣费，hold 保持 released、记 `reconciliation_reason='usage_after_release'`、`reconciliation_at`（非阻塞待办）；
+  - hold 已 released → 不扣费，hold 保持 released；迟到事件记 `reconciliation_reason='usage_after_release'`、`reconciliation_at`（非阻塞待办）。若该事件正是 hold 绑定的释放事件（`hold.event_id == event_id`，即无最终用量释放后的重放）→ 原样返回 released duplicate，不改任何标记；
   - 无 hold（旧客户端 / hold client 关闭 / 调用前授权失败）且事件 priced 或有用量证据 → 同事务直接建 `status='pending_reconciliation'` 的零预占 hold（`billing_backend='credits'`、`reserved_nano_cny=0`、`estimated_nano_cny=NULL`、`event_id`=本事件、`reconciliation_reason='missing_authorization'`（迁移边界无证据时为 `migration_boundary_unverified`）、`reconciliation_at=now`、`actual_nano_cny=charge`（priced）或 NULL、`metadata={synthetic:true, request_hash:null, provider, missing_authorization:true}`、`expires_at=received`）；**不调用** `settle_hold_charge_tx`/批次分配，余额、预占、批次都不变，返回 `credit_settlement='pending_reconciliation'`，写 hold settle audit + 指标 `credit_usage_without_hold_total`。无证据 unpriced 时只入库事件，audit detail 标 `credit_missing_authorization=true` 并记同一指标。之后同 call_id 的 authorize 因 request_hash 不符得到 `hold_conflict`；重复投递返回 pending duplicate，不新增待办。
   - **不调用** `_apply_real_usage_debit_tx` / `_apply_simulated_usage_debit` / `_project_window_spent_tx`。
 - 事件已存在（duplicate，hash 一致）：credits 路由下先看 hold：settled / released / pending(有 event) → 原样返回状态，无副作用；hold 为 open 或 pending(无事件) → **恢复结算**：用已入库事件的 status/charge 按上面的新事件规则执行一次（方案 §6.3“遇到已有相同事件仍检查资金结算状态”），幂等由 `usage:<event_id>` 与 hold 状态保证。事件行 `received_at` 早于 `credit_migrated_at`（迁移前已入库 = 已计入迁移 spent）的重放只做幂等确认，返回 legacy duplicate，不建待办、不扣费。`_ingest_usage_event_tx` 返回 dict 追加 `billing_backend`、`credit_settlement`（`settled|pending_reconciliation|released|None`）、`hold_status`、`hold_id`、`migration_unverified`。
@@ -328,3 +328,15 @@ owner-only（`_require_owner_admin_v1`，预览态 403），admin v1 信封，�
 - 提交：HP 7a138e5 → 553526e → af5d4cd → 8fc40c4；PT 13440418（复核报告原文）。均未推送、未部署。PT 生产代码自 gate3（7c2fa0b4）以来没有变化（之后只有文档提交），PT 全量 pytest / vitest / Playwright 结果沿用 gate3。
 - 门禁（`/mnt/ssd2/tests/run-review3-gate-EzgMY3`，HP 8fc40c4 / PT 13440418，2026-10-28T13:48Z–13:49Z）：HP unit + integration 95 files / 1761 passed；契约对真实 PT 56 passed；`tsconfig.build.json` 0 错误；全量 `tsconfig.json` 116 个错误，去掉行列号后与 gate3 逐条一致。
 - 仍按原运维计划、待批准：生产快照迁移演练（0088 + 0089）、admin 插件 0.4.20 撞号重编、定时 sweep / 每日 reconcile、真实小额充值 → 消费 → 退款全链路。
+
+### 13.4 无最终用量/过期 hold 改为释放（2026-11-08 产品裁决）
+
+真实新用户按一次「停止」后账户被锁（`pending_reconciliation` 会暂停该账户所有新的付费 AI 调用，直到管理员手工处置），产品负责人裁决：**中断且没有 provider 最终 usage 的调用不锁账户，直接释放预占、不扣费**（「不扣也没事」），只保留非阻塞的管理记录。同日裁决同样适用于过期未终局的 hold（HistoPilot 崩溃/重启、授权后未发出请求）。
+
+- 无最终用量（`unpriced_reason='no_final_usage'`，即五个 token 字段全空且没有算术/时钟/价格书问题）：
+  - settle 路径（客户端带完整 usage_event 声明终态）与 `/usage-events` 路径都直接释放：`release_hold_tx` 归还预占，hold `status='released'`、`event_id=本事件`、`reconciliation_reason='unpriced_usage:no_final_usage'`、`reconciliation_at=now`、`resolution='released_no_final_usage'`、`resolved_at=settled_at=now`；不扣费、不分配批次；写同一 `billing.hold_settle` audit（`credit_settlement='released'`）。
+  - 重放：同一 event 再次 settle / 再次投递 usage-events → duplicate `released`，`reconciliation_reason` 不被 `usage_after_release` 覆盖、无任何资金副作用（settle 状态机与 `_apply_credit_hold_settlement_tx` 都按 `hold.event_id == event_id` 短路）。
+- 到期扫描：`scan_expired_credit_holds` 改为归还预占并置 `released`（`reconciliation_reason='expired_without_final_state'`、`resolution='released_expired_without_final_state'`、`reconciliation_at/resolved_at/settled_at=now`），audit `credit.hold_released_expired`；返回 `{"flagged": 0, "released": n}`，sweep stats 增加 `holds_released`（`holds_flagged` 保留为 0）。之后迟到的合法用量仍走既有「released → `usage_after_release`、不扣费」分支。
+- 以下仍保持阻塞（未改）：`insufficient_balance`（priced 实际费用超出可用余额）、synthetic `missing_authorization` / `migration_boundary_unverified` hold、以及 `no_final_usage` 之外的 unpriced 原因（`arithmetic_mismatch` / `clock_skew_future` / `occurred_at_out_of_range` / `no_active_price_book`）。
+- 数据库约束无需迁移：`billing_holds` 的 CHECK 允许 `released` 行携带 `event_id` / `reconciliation_reason` / `resolution`（`status='open'` 才禁止 event_id；`settled` 才要求 event_id）。
+- `reconcile_report` 的 24h 待核对超期检查只看 `status='pending_reconciliation'`，释放行不触发；`account_restriction_tx` 同样只看 pending，因此释放后账户立即恢复可用。

@@ -553,7 +553,8 @@ def test_settle_pending_no_event_usage_late_settles():
     assert ok["billing_backend"] == "credits"
 
 
-def test_settle_pending_no_event_unpriced_marks_pending():
+def test_settle_pending_no_event_unpriced_no_final_usage_releases():
+    """2026-11-08 裁决：待核对 hold 收到 no_final_usage 不再置 pending，直接释放。"""
     _seed_prices()
     user, acct = _user()
     hold = ch.insert_hold(
@@ -567,11 +568,24 @@ def test_settle_pending_no_event_unpriced_marks_pending():
     }
     event = _event_for(body, tokens=(None, None, None))
     out = _settle(hold["hold_id"], {"usage_event": event})
-    assert out["status"] == "pending_reconciliation"
+    assert out["status"] == "released"
+    assert out["credit_settlement"] == "released"
     row = _hold(hold["hold_id"])
+    assert row["status"] == "released"
     assert row["reconciliation_reason"] == "unpriced_usage:no_final_usage"
+    assert row["resolution"] == billing_store.RESOLUTION_RELEASED_NO_FINAL_USAGE
     assert row["event_id"] == event["event_id"]
+    assert row["reconciliation_at"] is not None
+    assert row["resolved_at"] is not None
+    assert row["settled_at"] is not None
     assert not _credits_debits(acct["account_id"])
+    assert _account(acct["account_id"])["credit_balance_units"] == 10 * CNY
+    # 同事件重放：duplicate released，不改 reconciliation 标记
+    replay = _settle(hold["hold_id"], {"usage_event": event})
+    assert replay["duplicate"] is True
+    assert replay["status"] == "released"
+    assert _hold(hold["hold_id"])["reconciliation_reason"] == \
+        "unpriced_usage:no_final_usage"
 
 
 def test_settle_pending_with_event_replay_conflicts():
@@ -685,20 +699,39 @@ def test_settle_insufficient_marks_pending_and_restricts():
 # --------------------------------------------------------------------------- #
 # E. unpriced 两类 / synthetic / usage_after_release / 重复恢复
 # --------------------------------------------------------------------------- #
-def test_unpriced_no_evidence_usage_does_not_change_hold_then_release():
+def test_unpriced_no_final_usage_usage_path_releases_hold():
+    """2026-11-08 裁决：/usage-events 的无最终用量事件也直接释放预占。"""
     _seed_prices()
     user, acct = _user()
     body, hold = _authorize(user)
+    reserved = int(_account(acct["account_id"])["credit_reserved_units"])
+    assert reserved == int(hold["reserved_nano_cny"]) > 0
     event = _event_for(body, tokens=(None, None, None))
     out = _ingest(event)
     assert out["status"] == "unpriced"
-    assert out["credit_settlement"] is None
+    assert out["credit_settlement"] == "released"
     row = _hold(hold["hold_id"])
-    assert row["status"] == "open"
-    assert row["event_id"] is None
-    released = _settle(hold["hold_id"], None)
-    assert released["status"] == "released"
+    assert row["status"] == "released"
+    assert row["reconciliation_reason"] == "unpriced_usage:no_final_usage"
+    assert row["resolution"] == billing_store.RESOLUTION_RELEASED_NO_FINAL_USAGE
+    assert row["event_id"] == event["event_id"]
+    account = _account(acct["account_id"])
+    assert account["credit_reserved_units"] == 0
+    assert account["credit_balance_units"] == 10 * CNY
     assert not _credits_debits(acct["account_id"])
+    assert credit_store.wallet_snapshot(user["user_id"])[
+        "restricted_reason"] is None
+    # 新授权立即恢复可用
+    ok = billing_store.authorize_hold(
+        _hold_body(user), installation_id=INSTALLATION, now=T0,
+        client_capabilities=CAPS)
+    assert ok["billing_backend"] == "credits"
+    # 重放同一 usage 事件：duplicate released，不动 reconciliation 标记
+    replay = _ingest(event)
+    assert replay["duplicate"] is True
+    assert replay["credit_settlement"] == "released"
+    assert _hold(hold["hold_id"])["reconciliation_reason"] == \
+        "unpriced_usage:no_final_usage"
 
 
 def test_unpriced_evidence_usage_marks_pending():
@@ -718,16 +751,54 @@ def test_unpriced_evidence_usage_marks_pending():
     assert not _credits_debits(acct["account_id"])
 
 
-def test_unpriced_settle_path_no_evidence_marks_pending():
+def test_unpriced_arithmetic_mismatch_still_marks_pending_and_restricts():
+    """no_final_usage 之外的 unpriced（算术不符）仍保持阻塞语义。"""
     _seed_prices()
     user, acct = _user()
     body, hold = _authorize(user)
-    event = _event_for(body, tokens=(None, None, None))
-    out = _settle(hold["hold_id"], {"usage_event": event})
-    assert out["status"] == "pending_reconciliation"
+    event = _event_for(body, tokens=(100, 200, 300))
+    event["total_tokens"] = 1000  # 算术不符（≠ 100+200+300）
+    out = _ingest(event)
+    assert out["status"] == "unpriced"
     assert out["credit_settlement"] == "pending_reconciliation"
     row = _hold(hold["hold_id"])
+    assert row["status"] == "pending_reconciliation"
+    assert row["reconciliation_reason"] == "unpriced_usage:arithmetic_mismatch"
+    assert row["event_id"] == event["event_id"]
+    assert _account(acct["account_id"])["credit_reserved_units"] == \
+        hold["reserved_nano_cny"]
+    assert not _credits_debits(acct["account_id"])
+    assert credit_store.wallet_snapshot(user["user_id"])[
+        "restricted_reason"] == "pending_reconciliation"
+    assert credit_store.reconcile_report(now=T0)["ok"] is True
+
+
+def test_unpriced_settle_path_no_evidence_releases_reservation():
+    _seed_prices()
+    user, acct = _user()
+    body, hold = _authorize(user)
+    reserved = int(_account(acct["account_id"])["credit_reserved_units"])
+    assert reserved == int(hold["reserved_nano_cny"]) > 0
+    event = _event_for(body, tokens=(None, None, None))
+    out = _settle(hold["hold_id"], {"usage_event": event})
+    assert out["status"] == "released"
+    assert out["credit_settlement"] == "released"
+    row = _hold(hold["hold_id"])
+    assert row["status"] == "released"
     assert row["reconciliation_reason"] == "unpriced_usage:no_final_usage"
+    assert row["resolution"] == billing_store.RESOLUTION_RELEASED_NO_FINAL_USAGE
+    assert row["event_id"] == event["event_id"]
+    account = _account(acct["account_id"])
+    assert account["credit_reserved_units"] == 0
+    assert account["credit_balance_units"] == 10 * CNY
+    assert not _credits_debits(acct["account_id"])
+    assert credit_store.wallet_snapshot(user["user_id"])[
+        "restricted_reason"] is None
+    # 新授权立即恢复可用
+    ok = billing_store.authorize_hold(
+        _hold_body(user), installation_id=INSTALLATION, now=T0,
+        client_capabilities=CAPS)
+    assert ok["billing_backend"] == "credits"
 
 
 def test_unpriced_evidence_no_hold_creates_synthetic_pending():
@@ -982,6 +1053,44 @@ def test_expire_stale_holds_ignores_credits():
     finally:
         conn.close()
     assert _hold(credit_hold["hold_id"])["status"] == "open"
+
+
+def test_scan_expired_hold_releases_and_late_usage_not_charged():
+    """2026-11-08 裁决：过期未终局 hold 释放预占、不锁账户；迟到用量不扣费。"""
+    _seed_prices()
+    user, acct = _user()
+    body, hold = _authorize(user)
+    reserved = int(_account(acct["account_id"])["credit_reserved_units"])
+    assert reserved == int(hold["reserved_nano_cny"]) > 0
+    scan_now = T0 + timedelta(seconds=3600)
+    result = credit_store.scan_expired_credit_holds(
+        now=scan_now, grace_seconds=1800)
+    assert result == {"flagged": 0, "released": 1}
+    row = _hold(hold["hold_id"])
+    assert row["status"] == "released"
+    assert row["reconciliation_reason"] == \
+        credit_store.RECONCILIATION_EXPIRED_WITHOUT_FINAL_STATE
+    assert row["resolution"] == \
+        credit_store.RESOLUTION_RELEASED_EXPIRED_WITHOUT_FINAL_STATE
+    assert row["reconciliation_at"] is not None
+    assert row["resolved_at"] is not None and row["settled_at"] is not None
+    account = _account(acct["account_id"])
+    assert account["credit_reserved_units"] == 0
+    assert account["credit_balance_units"] == 10 * CNY
+    assert credit_store.wallet_snapshot(user["user_id"])[
+        "restricted_reason"] is None
+    assert credit_store.reconcile_report(now=scan_now)["ok"] is True
+    # 释放后迟到的合法（priced）用量：不扣费，只留 usage_after_release 标记
+    event = _event_for(body)
+    out = _ingest(event, now=scan_now + timedelta(seconds=60))
+    assert out["credit_settlement"] == "released"
+    row = _hold(hold["hold_id"])
+    assert row["status"] == "released"
+    assert row["reconciliation_reason"] == "usage_after_release"
+    assert row["reconciliation_at"] is not None
+    assert not _credits_debits(acct["account_id"])
+    assert _account(acct["account_id"])["credit_balance_units"] == 10 * CNY
+    assert credit_store.reconcile_report(now=scan_now)["ok"] is True
 
 
 # --------------------------------------------------------------------------- #

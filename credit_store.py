@@ -82,10 +82,15 @@ PROVISION_LOT_KINDS = ("promotional", "legacy_grant")
 #: hold 审计/处置动作
 CREDIT_LOT_ISSUED_ACTION = "credit.lot_issued"
 CREDIT_HOLD_FLAGGED_PENDING_ACTION = "credit.hold_flagged_pending"
+#: 2026-11-08 起到期未终局 hold 直接释放（不再置 pending）的 audit 动作
+CREDIT_HOLD_RELEASED_EXPIRED_ACTION = "credit.hold_released_expired"
 CREDIT_PENDING_RESOLVED_ACTION = "credit.pending_resolved"
 
-#: 到期未终局的待核对原因（扫描器写入）
+#: 到期未终局的待核对原因（扫描器写入；现随释放一起作为非阻塞记录）
 RECONCILIATION_EXPIRED_WITHOUT_FINAL_STATE = "expired_without_final_state"
+#: 到期扫描释放的终态 resolution
+RESOLUTION_RELEASED_EXPIRED_WITHOUT_FINAL_STATE = (
+    "released_expired_without_final_state")
 
 #: 待核对处置动作与终态 resolution 词表
 RESOLVE_ACTIONS = ("retry", "release", "waive")
@@ -1412,15 +1417,18 @@ def credit_hold_expiry_grace_seconds():
 
 
 def scan_expired_credit_holds(now=None, grace_seconds=None):
-    """把过期未终局的 Credit hold 标为待核对（不释放预占）→ ``{"flagged": n}``。
+    """释放过期未终局的 Credit hold（不扣费）→ ``{"flagged": 0, "released": n}``。
 
     - 候选：``billing_backend='credits' AND status='open' AND expires_at <
       now - grace``（env ``CREDIT_HOLD_EXPIRY_GRACE_SECONDS``，缺省 1800）；
-    - 逐账户独立事务：锁账户 → 按 hold_id 锁候选行 → 重读仍为 open → 置
-      ``status='pending_reconciliation'``、reason
-      ``expired_without_final_state``、``reconciliation_at=now``；
-    - 预占保持不动（资金核对后再由管理员处置）；每次标记写
-      ``credit.hold_flagged_pending`` audit。legacy hold 永不在本扫描范围。
+    - 逐账户独立事务：锁账户 → 按 hold_id 锁候选行（ORDER BY hold_id）→
+      重读仍为 open → :func:`release_hold_tx` 归还预占 → ``status='released'``、
+      reason ``expired_without_final_state``、resolution
+      ``released_expired_without_final_state``、
+      ``reconciliation_at/resolved_at/settled_at=now``；
+    - 2026-11-08 产品裁决：过期未终局（HistoPilot 崩溃/重启、调用前中止）不再
+      保留预占、不再阻塞账户；每次释放写 ``credit.hold_released_expired``
+      audit。``flagged`` 恒为 0，仅为兼容旧调用方保留；legacy hold 永不扫描。
     """
     now = _coerce_now(now)
     if grace_seconds is None:
@@ -1445,45 +1453,55 @@ def scan_expired_credit_holds(now=None, grace_seconds=None):
         for row in candidates:
             grouped.setdefault(row["account_id"], []).append(row["hold_id"])
 
-        flagged = 0
+        released = 0
         for account_id, _hold_ids in grouped.items():
             with pg_store.transaction(conn) as c:
                 with c.cursor() as cur:
                     try:
-                        lock_account_tx(cur, account_id)
+                        account = lock_account_tx(cur, account_id)
                     except CreditAccountNotFoundError:
                         # 数据损坏（hold 的 account FK 保证不应出现）：跳过本账户。
                         continue
                     cur.execute(
-                        "SELECT hold_id FROM billing_holds "
+                        "SELECT " + _HOLD_COLUMNS + " FROM billing_holds "
                         "WHERE account_id = %s AND billing_backend = %s "
                         "AND status = 'open' AND expires_at < %s "
                         "ORDER BY hold_id FOR UPDATE",
                         (account_id, BACKEND_CREDITS, cutoff))
-                    rows = cur.fetchall()
-                    for row in rows:
+                    rows = [_hold_out(row) for row in cur.fetchall()]
+                    for hold in rows:
+                        released_units = release_hold_tx(cur, account, hold)
                         cur.execute(
                             "UPDATE billing_holds SET "
-                            "status = 'pending_reconciliation', "
+                            "status = 'released', settled_at = %s, "
                             "reconciliation_reason = %s, "
-                            "reconciliation_at = %s "
-                            "WHERE hold_id = %s AND status = 'open'",
-                            (RECONCILIATION_EXPIRED_WITHOUT_FINAL_STATE,
-                             now, row["hold_id"]))
-                        if cur.rowcount == 0:
-                            continue
-                        flagged += 1
+                            "reconciliation_at = %s, "
+                            "resolution = %s, resolved_at = %s "
+                            "WHERE hold_id = %s AND status = 'open' "
+                            "RETURNING hold_id",
+                            (now, RECONCILIATION_EXPIRED_WITHOUT_FINAL_STATE,
+                             now,
+                             RESOLUTION_RELEASED_EXPIRED_WITHOUT_FINAL_STATE,
+                             now, hold["hold_id"]))
+                        if cur.fetchone() is None:
+                            # FOR UPDATE 锁下不应发生；宁可回滚也不要只释放
+                            # 预占却留下 open hold 的不一致。
+                            raise CreditStateConflictError(
+                                "hold 状态在扫描事务内变化",
+                                hold_id=hold["hold_id"])
+                        released += 1
                         share_store_pg.record_audit_tx(
-                            cur, CREDIT_HOLD_FLAGGED_PENDING_ACTION,
+                            cur, CREDIT_HOLD_RELEASED_EXPIRED_ACTION,
                             actor_user_id=None, actor_role="system",
                             target_type="billing_hold",
-                            target_id=row["hold_id"],
+                            target_id=hold["hold_id"],
                             detail={"account_id": account_id,
-                                    "hold_id": row["hold_id"],
+                                    "hold_id": hold["hold_id"],
                                     "reason":
-                                    RECONCILIATION_EXPIRED_WITHOUT_FINAL_STATE},
+                                    RECONCILIATION_EXPIRED_WITHOUT_FINAL_STATE,
+                                    "released_units": released_units},
                             ts=now.timestamp())
-        return {"flagged": flagged}
+        return {"flagged": 0, "released": released}
     finally:
         conn.close()
 

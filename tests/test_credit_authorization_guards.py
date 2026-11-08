@@ -396,24 +396,27 @@ def test_unpriced_no_evidence_no_hold_records_audit_flag():
         "credit_missing_authorization") is True
 
 
-def test_usage_first_unpriced_then_settle_same_event_marks_pending():
-    """HistoPilot 修复后的组合路径：usage 先到无证据，settle 再带完整事件。"""
+def test_usage_first_unpriced_then_settle_same_event_releases():
+    """HistoPilot 修复后的组合路径：usage 先到无证据，settle 再带完整事件。
+
+    2026-11-08 裁决：no_final_usage 释放预占、不扣费、不锁账户。
+    """
     base._seed_prices()
     user, acct = base._user()
     body, hold = base._authorize(user)
     event = base._event_for(body, tokens=(None, None, None))
     first = base._ingest(event)
-    assert first["credit_settlement"] is None
-    assert base._hold(hold["hold_id"])["status"] == "open"
+    assert first["credit_settlement"] == "released"
+    assert base._hold(hold["hold_id"])["status"] == "released"
     out = base._settle(hold["hold_id"], {"usage_event": event})
-    assert out["status"] == "pending_reconciliation"
-    assert out["credit_settlement"] == "pending_reconciliation"
+    assert out["duplicate"] is True
+    assert out["status"] == "released"
+    assert out["credit_settlement"] == "released"
     row = base._hold(hold["hold_id"])
-    assert row["status"] == "pending_reconciliation"
+    assert row["status"] == "released"
     assert row["reconciliation_reason"] == "unpriced_usage:no_final_usage"
     assert not base._credits_debits(acct["account_id"])
-    assert base._account(acct["account_id"])["credit_reserved_units"] == \
-        hold["reserved_nano_cny"]
+    assert base._account(acct["account_id"])["credit_reserved_units"] == 0
 
 
 # --------------------------------------------------------------------------- #
