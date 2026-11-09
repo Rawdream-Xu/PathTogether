@@ -3,6 +3,27 @@
   "version_scheme": "YYYY.MM.DD product release. Do not use PathTogether package.json 0.1.0 (test package) as the product version.",
   "releases": [
     {
+      "version": "2026.11.09",
+      "date": "2026-11-09",
+      "published": true,
+      "components": {
+        "histopilot": "0.4.10",
+        "pathtogether": "suite-20261109a"
+      },
+      "items": {
+        "zh": [
+          "AI 回复时点「停止」或网络中断，未完成的那次调用不再扣费，也不会影响继续使用。",
+          "账户弹层的 Credit 余额下方改为显示「已使用」的 Credits，不再按累计发放画进度条。",
+          "www.histopilot.cn 与 www.histopilot.com 现在也可以正常打开，会自动跳转到主站。"
+        ],
+        "en": [
+          "If you press Stop or the network drops during an AI reply, the unfinished call is no longer charged and does not block you from continuing.",
+          "The account panel now shows Credits used below your balance instead of a bar against total credits issued.",
+          "www.histopilot.cn and www.histopilot.com now open normally and redirect to the main site."
+        ]
+      }
+    },
+    {
       "version": "2026.11.06b",
       "date": "2026-11-06",
       "published": true,
@@ -14,16 +35,12 @@
         "zh": [
           "Credit 充值已开放：在「账户设置」或 Credit 页面选择套餐，用支付宝完成充值，到账后即可用于 AI 读片与存储扩容。",
           "新增「账户设置」对话框：在一个窗口里查看邮箱与角色、修改密码或更换邮箱、查看 Credit 可用余额与存储空间，并直达充值、存储扩容与数据共享。",
-          "管理员账号与普通用户使用同一套 Credit 余额与存储空间规则，便于管理员亲自体验并验证完整的上传、分析、充值流程。",
-          "账户弹层的 Credit 余额下方改为显示「已使用」的 Credits，不再按累计发放画进度条。",
-          "AI 回复时点「停止」或网络中断，未完成的那次调用不再扣费，也不会影响继续使用。"
+          "管理员账号与普通用户使用同一套 Credit 余额与存储空间规则，便于管理员亲自体验并验证完整的上传、分析、充值流程。"
         ],
         "en": [
           "Credit top-up is now open to everyone: choose a package in Account settings or on the Credit page and pay with Alipay; the credits can be used for AI analysis and storage expansion.",
           "A new Account settings dialog puts everything in one place: your email and role, password and email changes, available Credits and storage usage, with direct links to top-up, storage expansion and data sharing.",
-          "Administrator accounts now follow the same Credit balance and storage rules as regular users, so the administrator can personally verify the full upload, analysis and top-up flow.",
-          "The account panel now shows Credits used below your balance instead of a bar against total credits issued.",
-          "If you press Stop or the network drops during an AI reply, the unfinished call is no longer charged and does not block you from continuing."
+          "Administrator accounts now follow the same Credit balance and storage rules as regular users, so the administrator can personally verify the full upload, analysis and top-up flow."
         ]
       }
     },
