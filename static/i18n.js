@@ -788,6 +788,14 @@
       "ai.stop.aria": "停止",
       "ai.start.title": "开始读片",
       "ai.start.aria": "开始",
+      "ai.read_aloud": "朗读",
+      "ai.read_aloud.title": "朗读这条回复",
+      "ai.read_aloud.generating": "生成中…",
+      "ai.read_aloud.stop": "停止",
+      "ai.read_aloud.stop.title": "停止朗读",
+      "ai.read_aloud.rate_limited": "朗读太频繁，请稍后再试",
+      "ai.read_aloud.unavailable": "朗读暂不可用",
+      "ai.read_aloud.code_omitted": "（代码略）",
 
       // ---- 工单 E：查看器右键「加入会话草稿」菜单 ----
       "ctxmenu.attach.view": "将当前视野加入会话",
@@ -2853,6 +2861,14 @@
       "ai.stop.aria": "Stop",
       "ai.start.title": "Start reading",
       "ai.start.aria": "Start",
+      "ai.read_aloud": "Read aloud",
+      "ai.read_aloud.title": "Read this reply aloud",
+      "ai.read_aloud.generating": "Generating…",
+      "ai.read_aloud.stop": "Stop",
+      "ai.read_aloud.stop.title": "Stop reading aloud",
+      "ai.read_aloud.rate_limited": "Too many read-aloud requests, try again later",
+      "ai.read_aloud.unavailable": "Read aloud is unavailable",
+      "ai.read_aloud.code_omitted": "(code omitted)",
 
       // ---- Work order E: viewer context menu "attach to conversation draft"
       "ctxmenu.attach.view": "Add current view to conversation",

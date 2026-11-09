@@ -17919,15 +17919,16 @@ class _SlidingPixelWindow:
 
 
 class _PluginRateLimiter:
-    """per-installation token bucket（进程内，线程安全）。
+    """per-subject token bucket（进程内，线程安全）。
 
-    容量 = per_minute（即允许瞬时耗尽一分钟配额，之后按 per_minute/60 每秒回补）。
-    consume(weight) 成功扣减返回 (True, 0)；不足返回 (False, retry_after)，retry_after
-    为攒够 weight 个 token 所需秒数（≥1）。
+    容量缺省 = per_minute（即允许瞬时耗尽一分钟配额，之后按 per_minute/60
+    每秒回补）；可用 ``capacity`` 单独指定突发额度（如 TTS 20/min、burst 6）。
+    consume(weight) 成功扣减返回 (True, 0)；不足返回 (False, retry_after)，
+    retry_after 为攒够 weight 个 token 所需秒数（≥1）。
     """
 
-    def __init__(self, per_minute):
-        self._capacity = float(per_minute)
+    def __init__(self, per_minute, capacity=None):
+        self._capacity = float(per_minute if capacity is None else capacity)
         self._rate = float(per_minute) / 60.0  # tokens/sec
         self._lock = threading.Lock()
         self._state = {}  # installation_id -> [tokens, last_ts]
@@ -26165,6 +26166,182 @@ def plugin_v1_dispatch(plugin_id, capability_name):
     _audit_dispatch(200, "ok", (time.time() - started) * 1000,
                     extra={"truncated": bool(payload.get("truncated"))})
     return jsonify(payload)
+
+
+# --------------------------------------------------------------------------- #
+# AI 朗读（TTS）代理（HistoPilot 插件 0.4.11「朗读」按钮；不计费）
+#
+# GET  /api/ai/tts → {available, max_chars: 400}
+# POST /api/ai/tts {text} → 转发本地推理 hub /v1/audio/speech，成功回 WAV 字节
+#
+# 鉴权/CSRF 与 /api/ai/run 等同链（全局 _require_auth + _csrf_protect），
+# 另复用 AI 面板可用性：HistoPilot UI 已启用且 user 通过 ai_access 闸。
+# 限流：进程内 per-user token bucket 20/min、burst 6；进程内并发 2
+# （见 docker_entry.sh：默认 2 worker × 8 threads；单次 TTS 最长 90 s 会
+# 阻塞一个线程，故并发必须低于线程数且按进程计）。失败/超时 503/504，
+# 不向客户端或日志透出 hub 地址/密钥/朗读文本。
+# --------------------------------------------------------------------------- #
+AI_TTS_MAX_CHARS = 400
+AI_TTS_MODEL = (os.environ.get("AI_TTS_MODEL") or "indextts2").strip() or "indextts2"
+AI_TTS_VOICE = (os.environ.get("AI_TTS_VOICE") or "female").strip() or "female"
+try:
+    _AI_TTS_TIMEOUT_S = float(os.environ.get("AI_TTS_TIMEOUT_S") or 90)
+except ValueError:
+    _AI_TTS_TIMEOUT_S = 90.0
+_AI_TTS_RATE_LIMIT_PER_MIN = 20
+_AI_TTS_RATE_LIMIT_BURST = 6
+_AI_TTS_RATE_LIMITER = _PluginRateLimiter(
+    _AI_TTS_RATE_LIMIT_PER_MIN, capacity=_AI_TTS_RATE_LIMIT_BURST)
+_AI_TTS_CONCURRENCY = threading.BoundedSemaphore(2)
+# 异常基类在 import 期绑定（真 requests 的类；app.requests 会被测试替换）。
+_AI_TTS_REQUEST_EXC = requests.RequestException
+_AI_TTS_TIMEOUT_EXC = requests.Timeout
+_AI_TTS_OFF_VALUES = frozenset(("0", "false", "off"))
+
+
+def _ai_tts_enabled():
+    """AI_TTS_ENABLED 未显式关闭（缺省开启；0/false/off 关闭）。"""
+    return ((os.environ.get("AI_TTS_ENABLED", "1") or "").strip().lower()
+            not in _AI_TTS_OFF_VALUES)
+
+
+def _ai_tts_hub_configured():
+    """本地推理 hub 完整配置（INFER_HUB_URL + INFER_HUB_KEY）。"""
+    return bool(INFER_HUB_URL and INFER_HUB_KEY)
+
+
+def _ai_tts_access_allowed(user_ctx):
+    """AI 面板可用性：HistoPilot UI 已启用 + 用户 AI 访问闸。"""
+    if not histopilot_ui_enabled():
+        return False
+    if (user_ctx or {}).get("role") == user_store.ROLE_USER:
+        return _user_ai_access_denied(
+            (user_ctx or {}).get("user_id") or "") is None
+    return True
+
+
+def _ai_tts_error(error, status, retry_after=None):
+    """TTS 端点的稳定错误体（只含 error；可选 Retry-After）。"""
+    resp = jsonify(error=error)
+    if retry_after is not None:
+        resp.headers["Retry-After"] = str(retry_after)
+    return resp, status
+
+
+def _ai_tts_log(user_ctx, chars, status, started, error=None):
+    """一行隐私安全日志：用户 id 哈希 + 字符数 + 状态 + 耗时（不含文本）。
+
+    hub 异常只允许传异常类型名（``error``），绝不传异常文本/地址/密钥。
+    """
+    uid = (user_ctx or {}).get("user_id") or ""
+    subject = _auth_subject_hash(uid)[:16] if uid else "-"
+    ms = int((time.time() - started) * 1000)
+    if error:
+        app.logger.info("ai.tts subject=%s chars=%d status=%d ms=%d error=%s",
+                        subject, chars, status, ms, error)
+    else:
+        app.logger.info("ai.tts subject=%s chars=%d status=%d ms=%d",
+                        subject, chars, status, ms)
+
+
+@app.route("/api/ai/tts", methods=["GET"])
+def api_ai_tts_availability():
+    """朗读可用性探测（插件按钮据此显示/隐藏）。"""
+    user_ctx = current_identity()
+    available = (_ai_tts_hub_configured() and _ai_tts_enabled()
+                 and _ai_tts_access_allowed(user_ctx))
+    return jsonify(available=bool(available), max_chars=AI_TTS_MAX_CHARS)
+
+
+@app.route("/api/ai/tts", methods=["POST"])
+def api_ai_tts():
+    """朗读合成：校验 → 限流/并发闸 → 本地推理 hub /v1/audio/speech。
+
+    body: {"text": str}（strip 后 1..400 字符）。成功回 audio/wav 字节
+    （Cache-Control: no-store）；失败回稳定 error 码，不透传 hub 细节。
+    不计费、不落文本；只写一行不含文本的访问日志。
+    """
+    started = time.time()
+    user_ctx = current_identity()
+    # 与 /api/ai/* 面板路由同链：HistoPilot UI 已启用 + ai_access 闸
+    # （owner 不经过 ai_access；AUTH_ENABLED=False 归一 owner）。
+    if not histopilot_ui_enabled():
+        return _ai_tts_error("tts_unavailable", 503)
+    if (user_ctx or {}).get("role") == user_store.ROLE_USER:
+        denied = _user_ai_access_denied((user_ctx or {}).get("user_id") or "")
+        if denied is not None:
+            return denied
+
+    body = request.get_json(silent=True)
+    raw_text = body.get("text") if isinstance(body, dict) else None
+    text = raw_text.strip() if isinstance(raw_text, str) else ""
+    chars = len(text)
+    if not isinstance(raw_text, str) or not (1 <= chars <= AI_TTS_MAX_CHARS):
+        _ai_tts_log(user_ctx, chars, 400, started)
+        return _ai_tts_error("invalid_text", 400)
+
+    if not (_ai_tts_hub_configured() and _ai_tts_enabled()):
+        _ai_tts_log(user_ctx, chars, 503, started)
+        return _ai_tts_error("tts_unavailable", 503)
+
+    # 每用户 20/min、burst 6（进程内 token bucket；与插件通道同一原语）。
+    rate_key = (user_ctx or {}).get("user_id") or "owner"
+    ok, retry_after = _AI_TTS_RATE_LIMITER.consume(rate_key)
+    if not ok:
+        _ai_tts_log(user_ctx, chars, 429, started)
+        return _ai_tts_error("rate_limited", 429, retry_after=retry_after)
+
+    # 每 PT 进程最多 2 个在途 TTS（非阻塞；超限立即 busy，不排队占线程）。
+    if not _AI_TTS_CONCURRENCY.acquire(blocking=False):
+        _ai_tts_log(user_ctx, chars, 429, started)
+        return _ai_tts_error("busy", 429)
+    try:
+        payload = {
+            "model": AI_TTS_MODEL,
+            "input": text,
+            "voice": AI_TTS_VOICE,
+            "response_format": "wav",
+        }
+        hub_url = INFER_HUB_URL + "/v1/audio/speech"
+        try:
+            r = requests.post(
+                hub_url, json=payload,
+                headers={"Authorization": "Bearer " + INFER_HUB_KEY},
+                timeout=_AI_TTS_TIMEOUT_S)
+            if r.status_code == 429:
+                try:
+                    retry = int(str(r.headers.get("Retry-After")).strip())
+                except (TypeError, ValueError):
+                    retry = 60
+                _ai_tts_log(user_ctx, chars, 429, started)
+                return _ai_tts_error("rate_limited", 429,
+                                     retry_after=max(1, retry))
+            if r.status_code == 504:
+                _ai_tts_log(user_ctx, chars, 504, started)
+                return _ai_tts_error("tts_timeout", 504)
+            if r.status_code != 200:
+                _ai_tts_log(user_ctx, chars, 503, started)
+                return _ai_tts_error("tts_unavailable", 503)
+            ctype = (r.headers.get("Content-Type") or "").split(";")[0]
+            audio = r.content or b""
+            if not ctype.strip().lower().startswith("audio/") or not audio:
+                _ai_tts_log(user_ctx, chars, 503, started)
+                return _ai_tts_error("tts_unavailable", 503)
+        except _AI_TTS_TIMEOUT_EXC as e:
+            # 超时/连接错误只记类型名，绝不把 hub 地址/密钥写进日志。
+            _ai_tts_log(user_ctx, chars, 504, started,
+                        error=type(e).__name__)
+            return _ai_tts_error("tts_timeout", 504)
+        except _AI_TTS_REQUEST_EXC as e:
+            _ai_tts_log(user_ctx, chars, 503, started,
+                        error=type(e).__name__)
+            return _ai_tts_error("tts_unavailable", 503)
+        resp = Response(audio, status=200, content_type="audio/wav")
+        resp.headers["Cache-Control"] = "no-store"
+        _ai_tts_log(user_ctx, chars, 200, started)
+        return resp
+    finally:
+        _AI_TTS_CONCURRENCY.release()
 
 
 @app.route("/api/ai/run", methods=["POST"])

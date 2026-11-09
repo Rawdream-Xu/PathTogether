@@ -9,7 +9,7 @@
   <!-- OpenSeadragon 5.0.1（已本地化） -->
   <script src="/static/openseadragon.min.js"></script>
   <!-- 中英双语切换（必须在 app.js 之前加载，提供 window.HP_I18N） -->
-  <script src="/static/i18n.js?v=20261107a"></script>
+  <script src="/static/i18n.js?v=20261109a"></script>
 </head>
 <body class="app-mode-official" data-app-mode="official">
   <script>
@@ -33,13 +33,16 @@
   <!-- HistoPilot 插件 UI bundle（同源独立加载）。顺序敏感：bridge-client 建命名空间，
        其余文件向 window.HistoPilot 挂载能力；main.js 为入口，最后加载。
        加载早于 app.js，使平台 init 时 window.HistoPilot 已就绪 -->
-  <script src="/plugins/histopilot/ui/bridge-client.js?v=20260910a"></script>
-  <script src="/plugins/histopilot/ui/api.js?v=20260910a"></script>
-  <script src="/plugins/histopilot/ui/sse.js?v=20260910a"></script>
-  <script src="/plugins/histopilot/ui/renderer.js?v=20260910a"></script>
-  <script src="/plugins/histopilot/ui/config-panel.js?v=20260910a"></script>
-  <script src="/plugins/histopilot/ui/sessions.js?v=20260910a"></script>
-  <script src="/plugins/histopilot/ui/main.js?v=20260910a"></script>
+  <script src="/plugins/histopilot/ui/bridge-client.js?v=20261109a"></script>
+  <script src="/plugins/histopilot/ui/api.js?v=20261109a"></script>
+  <!-- 朗读（TTS）：必须在 renderer.js 之前加载，renderer 的最终气泡
+       挂载朗读按钮依赖 HP.readAloud 已就绪（HP 侧 test/ui-load-order 同序） -->
+  <script src="/plugins/histopilot/ui/read-aloud.js?v=20261109a"></script>
+  <script src="/plugins/histopilot/ui/sse.js?v=20261109a"></script>
+  <script src="/plugins/histopilot/ui/renderer.js?v=20261109a"></script>
+  <script src="/plugins/histopilot/ui/config-panel.js?v=20261109a"></script>
+  <script src="/plugins/histopilot/ui/sessions.js?v=20261109a"></script>
+  <script src="/plugins/histopilot/ui/main.js?v=20261109a"></script>
   {% endif %}
   <script src="/static/app-mode.js?v=20260907c"></script>
   <script src="/static/viewer-core.js?v=20261009i"></script>
