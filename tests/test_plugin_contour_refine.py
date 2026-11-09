@@ -65,9 +65,11 @@ def _isolated(tmp_path, monkeypatch):
     """每用例独立存储 + 数据目录；本地免认证态（与 region 用例同基线）。"""
     isolate_app(monkeypatch, tmp_path)
     monkeypatch.setattr(app_mod, "AUTH_ENABLED", False)
-    # 缺省不配服务地址（unavailable 分支）；需要服务路径的用例自行 setattr
+    # 缺省不配任何后端（unavailable 分支）；需要服务路径的用例自行 setattr
     monkeypatch.setattr(app_mod, "CONTOUR_REFINE_URL", "")
     monkeypatch.setattr(app_mod, "CONTOUR_REFINE_TOKEN", "")
+    monkeypatch.setattr(app_mod, "INFER_HUB_URL", "")
+    monkeypatch.setattr(app_mod, "INFER_HUB_KEY", "")
     # 解码预算闸（R2）与 regions 同闸：每用例重置滑窗/并发闸/单请求上限，
     # 避免跨用例窗口污染（也保证 reviewer 回归不因前置用例耗尽预算而空转）
     monkeypatch.setattr(app_mod, "_PLUGIN_PIXEL_WINDOW",
@@ -772,3 +774,168 @@ def test_invalid_render_context_refined_false(monkeypatch):
     body = r.get_json()
     assert body["refined"] is False and body["reason"] == "render_context"
     assert osr.read_region_calls == []
+
+
+# --------------------------------------------------------------------------- #
+# 8. 本地推理 hub（INFER_HUB_URL + INFER_HUB_KEY）路由与直连回退
+# --------------------------------------------------------------------------- #
+_HUB_BASE = "http://infer-hub.test/api/infer"
+_HUB_PATH = "/api/infer/v1/vision/contour-refine"
+_HUB_KEY = "hub-secret-key-1"
+
+
+def _configure_hub(monkeypatch, url=_HUB_BASE, key=_HUB_KEY):
+    monkeypatch.setattr(app_mod, "INFER_HUB_URL", url)
+    monkeypatch.setattr(app_mod, "INFER_HUB_KEY", key)
+
+
+def _fake_hub(status=200, svc_body=None, raw=None, raise_exc=None):
+    """替换 app.requests 的假推理 hub；注册 hub 完整 path 并记录调用。"""
+    fake = FakeRequests()
+    responses = []
+
+    def handler(body, query, headers, kwargs):
+        responses.append({"body": body, "headers": headers, "kwargs": kwargs})
+        if raise_exc is not None:
+            raise raise_exc
+        if raw is not None:
+            return FakeResponse(status, raw)
+        return FakeResponse(status, svc_body if svc_body is not None else {})
+    fake.register("POST", _HUB_PATH, handler)
+    app_mod.requests = fake
+    return fake, responses
+
+
+def _post_refine(monkeypatch, osr=None):
+    inst = _bootstrap_installation()
+    slide = _touch_slide()
+    osr = osr or _FakeOsr()
+    m1, m2 = _slide_read_mocks(osr)
+    with m1, m2:
+        return _client().post(_refine_path(slide), headers=_bearer(_token_for(inst)),
+                              json={"points": _SQUARE_POINTS})
+
+
+def test_infer_hub_used_with_bearer_header_and_url(monkeypatch):
+    """hub 完整配置时优先：正确 URL、Bearer 头、不带 X-Refine-Token。"""
+    _configure_hub(monkeypatch)
+    # 直连也配置时 hub 仍优先
+    monkeypatch.setattr(app_mod, "CONTOUR_REFINE_URL", "http://legacy.test")
+    monkeypatch.setattr(app_mod, "CONTOUR_REFINE_TOKEN", "legacy-token")
+    fake, responses = _fake_hub(svc_body=_SVC_ACCEPT)
+    r = _post_refine(monkeypatch)
+    assert r.status_code == 200 and r.get_json()["refined"] is True
+    assert fake.calls[-1]["path"] == _HUB_PATH
+    assert len(responses) == 1
+    assert responses[0]["headers"] == {"Authorization": "Bearer " + _HUB_KEY}
+    assert "X-Refine-Token" not in responses[0]["headers"]
+    assert responses[0]["kwargs"]["timeout"] == app_mod._CONTOUR_REFINE_TIMEOUT_S
+    # 与直连完全相同的 JSON body
+    assert set(responses[0]["body"]) == {"image_png_b64", "polygon"}
+    assert _HUB_KEY not in r.get_data(as_text=True)
+
+
+def test_infer_hub_success_maps_points_back_to_level0(monkeypatch):
+    """hub 成功响应按直连同一信封/坐标映射处理。"""
+    _configure_hub(monkeypatch)
+    _, responses = _fake_hub(svc_body=_SVC_ACCEPT)
+    r = _post_refine(monkeypatch)
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["refined"] is True and body["score"] == 0.93
+    assert body["model"] == "sam2.1-hiera-b+"
+    # polygon 已映射到 crop 像素（0..1024/856 范围）
+    assert all(0 <= p[0] <= 1024 and 0 <= p[1] <= 856
+               for p in responses[0]["body"]["polygon"])
+
+
+def test_legacy_direct_path_when_hub_not_configured(monkeypatch):
+    """hub 未配置 → 走既有 CONTOUR_REFINE_URL/v1/refine 直连路径。"""
+    monkeypatch.setattr(app_mod, "CONTOUR_REFINE_URL", "http://contour-refine:8970")
+    fake, responses = _fake_service(svc_body=_SVC_ACCEPT)
+    r = _post_refine(monkeypatch)
+    assert r.status_code == 200 and r.get_json()["refined"] is True
+    assert fake.calls[-1]["path"] == "/v1/refine"
+    assert responses[0]["headers"] == {}
+    assert responses[0]["kwargs"]["timeout"] == app_mod._CONTOUR_REFINE_TIMEOUT_S
+
+
+@pytest.mark.parametrize("url,key", [(_HUB_BASE, ""), ("", _HUB_KEY)])
+def test_infer_hub_partial_config_falls_back_to_legacy(monkeypatch, url, key):
+    """只设置 URL 或只设置 KEY → 不启用 hub，回退直连（含 legacy token）。"""
+    _configure_hub(monkeypatch, url=url, key=key)
+    monkeypatch.setattr(app_mod, "CONTOUR_REFINE_URL", "http://contour-refine:8970")
+    monkeypatch.setattr(app_mod, "CONTOUR_REFINE_TOKEN", "legacy-token")
+    fake, responses = _fake_service(svc_body=_SVC_ACCEPT)
+    r = _post_refine(monkeypatch)
+    assert r.status_code == 200 and r.get_json()["refined"] is True
+    assert fake.calls[-1]["path"] == "/v1/refine"
+    assert responses[0]["headers"].get("X-Refine-Token") == "legacy-token"
+    assert "Authorization" not in responses[0]["headers"]
+
+
+@pytest.mark.parametrize("url,key", [(_HUB_BASE, ""), ("", _HUB_KEY)])
+def test_infer_hub_partial_config_without_legacy_unavailable(monkeypatch, url, key):
+    """半配置且无直连地址 → unavailable（不把半配置当可用后端）。"""
+    _configure_hub(monkeypatch, url=url, key=key)
+    _fake_hub(svc_body=_SVC_ACCEPT)
+    r = _post_refine(monkeypatch)
+    assert r.status_code == 200
+    assert r.get_json() == {
+        "refined": False, "points": None, "score": None, "area_ratio": None,
+        "model": None, "reason": "unavailable", "seconds": None,
+    }
+
+
+@pytest.mark.parametrize("status", [503, 429])
+def test_infer_hub_http_error_service_error(monkeypatch, status):
+    """hub 503/429（error envelope）→ 与直连一致的 service_error，不 500。"""
+    _configure_hub(monkeypatch)
+    _fake_hub(status=status,
+              svc_body={"error": {"code": "unavailable",
+                                  "message": "inference hub unavailable"}})
+    r = _post_refine(monkeypatch)
+    _assert_service_error(r)
+    assert _HUB_KEY not in r.get_data(as_text=True)
+
+
+def test_infer_hub_timeout_service_error_and_no_secret_leak(monkeypatch):
+    """hub 超时 → service_error；异常文本里的 hub 地址/密钥不进响应/日志。"""
+    _configure_hub(monkeypatch)
+    leaky = _real_requests.Timeout(
+        "POST %s/v1/vision/contour-refine failed key=%s" % (_HUB_BASE, _HUB_KEY))
+    _fake_hub(raise_exc=leaky)
+    with mock.patch.object(app_mod.app.logger, "warning") as warn:
+        r = _post_refine(monkeypatch)
+    _assert_service_error(r)
+    assert _HUB_KEY not in r.get_data(as_text=True)
+    logged = " ".join(str(a) for call in warn.call_args_list for a in call.args)
+    assert _HUB_KEY not in logged
+    assert _HUB_BASE not in logged
+    assert "/v1/vision/contour-refine" not in logged
+
+
+def test_infer_hub_bad_json_service_error(monkeypatch):
+    """hub 非 JSON 响应 → service_error（不 500）。"""
+    _configure_hub(monkeypatch)
+    _fake_hub(raw="not-json")
+    r = _post_refine(monkeypatch)
+    _assert_service_error(r)
+
+
+def test_partial_hub_config_warns_once_without_url_or_key(monkeypatch):
+    """半配置启动告警一条；文本不含 hub 地址或密钥。"""
+    _configure_hub(monkeypatch, key="")
+    with mock.patch.object(app_mod.app.logger, "warning") as warn:
+        app_mod._warn_partial_infer_hub_config()
+    assert warn.call_count == 1
+    text = " ".join(str(a) for a in warn.call_args.args)
+    assert "INFER_HUB_URL" in text and "INFER_HUB_KEY" in text
+    assert _HUB_BASE not in text and _HUB_KEY not in text
+
+
+def test_full_hub_config_does_not_warn(monkeypatch):
+    _configure_hub(monkeypatch)
+    with mock.patch.object(app_mod.app.logger, "warning") as warn:
+        app_mod._warn_partial_infer_hub_config()
+    assert warn.call_count == 0

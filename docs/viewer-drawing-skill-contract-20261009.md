@@ -20,8 +20,10 @@
    同 scope（`region:read`）与 run grant 闸。body `{points: level-0 [[x,y]…] 3–500, expected_fingerprint?,
    render_context?}`（render_context 与 `/regions` 同 wire 形态，camelCase `renderContext` 同样容错；
    非对象 400）。PT 读外扩 crop（长边 ≤1024，PNG；带 render_context 时按该 context 渲染并同链
-   校验/规范化，revision 参数与 `/regions` 同源），调 `CONTOUR_REFINE_URL/v1/refine`（可选
-   `CONTOUR_REFINE_TOKEN`，超时 `CONTOUR_REFINE_TIMEOUT_S` 默认 8 s），回 `{refined, points|null, score,
+   校验/规范化，revision 参数与 `/regions` 同源），调轮廓精修后端：`INFER_HUB_URL` +
+   `INFER_HUB_KEY` 同时设置时经本地推理 hub（`/v1/vision/contour-refine`，Bearer）；否则直连
+   `CONTOUR_REFINE_URL/v1/refine`（可选 `CONTOUR_REFINE_TOKEN`）；超时统一为
+   `CONTOUR_REFINE_TIMEOUT_S`（默认 8 s），回 `{refined, points|null, score,
    area_ratio, model, reason, seconds, render_context_fingerprint}`（fingerprint 为本次 crop 的 canonical
    render fingerprint，默认渲染为 null）。服务未配置、出错、超时一律 200 `refined:false`（reason
    `unavailable` / `service_error`）；新增尽力而为 reason：`too_large`（读盘前解码预算超单请求上限——

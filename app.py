@@ -17182,12 +17182,20 @@ _AI_SIDECAR_SSE_READ_TIMEOUT = 31536000.0  # 一年：等价于不限制 SSE 读
 
 # contour-refine 服务（SAM2.1 box-prompted 轮廓精修；services/contour-refine）。
 # 供插件通道 POST /api/plugin/v1/slides/<slide>/contours/refine 调用：
-#   - CONTOUR_REFINE_URL 未设置 → 端点返回 {refined:false, reason:"unavailable"}
-#     （调用方保留 LLM 原轮廓，不报错）；
-#   - 设置后按 CONTOUR_REFINE_TIMEOUT_S（缺省 8s）限时调用 /v1/refine；
+#   - 本地推理 hub（INFER_HUB_URL + INFER_HUB_KEY 同时设置时优先）：POST
+#     {INFER_HUB_URL}/v1/vision/contour-refine，Authorization: Bearer；hub
+#     原样转发请求体给 SAM2 worker，成功时原样回传 worker JSON；
+#   - 直连兼容路径（hub 未配置时）：CONTOUR_REFINE_URL 未设置 → 端点返回
+#     {refined:false, reason:"unavailable"}（调用方保留 LLM 原轮廓，不报错）；
+#     设置后按 CONTOUR_REFINE_TIMEOUT_S（缺省 8s）限时调用 /v1/refine；
 #     服务错误/超时/坏响应 → {refined:false, reason:"service_error"}（只告警
-#     不向客户端透栈）；
-#   - CONTOUR_REFINE_TOKEN 设置时以 X-Refine-Token 头带给服务（共享密钥）。
+#     不向客户端透栈）；CONTOUR_REFINE_TOKEN 设置时以 X-Refine-Token 头带给
+#     服务（共享密钥）；
+#   - hub 只设置其中一个（URL 或 KEY）→ 启动时告警一次并回退直连路径；
+#     hub 调用失败与非 200/超时/坏 JSON 同一映射，响应与日志都不回显 hub
+#     地址或密钥。
+INFER_HUB_URL = (os.environ.get("INFER_HUB_URL") or "").rstrip("/")
+INFER_HUB_KEY = os.environ.get("INFER_HUB_KEY") or ""
 CONTOUR_REFINE_URL = (os.environ.get("CONTOUR_REFINE_URL") or "").rstrip("/")
 CONTOUR_REFINE_TOKEN = os.environ.get("CONTOUR_REFINE_TOKEN") or ""
 try:
@@ -17198,6 +17206,27 @@ except ValueError:
 # 发生时才求值，若运行期引用 requests.RequestException 会读被测试替换过的
 # app.requests 假件（无该属性）。
 _CONTOUR_REFINE_REQUEST_EXC = requests.RequestException
+
+
+def _infer_hub_contour_refine_enabled():
+    """本地推理 hub 是否完整配置（URL 与 Bearer 密钥同时存在）。"""
+    return bool(INFER_HUB_URL and INFER_HUB_KEY)
+
+
+def _contour_refine_available():
+    """轮廓精修是否可用：hub 或直连任一后端已配置。"""
+    return _infer_hub_contour_refine_enabled() or bool(CONTOUR_REFINE_URL)
+
+
+def _warn_partial_infer_hub_config():
+    """hub 半配置（仅 URL 或仅 KEY）时启动告警一次；不含地址/密钥。"""
+    if bool(INFER_HUB_URL) != bool(INFER_HUB_KEY):
+        app.logger.warning(
+            "INFER_HUB_URL 与 INFER_HUB_KEY 需同时设置；当前仅设置其一，"
+            "轮廓精修回退 CONTOUR_REFINE_URL 直连路径")
+
+
+_warn_partial_infer_hub_config()
 
 # AI 配置文件：与 flask_secret 同目录（SHARE_DATA_DIR），0600 权限
 def _ai_config_path() -> Path:
@@ -23597,7 +23626,7 @@ def _plugin_contour_refine_body(claims, safe, gate, sid):
         return _plugin_error(400, "invalid_request",
                              "points 完全位于切片范围外（%dx%d）" % (width, height))
 
-    if not CONTOUR_REFINE_URL:
+    if not _contour_refine_available():
         return _plugin_contour_refine_unavailable("unavailable")
 
     # ---- R2 解码预算闸（任何 read_region 之前；与 regions 共用估算/准入）---- #
@@ -23660,10 +23689,18 @@ def _plugin_contour_refine_body(claims, safe, gate, sid):
         crop_polygon = [[(float(px) - src["x"]) * sx, (float(py) - src["y"]) * sy]
                         for px, py in points]
 
-        headers = {"X-Refine-Token": CONTOUR_REFINE_TOKEN} if CONTOUR_REFINE_TOKEN else {}
+        # 后端选择：hub 完整配置时优先；否则直连兼容路径（CONTOUR_REFINE_URL）。
+        use_infer_hub = _infer_hub_contour_refine_enabled()
+        if use_infer_hub:
+            refine_url = INFER_HUB_URL + "/v1/vision/contour-refine"
+            headers = {"Authorization": "Bearer " + INFER_HUB_KEY}
+        else:
+            refine_url = CONTOUR_REFINE_URL + "/v1/refine"
+            headers = ({"X-Refine-Token": CONTOUR_REFINE_TOKEN}
+                       if CONTOUR_REFINE_TOKEN else {})
         try:
             r = requests.post(
-                CONTOUR_REFINE_URL + "/v1/refine",
+                refine_url,
                 json={"image_png_b64": png_b64, "polygon": crop_polygon},
                 timeout=_CONTOUR_REFINE_TIMEOUT_S, headers=headers)
             if r.status_code == 503:
@@ -23681,8 +23718,16 @@ def _plugin_contour_refine_body(claims, safe, gate, sid):
             if not isinstance(svc, dict) or not isinstance(svc.get("accepted"), bool):
                 raise ValueError("contour-refine 响应形状异常")
         except (_CONTOUR_REFINE_REQUEST_EXC, ValueError) as e:
-            # 服务错误/超时/坏 JSON：告警不透栈，客户端保留 LLM 原轮廓
-            app.logger.warning("contour-refine 服务调用失败（slide=%s）：%s", safe, e)
+            # 服务错误/超时/坏 JSON：告警不透栈，客户端保留 LLM 原轮廓。
+            # hub 的 requests 异常文本可能带地址/路径：只记录类型名，保证
+            # 日志不回显 hub 地址与密钥。
+            if use_infer_hub and isinstance(e, _CONTOUR_REFINE_REQUEST_EXC):
+                detail = type(e).__name__
+            else:
+                detail = "%s" % e
+            app.logger.warning("contour-refine 服务调用失败（slide=%s, backend=%s）：%s",
+                               safe, "infer-hub" if use_infer_hub else "direct",
+                               detail)
             return _plugin_contour_refine_unavailable(
                 "service_error", render_fingerprint=render_fp)
 
@@ -23751,8 +23796,8 @@ def plugin_v1_contour_refine(slide):
     非对象 400 invalid_request）}。
     读取与 regions 同一条 _read_region_pil 路径（存储布局/选层/夹取/render
     context 校验一致），crop = bbox 外扩 0.25*max(w,h)+40、长边 ≤1024、PNG
-    无损；映射到 crop 像素调 CONTOUR_REFINE_URL/v1/refine，接受则回 level-0
-    整数点。
+    无损；映射到 crop 像素调推理 hub（INFER_HUB_URL，完整配置时）或
+    CONTOUR_REFINE_URL/v1/refine（直连兼容路径），接受则回 level-0 整数点。
 
     响应（服务侧结果一律 200）：``{refined, points|None, score, area_ratio,
     model, reason, seconds, render_context_fingerprint}``（fingerprint 为本次

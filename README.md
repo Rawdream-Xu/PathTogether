@@ -72,9 +72,11 @@ PathTogether 容器只运行平台。HistoPilot 使用自己的镜像、进程�
 | `BOOTSTRAP_OWNER_PASSWORD_FILE` | — | 空库首建 owner 的 secret 文件路径 |
 | `HISTOPILOT_URL` | `http://127.0.0.1:8055` | HistoPilot 兼容网关目标；仅安装插件时需要 |
 | `HISTOPILOT_INTERNAL_TOKEN` | 自动生成 | PathTogether 与 HistoPilot 的服务间令牌 |
-| `CONTOUR_REFINE_URL` | 未设置 | contour-refine 服务地址（`services/contour-refine`，SAM2 轮廓精修）；未设置时插件端点 `/contours/refine` 返回 `refined:false, reason:"unavailable"` |
-| `CONTOUR_REFINE_TOKEN` | 未设置 | contour-refine 服务共享密钥（设置后以 `X-Refine-Token` 头调用） |
-| `CONTOUR_REFINE_TIMEOUT_S` | `8` | 调用 contour-refine 服务的超时（秒）；超时/错误返回 `refined:false, reason:"service_error"` |
+| `INFER_HUB_URL` | 未设置 | 本地推理 hub 地址（如 `http://127.0.0.1:8200/api/infer`，尾部 `/` 自动去除）；与 `INFER_HUB_KEY` 同时设置时优先经 hub 调用 `POST {URL}/v1/vision/contour-refine`（请求体原样转发给 SAM2 worker，成功回 worker JSON）；只设置其一时不启用 hub |
+| `INFER_HUB_KEY` | 未设置 | 本地推理 hub Bearer 密钥（以 `Authorization: Bearer <key>` 调用）；与 `INFER_HUB_URL` 只设置其一时启动告警一次并回退 `CONTOUR_REFINE_URL` 直连；密钥不会出现在响应或日志中 |
+| `CONTOUR_REFINE_URL` | 未设置 | 直连 contour-refine 服务地址（`services/contour-refine`，SAM2 轮廓精修；hub 未完整配置时使用）；hub 与直连均未配置时插件端点 `/contours/refine` 返回 `refined:false, reason:"unavailable"` |
+| `CONTOUR_REFINE_TOKEN` | 未设置 | contour-refine 服务共享密钥（直连路径设置后以 `X-Refine-Token` 头调用） |
+| `CONTOUR_REFINE_TIMEOUT_S` | `8` | 调用轮廓精修（hub 或直连）的超时（秒）；超时/错误返回 `refined:false, reason:"service_error"` |
 
 注册模式（closed / invite_only）由 owner 后台的 `platform_settings.registration_mode` 运行时管理，不再有环境变量开关。
 

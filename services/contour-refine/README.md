@@ -170,8 +170,10 @@ curl -s -X POST http://127.0.0.1:8970/v1/refine \
 | `CONTOUR_REFINE_MAX_POINTS` | `500` | 输出点数上限 |
 | `PORT` | `8970` | 仅 `python app.py` 直跑时生效（生产走 gunicorn） |
 
-平台侧对应变量（PathTogether）：`CONTOUR_REFINE_URL`、`CONTOUR_REFINE_TOKEN`、
-`CONTOUR_REFINE_TIMEOUT_S`（见 PathTogether README）。
+平台侧对应变量（PathTogether）：优先 `INFER_HUB_URL` + `INFER_HUB_KEY`（经本地
+推理 hub 的 `POST {INFER_HUB_URL}/v1/vision/contour-refine` 转发，Bearer 鉴权）；
+未完整配置 hub 时回退直连 `CONTOUR_REFINE_URL` / `CONTOUR_REFINE_TOKEN`；
+调用超时统一为 `CONTOUR_REFINE_TIMEOUT_S`（见 PathTogether README）。
 
 ## 测试
 
