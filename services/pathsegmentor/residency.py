@@ -77,7 +77,13 @@ def move_tensors(obj, device, *, max_depth=6):
 
 def _walk(obj, device, depth, seen, torch):
     if isinstance(obj, torch.Tensor):
-        return obj.to(device)
+        # 普通张量 detach 后再搬：带 grad 算出的缓存会保留 autograd 图，
+        # 只 .to() 会让图里保存的 GPU 中间量在 C++ 侧继续占显存
+        # （2026-11-09 IndexTTS2 实测 0.5–2.7 GB）。Parameter 保持原样。
+        detach = getattr(obj, "detach", None)
+        if isinstance(obj, torch.nn.Parameter) or detach is None:
+            return obj.to(device)
+        return detach().to(device)
     if obj is None or isinstance(obj, (str, bytes, bytearray, int, float,
                                        complex, bool, type, types.ModuleType,
                                        types.FunctionType, types.BuiltinFunctionType,
