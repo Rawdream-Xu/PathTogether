@@ -42,7 +42,7 @@ PLUGIN_UI_DIR.mkdir(parents=True, exist_ok=True)
     "permissions": [],
     "ui": {"entry": "ui/main.js"},
 }), encoding="utf-8")
-for _asset in ("bridge-client.js", "api.js", "sse.js", "renderer.js",
+for _asset in ("bridge-client.js", "api.js", "read-aloud.js", "sse.js", "renderer.js",
                "config-panel.js", "sessions.js", "main.js"):
     (PLUGIN_UI_DIR / _asset).write_text("window.HistoPilot = window.HistoPilot || {};\n", encoding="utf-8")
 
@@ -164,7 +164,7 @@ def test_histopilot_source_is_not_built_into_platform_repo():
 
 def test_external_bundle_entries_are_all_served():
     client = _client()
-    for asset in ("bridge-client.js", "api.js", "sse.js", "renderer.js",
+    for asset in ("bridge-client.js", "api.js", "read-aloud.js", "sse.js", "renderer.js",
                   "config-panel.js", "sessions.js", "main.js"):
         assert client.get("/plugins/histopilot/ui/" + asset).status_code == 200
 

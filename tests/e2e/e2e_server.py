@@ -441,7 +441,7 @@ def _install_histopilot_stub(plugin_dir):
         encoding="utf-8")
     for name, body in _HISTOPILOT_STUB_UI_FILES.items():
         (ui_dir / name).write_text(body, encoding="utf-8")
-    for name in ("api.js", "sse.js", "renderer.js",
+    for name in ("api.js", "read-aloud.js", "sse.js", "renderer.js",
                  "config-panel.js", "sessions.js"):
         (ui_dir / name).write_text(_STUB_NOOP_COMMENT, encoding="utf-8")
 
