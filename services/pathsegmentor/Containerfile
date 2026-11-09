@@ -67,7 +67,7 @@ RUN mkdir -p /srv/PathSegmentor \
 WORKDIR /srv/PathSegmentor
 COPY requirements-service.txt ./
 RUN pip install --no-cache-dir -r requirements-service.txt
-COPY pathseg_infer.py app.py gunicorn.conf.py ./
+COPY pathseg_infer.py residency.py app.py gunicorn.conf.py ./
 
 # ---------------------------------------------------------------- runtime
 FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime

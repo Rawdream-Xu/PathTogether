@@ -21,7 +21,12 @@
   - 可选共享密钥：设置 CONTOUR_REFINE_TOKEN 后请求须带 X-Refine-Token 头
     （常数时间比较），否则 401；
   - 入参校验：polygon 3..500 个有限数值点、图像长边 ≤ 2048、请求体 ≤ 8MB
-    （超限统一 400 ``{error}``）。
+    （超限统一 400 ``{error}``）；
+  - hub.worker/v1 驻留协议（residency.py）：推理前若模型已空闲搬回内存则
+    先搬回显存；每次推理后清 CUDA 缓存；``GET /_worker/v1/state`` /
+    ``POST /_worker/v1/residency`` 供 hub 调度；空闲
+    ``CONTOUR_REFINE_IDLE_OFFLOAD_SECONDS``（默认 120，0 关闭）后自动搬回
+    内存。搬回失败（OOM）回 503、模型留在内存，下次请求重试。
 """
 import base64
 import binascii
@@ -38,6 +43,7 @@ from flask import Flask, jsonify, request
 from PIL import Image
 
 import refine
+import residency
 
 MODEL_ID = "sam2.1-hiera-b+"
 SAM2_CHECKPOINT = os.environ.get("SAM2_CHECKPOINT") or "/models/sam2.1_hiera_base_plus.pt"
@@ -51,8 +57,12 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_BODY_BYTES
 
 # 推理互斥锁：单模型实例（gunicorn 单 worker 多线程时保护 set_image+predict
-# 成对执行）。/v1/refine 非阻塞获取，占用即 503 busy。
+# 成对执行）。/v1/refine 非阻塞获取，占用即 503 busy；residency 搬运与
+# /_worker/v1/residency 同锁（阻塞等待在途推理）。
 _INFERENCE_LOCK = threading.Lock()
+
+# 驻留状态机：模型加载/空闲搬回/请求时搬回显存（见 residency.py）。
+_RESIDENCY = residency.Residency(MODEL_ID, "CONTOUR_REFINE", _INFERENCE_LOCK)
 
 
 class _ModelHolder:
@@ -74,12 +84,17 @@ class _ModelHolder:
         self._pid = None
 
     def inject(self, predict, device="injected"):
-        """测试注入口：以假 predict 替换真实模型（不加载权重）。"""
+        """测试注入口：以假 predict 替换真实模型（不加载权重）。
+
+        device 决定驻留状态：cuda* → gpu，其余（含 "injected"）→ cpu；
+        测试可随后用 ``_RESIDENCY.bind(move, "cuda")`` 注入搬运回调。
+        """
         with self._lock:
             self._predict = predict
             self._device = device
             self._error = None
             self._pid = os.getpid()
+            _RESIDENCY.bind(None, device)
 
     def reset(self):
         with self._lock:
@@ -87,6 +102,7 @@ class _ModelHolder:
             self._device = None
             self._error = None
             self._pid = None
+            _RESIDENCY.mark_loading()
 
     def ensure(self):
         """返回 predict 回调；首次调用时加载 SAM2（进程内只加载一次）。"""
@@ -112,15 +128,27 @@ class _ModelHolder:
                             multimask_output=False)
                     return masks[0] > 0, float(scores[0])
 
+                def _move(target):
+                    # 搬回内存前先清 SAM2 的 set_image 缓存（_features /
+                    # _orig_hw）；遍历器本来也会搬 _features，但先 reset 能
+                    # 立即释放引用，避免两份缓存叠加。
+                    if not residency.is_cuda_device(target):
+                        reset = getattr(predictor, "reset_predictor", None)
+                        if callable(reset):
+                            reset()
+                    residency.move_tensors(predictor, target)
+
                 self._predict = _predict
                 self._device = device
                 self._pid = os.getpid()
+                _RESIDENCY.bind(_move, device)
                 app.logger.info("SAM2 loaded: pid=%d device=%s checkpoint=%s "
                                 "config=%s",
                                 os.getpid(), device, SAM2_CHECKPOINT, SAM2_CONFIG)
                 return _predict
-            except Exception:  # noqa: BLE001 — 记忆失败，healthz/refine 稳定 503
+            except Exception as exc:  # noqa: BLE001 — 记忆失败，healthz/refine 稳定 503
                 self._error = "SAM2 load failed (checkpoint=%s)" % SAM2_CHECKPOINT
+                _RESIDENCY.mark_failed(str(exc))
                 app.logger.exception("SAM2 加载失败")
                 raise
 
@@ -187,11 +215,53 @@ def healthz():
     """
     ready = _MODEL.ready
     payload = {"ok": ready, "device": _MODEL.device, "model": MODEL_ID,
-               "pid": os.getpid()}
+               "pid": os.getpid(),
+               "resident": _RESIDENCY.resident,
+               "idle_offload_seconds": _RESIDENCY.local_idle_offload_seconds}
     if not ready:
         payload["error"] = "model not ready in this worker (loading or failed)"
         return jsonify(payload), 503
     return jsonify(payload)
+
+
+def _residency_endpoint(target):
+    """hub.worker/v1 手动搬运：持推理锁等待在途推理，返回 (payload, status)。"""
+    started = time.monotonic()
+    with _INFERENCE_LOCK:  # 与推理互斥：绝不搬走推理中的模型
+        if _RESIDENCY.state == "loading":
+            return {"error": "loading"}, 409
+        try:
+            if target == "gpu":
+                _RESIDENCY.ensure_gpu()
+            else:
+                _RESIDENCY.to_cpu()
+        except Exception as exc:  # noqa: BLE001 — 状态不变，端点稳定 500
+            app.logger.exception("residency move to %s failed", target)
+            return {"error": type(exc).__name__}, 500
+        elapsed_ms = int(round((time.monotonic() - started) * 1000.0))
+        return {"state": _RESIDENCY.state, "elapsed_ms": elapsed_ms}, 200
+
+
+@app.route("/_worker/v1/state", methods=["GET"])
+def worker_state():
+    """hub.worker/v1：驻留状态快照（token 与推理接口相同）。"""
+    token_err = _check_token()
+    if token_err is not None:
+        return token_err
+    return jsonify(_RESIDENCY.snapshot())
+
+
+@app.route("/_worker/v1/residency", methods=["POST"])
+def worker_residency():
+    """hub.worker/v1：{"target":"gpu"|"cpu"} 手动搬入显存/搬回内存。"""
+    token_err = _check_token()
+    if token_err is not None:
+        return token_err
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or body.get("target") not in ("gpu", "cpu"):
+        return jsonify({"error": "invalid target (expected gpu or cpu)"}), 400
+    payload, status = _residency_endpoint(body["target"])
+    return jsonify(payload), status
 
 
 @app.route("/v1/refine", methods=["POST"])
@@ -233,14 +303,27 @@ def v1_refine():
         return jsonify({"error": "busy"}), 503
     img = np.asarray(image.convert("RGB"), dtype=np.uint8)
     started = time.monotonic()
+    _RESIDENCY.set_busy(True)
     try:
-        result = refine.refine_crop(img, polygon, predict)
-    except ValueError as exc:
-        return _bad_request(str(exc))
-    except Exception:  # noqa: BLE001
-        app.logger.exception("refine failed unexpectedly")
-        return jsonify({"error": "internal error"}), 500
+        try:
+            residency_ms = _RESIDENCY.ensure_gpu()  # 空闲搬回内存 → 复位显存
+            if residency_ms:
+                app.logger.info("residency restore cpu->gpu: %.1f ms",
+                                residency_ms)
+        except Exception:  # noqa: BLE001 — 搬回失败：留在内存，下次重试
+            app.logger.exception("gpu residency restore failed")
+            return jsonify({"error": "model not ready "
+                                     "(gpu residency restore failed)"}), 503
+        try:
+            result = refine.refine_crop(img, polygon, predict)
+        except ValueError as exc:
+            return _bad_request(str(exc))
+        except Exception:  # noqa: BLE001
+            app.logger.exception("refine failed unexpectedly")
+            return jsonify({"error": "internal error"}), 500
     finally:
+        _RESIDENCY.set_busy(False)
+        _RESIDENCY.after_inference()  # 无论成败都清 CUDA 缓存
         _INFERENCE_LOCK.release()
     seconds = round(time.monotonic() - started, 4)
 
@@ -258,6 +341,7 @@ if os.environ.get("CONTOUR_REFINE_EAGER_LOAD", "1") != "0":
         _MODEL.ensure()
     except Exception:  # noqa: BLE001 — 不阻断进程启动，/healthz 反映 503
         app.logger.error("startup SAM2 load failed; /healthz will report not ok")
+    _RESIDENCY.start_idle_thread()  # 仅 cuda 模式且模型已加载时生效
 
 
 if __name__ == "__main__":  # 本地开发直跑（生产走 gunicorn，见 Containerfile）

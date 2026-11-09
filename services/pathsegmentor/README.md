@@ -18,12 +18,14 @@ MIT，上游 commit `e67763ab835b3ef184cb6791eb2cd059ec8b9f9a`）的 GPU 推理 
 ## HTTP 契约（固定，客户端另行对接）
 
 ### `GET /healthz`
-进程存活即 `200 {"ok":true,"pid":..,"ready":..}`（**不**反映模型就绪）。
+进程存活即 `200 {"ok":true,"pid":..,"ready":..,"resident":"gpu|cpu|null","idle_offload_seconds":120}`
+（**不**反映模型就绪）。
 
 ### `GET /readyz`
 模型已加载且 warm-up（1024² 假图跑通一路推理）完成 →
-`200 {"ready":true,"model_id":"pathsegmentor","model_sha256":"<64 hex>","code_rev":"<上游 commit>","device":"cuda:0"}`；
-否则 `503 {"ready":false,"error":"not_ready",...}`。
+`200 {"ready":true,"model_id":"pathsegmentor","model_sha256":"<64 hex>","code_rev":"<上游 commit>","device":"cuda:0","resident":"gpu|cpu","idle_offload_seconds":120}`；
+否则 `503 {"ready":false,"error":"not_ready",...}`。空闲搬回内存后仍
+`ready=true`。
 
 ### `POST /v1/segment`
 
@@ -87,6 +89,48 @@ MIT，上游 commit `e67763ab835b3ef184cb6791eb2cd059ec8b9f9a`）的 GPU 推理 
 
 请求体与图像不落盘、不进日志。
 
+## 驻留协议 `hub.worker/v1`
+
+hub-infer（design v3 §6）通过本协议把模型按需搬进/搬出显存。直连本服务
+不受影响：推理请求进来时若模型在内存，会先自动搬回显存。搬运与推理共用
+`_INFERENCE_LOCK`，推理中的模型不会被搬走。
+
+- `GET /_worker/v1/state` →
+  `{"protocol":"hub.worker/v1","model":"pathsegmentor","state":"loading|cpu|gpu|failed","busy":bool,"idle_seconds":float,"vram_reserved_mib":int|null,"local_idle_offload_seconds":int,"last_error":str|null}`；
+- `POST /_worker/v1/residency` `{"target":"gpu"|"cpu"}` →
+  200 `{"state":"gpu|cpu","elapsed_ms":int}`；模型加载中 409
+  `{"error":"loading"}`；target 非法 400；搬运失败 500
+  `{"error":"<异常类型名>"}` 且状态不变（留在内存，下次请求重试）；
+- 每次推理结束（无论成败）调用 `torch.cuda.empty_cache()`；
+- 空闲 `PATHSEG_IDLE_OFFLOAD_SECONDS`（默认 120，0 关闭）后自动搬回内存；
+  线程只在 worker 进程内启动（gunicorn 保持 `preload_app=False`）；
+- CPU-device 模式（无 CUDA 回落）永不搬回。
+
+### 非参数张量（267 MB）与遍历器深度
+
+`model.to("cpu")` 只搬 params/buffers。实测（RTX 2080 Ti，2026-11-09，
+1024² 合成图）推理后 `memory_allocated` 从 1992 MB 降到 267 MB 后不再下降；
+这 267 MB 是上游
+`AttentionDataStruct`（`model.model.sem_seg_head.predictor.attention_data`，
+`nn.Module`）上的**普通属性缓存**：
+
+- `attention_data.output["predictions_mask"]`：10 个 `(1, 101, 256, 256)`
+  fp32，每个 25.25 MB（共 252.5 MB），是各 decoder 层的 mask logits；
+- `attention_data.output["predictions_class"/"predictions_caption"]`、
+  `attn_variables[...].attn_mask` / `.output`，以及语言编码器上 setattr 的
+  `default_text_embeddings`（21 类 × 81 模板 × 512，~3.5 MB，同样是普通
+  Module 属性、`.to()` 搬不动）等小张量（合计 ~5 MB）。
+
+它们不在 params/buffers 里，`Module.to()` 搬不动，必须在 `Module.__dict__` /
+dict / list 里逐层遍历。模块 `_modules` 每层消耗一级深度，从 BaseModel 到
+`attention_data.output` 的列表需要 `max_depth=12`（默认 6 不够）——服务对
+PathSegmentor 显式传 `max_depth=12`；实测搬完后 `memory_allocated` 降到
+~9 MB（`gc` 里 cuda 张量 0.3 MB），空闲显存释放干净。
+
+实测基线（design v3 §1）：显存权重 1734 MB（另有上述 267 MB 非参数张量），
+推理后缓存 3302 MB，清缓存后 2334 MB；内存↔显存 0.24–0.63 s；冷启动 ~10 s，
+单次推理 0.33 s。每个进程固定占 200–300 MB CUDA 上下文。
+
 ## 构建（homePC）
 
 homePC 到 docker.io / huggingface.co 不可达（DNS 污染），基础镜像走
@@ -133,7 +177,9 @@ gunicorn 单 worker + 2 线程、`preload_app=False`（CUDA 在 worker 进程内
 
 环境变量：`PATHSEG_WEIGHTS`（缺省 `/models/model_state_dict.pt`）、
 `PATHSEG_EXPECTED_SHA256`（设置后强校验）、`PATHSEG_EAGER_LOAD=0`
-（关 import 期加载，测试用）、`PATHSEG_MAX_IMAGE_EDGE` / `PATHSEG_MAX_BODY_BYTES`。
+（关 import 期加载，测试用）、`PATHSEG_MAX_IMAGE_EDGE` /
+`PATHSEG_MAX_BODY_BYTES`、`PATHSEG_IDLE_OFFLOAD_SECONDS`（空闲搬回内存，
+默认 120 秒，0 关闭）。
 
 ## 验证
 

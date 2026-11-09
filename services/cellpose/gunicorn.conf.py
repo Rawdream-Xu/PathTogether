@@ -31,3 +31,5 @@ def post_worker_init(worker):
     except Exception:  # noqa: BLE001
         worker.log.info("post_worker_init Cellpose warm-up failed in "
                         "pid=%s; /readyz stays 503", worker.pid)
+    # 空闲搬回线程只在 worker 进程内启动（绝不能出现在 master）。
+    _app._RESIDENCY.start_idle_thread()

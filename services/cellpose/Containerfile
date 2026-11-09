@@ -28,7 +28,7 @@ RUN pip install --no-cache-dir --no-index --find-links /wheels \
     && rm -rf /wheels
 
 WORKDIR /srv/cellpose
-COPY cellpose_infer.py app.py gunicorn.conf.py ./
+COPY cellpose_infer.py residency.py app.py gunicorn.conf.py ./
 
 # 构建期烟雾测试：import 链路完整（CPU、无 eager load、无 CUDA、无权重）
 RUN CELLPOSE_EAGER_LOAD=0 python -c \

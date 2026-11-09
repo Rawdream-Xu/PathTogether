@@ -34,7 +34,12 @@
   - 权重只读挂载 /models（``<preset>-sha256-<12hex>/<preset>`` 布局），
     启动时流式校验 SHA-256（CELLPOSE_EXPECTED_SHA256_<PRESET>，不符拒绝
     加载），CELLPOSE_LOCAL_MODELS_PATH 指向 /models，运行期全离线、
-    **绝不触发下载**（预设路径以显式 glob 解析，命中即用）。
+    **绝不触发下载**（预设路径以显式 glob 解析，命中即用）；
+  - hub.worker/v1 驻留协议（residency.py）：推理前若模型空闲搬回内存则先
+    搬回显存；每次推理后清 CUDA 缓存；``GET /_worker/v1/state`` /
+    ``POST /_worker/v1/residency`` 供 hub 调度；空闲
+    ``CELLPOSE_IDLE_OFFLOAD_SECONDS``（默认 120，0 关闭）后自动搬回内存。
+    预设切换在离线（内存）状态下照常工作：卸旧 → 载新（cuda）→ 绑定。
 """
 import base64
 import binascii
@@ -49,6 +54,7 @@ from flask import Flask, jsonify, request
 from PIL import Image
 
 import cellpose_infer
+import residency
 
 MODEL_ID = "cellpose"
 CODE_VERSION = cellpose_infer.CELLPOSE_VERSION
@@ -64,7 +70,11 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_BODY_BYTES
 
 # 推理互斥锁：单模型实例串行推理；非阻塞获取，占用即 503 busy。
+# residency 搬运与 /_worker/v1/residency 同锁（阻塞等待在途推理）。
 _INFERENCE_LOCK = threading.Lock()
+
+# 驻留状态机：模型加载/空闲搬回/请求时搬回显存（见 residency.py）。
+_RESIDENCY = residency.Residency(MODEL_ID, "CELLPOSE", _INFERENCE_LOCK)
 
 
 def _resolve_weights(preset):
@@ -111,6 +121,7 @@ class _ModelHolder:
             self._errors = {}
             self._pid = os.getpid()
             self._warmed = True
+            _RESIDENCY.bind(None, self._info.get("device"))
 
     def reset(self):
         with self._lock:
@@ -120,6 +131,7 @@ class _ModelHolder:
             self._errors = {}
             self._pid = None
             self._warmed = False
+            _RESIDENCY.mark_loading()
 
     @property
     def preset(self):
@@ -165,11 +177,17 @@ class _ModelHolder:
                         flow_threshold=flow_threshold,
                         cellprob_threshold=cellprob_threshold)
 
+                def _move(target):
+                    # CellposeModel 的 GPU 模块是 model.net；普通属性里没有
+                    # 需要搬迁的张量。
+                    residency.move_tensors(model.net, target)
+
                 self._count = _count
                 self._preset = preset
                 self._info = info
                 self._pid = os.getpid()
                 self._warmed = False
+                _RESIDENCY.bind(_move, device)
                 app.logger.info(
                     "Cellpose preset %s loaded: pid=%d device=%s weights=%s "
                     "sha256=%s code=%s", preset, os.getpid(), device,
@@ -177,11 +195,13 @@ class _ModelHolder:
                 return _count, True
             except Exception as exc:  # noqa: BLE001 — 记忆失败，稳定 503
                 self._errors[preset] = str(exc)
+                _RESIDENCY.mark_failed(str(exc))
                 app.logger.exception("Cellpose 加载失败")
                 raise
 
     def _unload_locked(self):
         """卸载当前预设（持自锁调用）：释放 CUDA 显存。"""
+        _RESIDENCY.mark_loading()
         self._count = None
         self._info = None
         self._warmed = False
@@ -228,21 +248,67 @@ def _internal_error(_exc):  # pragma: no cover — Flask 兜底
 @app.route("/healthz", methods=["GET"])
 def healthz():
     """进程存活即 200（模型就绪状态另见 /readyz）。"""
-    return jsonify({"ok": True, "pid": os.getpid(), "ready": _MODEL.ready})
+    return jsonify({"ok": True, "pid": os.getpid(), "ready": _MODEL.ready,
+                    "resident": _RESIDENCY.resident,
+                    "idle_offload_seconds":
+                        _RESIDENCY.local_idle_offload_seconds})
 
 
 @app.route("/readyz", methods=["GET"])
 def readyz():
-    """模型已加载且 warm-up（1024² 假图跑通一路推理）完成 → 200；否则 503。"""
+    """模型已加载且 warm-up（1024² 假图跑通一路推理）完成 → 200；否则 503。
+
+    模型空闲搬回内存后仍 ready（首次请求会先搬回显存）。
+    """
     if _MODEL.ready:
         info = _MODEL.info or {}
         return jsonify({"ready": True, "model_id": MODEL_ID,
                         "model_name": _MODEL.preset,
                         "model_sha256": info.get("sha256"),
                         "code_version": CODE_VERSION,
-                        "device": info.get("device")})
+                        "device": info.get("device"),
+                        "resident": _RESIDENCY.resident,
+                        "idle_offload_seconds":
+                            _RESIDENCY.local_idle_offload_seconds})
     return jsonify({"ready": False, "error": "not_ready",
-                    "model_id": MODEL_ID, "code_version": CODE_VERSION}), 503
+                    "model_id": MODEL_ID, "code_version": CODE_VERSION,
+                    "resident": _RESIDENCY.resident,
+                    "idle_offload_seconds":
+                        _RESIDENCY.local_idle_offload_seconds}), 503
+
+
+def _residency_endpoint(target):
+    """hub.worker/v1 手动搬运：持推理锁等待在途推理，返回 (payload, status)。"""
+    started = time.monotonic()
+    with _INFERENCE_LOCK:  # 与推理互斥：绝不搬走推理中的模型
+        if _RESIDENCY.state == "loading":
+            return {"error": "loading"}, 409
+        try:
+            if target == "gpu":
+                _RESIDENCY.ensure_gpu()
+            else:
+                _RESIDENCY.to_cpu()
+        except Exception as exc:  # noqa: BLE001 — 状态不变，端点稳定 500
+            app.logger.exception("residency move to %s failed", target)
+            return {"error": type(exc).__name__}, 500
+        elapsed_ms = int(round((time.monotonic() - started) * 1000.0))
+        return {"state": _RESIDENCY.state, "elapsed_ms": elapsed_ms}, 200
+
+
+@app.route("/_worker/v1/state", methods=["GET"])
+def worker_state():
+    """hub.worker/v1：驻留状态快照。"""
+    return jsonify(_RESIDENCY.snapshot())
+
+
+@app.route("/_worker/v1/residency", methods=["POST"])
+def worker_residency():
+    """hub.worker/v1：{"target":"gpu"|"cpu"} 手动搬入显存/搬回内存。"""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or body.get("target") not in ("gpu", "cpu"):
+        return jsonify({"error": "invalid target (expected gpu or cpu)"}), 400
+    payload, status = _residency_endpoint(body["target"])
+    return jsonify(payload), status
 
 
 def _decode_image(image_b64):
@@ -396,9 +462,26 @@ def v1_count():
         return jsonify({"error": "busy"}), 503
 
     started = time.monotonic()
+    _RESIDENCY.set_busy(True)
     try:
         try:
             count_fn, _switched = _MODEL.ensure(params["preset"])
+        except Exception:  # noqa: BLE001 — 加载失败记忆化，稳定 503
+            return jsonify({"error": "not_ready",
+                            "message": "model not ready (see server logs)"}), 503
+        try:
+            # 空闲搬回内存的模型：推理前先搬回显存（预设可能刚切换/刚加载，
+            # 此时已在显存，空操作）。
+            residency_ms = _RESIDENCY.ensure_gpu()
+            if residency_ms:
+                app.logger.info("residency restore cpu->gpu: %.1f ms",
+                                residency_ms)
+        except Exception:  # noqa: BLE001 — 搬回失败：留在内存，下次重试
+            app.logger.exception("gpu residency restore failed")
+            return jsonify({"error": "not_ready",
+                            "message": "gpu residency restore failed "
+                                       "(see server logs)"}), 503
+        try:
             _MODEL.warm_up(params["preset"])
         except Exception:  # noqa: BLE001 — 加载失败记忆化，稳定 503
             return jsonify({"error": "not_ready",
@@ -427,6 +510,8 @@ def v1_count():
         return jsonify({"error": "internal_error",
                         "message": "inference failed (see server logs)"}), 500
     finally:
+        _RESIDENCY.set_busy(False)
+        _RESIDENCY.after_inference()  # 无论成败都清 CUDA 缓存
         _INFERENCE_LOCK.release()
 
     total_ms = (time.monotonic() - started) * 1000.0
@@ -464,6 +549,7 @@ if os.environ.get("CELLPOSE_EAGER_LOAD", "1") != "0":
         _MODEL.warm_up(DEFAULT_PRESET)
     except Exception:  # noqa: BLE001 — 不阻断进程启动，/readyz 报告 503
         app.logger.error("startup load failed; /readyz will report not ready")
+    _RESIDENCY.start_idle_thread()  # 仅 cuda 模式且模型已加载时生效
 
 
 if __name__ == "__main__":  # 本地开发直跑（生产走 gunicorn，见 Containerfile）

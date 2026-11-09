@@ -15,7 +15,7 @@ COPY requirements.txt ./
 # SAM2 的构建环境直接使用基础镜像已安装的 CUDA PyTorch，避免隔离构建
 # 再下载一份 torch（以及它的 CUDA 依赖）；无需 git 或 nvcc。
 RUN pip install --no-cache-dir --no-build-isolation -r requirements.txt
-COPY refine.py app.py gunicorn.conf.py ./
+COPY refine.py residency.py app.py gunicorn.conf.py ./
 
 EXPOSE 8970
 # 单 worker（单模型实例，进程内互斥锁串行推理）+ 2 线程（IO 重叠）。

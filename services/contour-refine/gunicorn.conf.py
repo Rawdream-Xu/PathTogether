@@ -28,3 +28,5 @@ def post_worker_init(worker):
     except Exception:  # noqa: BLE001 — /healthz 会持续报告 not ok
         worker.log.info("post_worker_init SAM2 warm-up failed in pid=%s; "
                         "/healthz stays 503", worker.pid)
+    # 空闲搬回线程只在 worker 进程内启动（绝不能出现在 master）。
+    _app._RESIDENCY.start_idle_thread()

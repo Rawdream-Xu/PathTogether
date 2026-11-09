@@ -25,7 +25,13 @@
     threshold 0..1；RGBA/灰度统一转 RGB；
   - 请求体与图像**不落盘、不进日志**（日志只有状态码与耗时）；
   - 权重 PATHSEG_WEIGHTS（缺省 /models/model_state_dict.pt，只读挂载），
-    启动时流式校验 SHA-256（PATHSEG_EXPECTED_SHA256，不符拒绝加载）。
+    启动时流式校验 SHA-256（PATHSEG_EXPECTED_SHA256，不符拒绝加载）；
+  - hub.worker/v1 驻留协议（residency.py）：推理前若模型空闲搬回内存则先
+    搬回显存；每次推理后清 CUDA 缓存；``GET /_worker/v1/state`` /
+    ``POST /_worker/v1/residency`` 供 hub 调度；空闲
+    ``PATHSEG_IDLE_OFFLOAD_SECONDS``（默认 120，0 关闭）后自动搬回内存。
+    PathSegmentor 的文本/类别嵌入是普通属性张量（非 params/buffers），
+    由通用张量遍历器（residency.move_tensors）一并搬动。
 """
 import base64
 import binascii
@@ -39,6 +45,7 @@ from flask import Flask, jsonify, request
 from PIL import Image
 
 import pathseg_infer
+import residency
 
 MODEL_ID = "pathsegmentor"
 CODE_REV = pathseg_infer.UPSTREAM_COMMIT
@@ -51,7 +58,11 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_BODY_BYTES
 
 # 推理互斥锁：单模型实例串行推理；非阻塞获取，占用即 503 busy。
+# residency 搬运与 /_worker/v1/residency 同锁（阻塞等待在途推理）。
 _INFERENCE_LOCK = threading.Lock()
+
+# 驻留状态机：模型加载/空闲搬回/请求时搬回显存（见 residency.py）。
+_RESIDENCY = residency.Residency(MODEL_ID, "PATHSEG", _INFERENCE_LOCK)
 
 
 class _ModelHolder:
@@ -79,6 +90,7 @@ class _ModelHolder:
             self._error = None
             self._pid = os.getpid()
             self._warmed = True
+            _RESIDENCY.bind(None, self._info.get("device"))
 
     def reset(self):
         with self._lock:
@@ -87,6 +99,7 @@ class _ModelHolder:
             self._error = None
             self._pid = None
             self._warmed = False
+            _RESIDENCY.mark_loading()
 
     def ensure(self):
         """返回 segment 回调；首次调用时加载模型（进程内只加载一次）。"""
@@ -106,17 +119,27 @@ class _ModelHolder:
                     return pathseg_infer.segment(model, img_rgb, prompt,
                                                  threshold)
 
+                def _move(target):
+                    # BaseModel.to() 只搬 params/buffers。实测 ~267 MB 非参数
+                    # 张量：attention_data.output 的 predictions_mask 等推理
+                    # 缓存（10×25.25 MB），以及语言编码器上 setattr 的
+                    # default_text_embeddings / attn_mask 等小张量。模块
+                    # _modules 每层消耗一级深度，到该层需要 12（默认 6 不够）。
+                    residency.move_tensors(model, target, max_depth=12)
+
                 self._segment = _segment
                 self._info = info
                 self._pid = os.getpid()
+                _RESIDENCY.bind(_move, info.get("device"))
                 app.logger.info(
                     "PathSegmentor loaded: pid=%d device=%s weights=%s "
                     "sha256=%s weights_only=%s code_rev=%s", os.getpid(),
                     info["device"], PATHSEG_WEIGHTS, info["sha256"][:12],
                     info["weights_only"], CODE_REV)
                 return _segment
-            except Exception:  # noqa: BLE001 — 记忆失败，稳定 503
+            except Exception as exc:  # noqa: BLE001 — 记忆失败，稳定 503
                 self._error = "PathSegmentor load failed (weights=%s)" % PATHSEG_WEIGHTS
+                _RESIDENCY.mark_failed(str(exc))
                 app.logger.exception("PathSegmentor 加载失败")
                 raise
 
@@ -164,20 +187,66 @@ def _internal_error(_exc):  # pragma: no cover — Flask 兜底
 @app.route("/healthz", methods=["GET"])
 def healthz():
     """进程存活即 200（模型就绪状态另见 /readyz）。"""
-    return jsonify({"ok": True, "pid": os.getpid(), "ready": _MODEL.ready})
+    return jsonify({"ok": True, "pid": os.getpid(), "ready": _MODEL.ready,
+                    "resident": _RESIDENCY.resident,
+                    "idle_offload_seconds":
+                        _RESIDENCY.local_idle_offload_seconds})
 
 
 @app.route("/readyz", methods=["GET"])
 def readyz():
-    """模型已加载且 warm-up 完成 → 200；否则 503。"""
+    """模型已加载且 warm-up 完成 → 200；否则 503。
+
+    模型空闲搬回内存后仍 ready（首次请求会先搬回显存）。
+    """
     if _MODEL.ready:
         info = _MODEL.info or {}
         return jsonify({"ready": True, "model_id": MODEL_ID,
                         "model_sha256": info.get("sha256"),
                         "code_rev": CODE_REV,
-                        "device": info.get("device")})
+                        "device": info.get("device"),
+                        "resident": _RESIDENCY.resident,
+                        "idle_offload_seconds":
+                            _RESIDENCY.local_idle_offload_seconds})
     return jsonify({"ready": False, "error": "not_ready",
-                    "model_id": MODEL_ID, "code_rev": CODE_REV}), 503
+                    "model_id": MODEL_ID, "code_rev": CODE_REV,
+                    "resident": _RESIDENCY.resident,
+                    "idle_offload_seconds":
+                        _RESIDENCY.local_idle_offload_seconds}), 503
+
+
+def _residency_endpoint(target):
+    """hub.worker/v1 手动搬运：持推理锁等待在途推理，返回 (payload, status)。"""
+    started = time.monotonic()
+    with _INFERENCE_LOCK:  # 与推理互斥：绝不搬走推理中的模型
+        if _RESIDENCY.state == "loading":
+            return {"error": "loading"}, 409
+        try:
+            if target == "gpu":
+                _RESIDENCY.ensure_gpu()
+            else:
+                _RESIDENCY.to_cpu()
+        except Exception as exc:  # noqa: BLE001 — 状态不变，端点稳定 500
+            app.logger.exception("residency move to %s failed", target)
+            return {"error": type(exc).__name__}, 500
+        elapsed_ms = int(round((time.monotonic() - started) * 1000.0))
+        return {"state": _RESIDENCY.state, "elapsed_ms": elapsed_ms}, 200
+
+
+@app.route("/_worker/v1/state", methods=["GET"])
+def worker_state():
+    """hub.worker/v1：驻留状态快照。"""
+    return jsonify(_RESIDENCY.snapshot())
+
+
+@app.route("/_worker/v1/residency", methods=["POST"])
+def worker_residency():
+    """hub.worker/v1：{"target":"gpu"|"cpu"} 手动搬入显存/搬回内存。"""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or body.get("target") not in ("gpu", "cpu"):
+        return jsonify({"error": "invalid target (expected gpu or cpu)"}), 400
+    payload, status = _residency_endpoint(body["target"])
+    return jsonify(payload), status
 
 
 def _decode_image(image_b64):
@@ -270,7 +339,19 @@ def v1_segment():
         return jsonify({"error": "busy"}), 503
 
     started = time.monotonic()
+    _RESIDENCY.set_busy(True)
     try:
+        try:
+            # 空闲搬回内存的模型：推理前先搬回显存。
+            residency_ms = _RESIDENCY.ensure_gpu()
+            if residency_ms:
+                app.logger.info("residency restore cpu->gpu: %.1f ms",
+                                residency_ms)
+        except Exception:  # noqa: BLE001 — 搬回失败：留在内存，下次重试
+            app.logger.exception("gpu residency restore failed")
+            return jsonify({"error": "not_ready",
+                            "message": "gpu residency restore failed "
+                                       "(see server logs)"}), 503
         img = np.asarray(image, dtype=np.uint8)
         decoded_s = time.monotonic()
         mask = segment(img, prompt, threshold)
@@ -281,6 +362,8 @@ def v1_segment():
         return jsonify({"error": "internal_error",
                         "message": "inference failed (see server logs)"}), 500
     finally:
+        _RESIDENCY.set_busy(False)
+        _RESIDENCY.after_inference()  # 无论成败都清 CUDA 缓存
         _INFERENCE_LOCK.release()
 
     total_ms = (time.monotonic() - started) * 1000.0
@@ -318,6 +401,7 @@ if os.environ.get("PATHSEG_EAGER_LOAD", "1") != "0":
         _MODEL.warm_up()
     except Exception:  # noqa: BLE001 — 不阻断进程启动，/readyz 报告 503
         app.logger.error("startup load failed; /readyz will report not ready")
+    _RESIDENCY.start_idle_thread()  # 仅 cuda 模式且模型已加载时生效
 
 
 if __name__ == "__main__":  # 本地开发直跑（生产走 gunicorn，见 Containerfile）

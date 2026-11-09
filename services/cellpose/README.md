@@ -34,12 +34,14 @@ Cellpose annotated dataset is also CC-BY-NC."——训练数据非商用授权�
 ## HTTP 契约（固定，客户端另行对接）
 
 ### `GET /healthz`
-进程存活即 `200 {"ok":true,"pid":..,"ready":..}`（**不**反映模型就绪）。
+进程存活即 `200 {"ok":true,"pid":..,"ready":..,"resident":"gpu|cpu|null","idle_offload_seconds":120}`
+（**不**反映模型就绪）。
 
 ### `GET /readyz`
 模型已加载且 warm-up（1024² 假图跑通一路推理）完成 →
-`200 {"ready":true,"model_id":"cellpose","model_name":"cpsam","model_sha256":"<64hex>","code_version":"4.2.1.1","device":"cuda:0"}`；
-否则 `503 {"ready":false,"error":"not_ready",...}`。
+`200 {"ready":true,"model_id":"cellpose","model_name":"cpsam","model_sha256":"<64hex>","code_version":"4.2.1.1","device":"cuda:0","resident":"gpu|cpu","idle_offload_seconds":120}`；
+否则 `503 {"ready":false,"error":"not_ready",...}`。空闲搬回内存后仍
+`ready=true`。
 
 ### `POST /v1/count`
 
@@ -106,6 +108,30 @@ Cellpose annotated dataset is also CC-BY-NC."——训练数据非商用授权�
 
 请求体与图像不落盘、不进日志。
 
+## 驻留协议 `hub.worker/v1`
+
+hub-infer（design v3 §6）通过本协议把模型按需搬进/搬出显存。直连本服务
+不受影响：推理请求进来时若模型在内存，会先自动搬回显存。搬运与推理共用
+`_INFERENCE_LOCK`（预设切换也在同一把锁内），推理中的模型不会被搬走。
+
+- `GET /_worker/v1/state` →
+  `{"protocol":"hub.worker/v1","model":"cellpose","state":"loading|cpu|gpu|failed","busy":bool,"idle_seconds":float,"vram_reserved_mib":int|null,"local_idle_offload_seconds":int,"last_error":str|null}`；
+- `POST /_worker/v1/residency` `{"target":"gpu"|"cpu"}` →
+  200 `{"state":"gpu|cpu","elapsed_ms":int}`；模型加载/预设切换中 409
+  `{"error":"loading"}`；target 非法 400；搬运失败 500
+  `{"error":"<异常类型名>"}` 且状态不变（留在内存，下次请求重试）；
+- 每次推理结束（无论成败）调用 `torch.cuda.empty_cache()`；
+- 空闲 `CELLPOSE_IDLE_OFFLOAD_SECONDS`（默认 120，0 关闭）后自动搬回内存；
+  线程只在 worker 进程内启动（gunicorn 保持 `preload_app=False`）；
+- 搬运用通用张量遍历器（`residency.move_tensors(model.net, ...)`）；
+- 预设切换在离线（cpu）状态下照常工作：卸旧（释放旧模型引用）→ 载新到
+  显存 → 绑定；不会同时驻留两份权重；
+- CPU-device 模式（无 CUDA 回落）永不搬回。
+
+实测基线（design v3 §1，RTX 2080 Ti 22528 MiB）：cpsam 显存权重 1162 MB，
+推理后缓存 4678 MB，清缓存后 1188 MB；内存↔显存 0.18 s；冷启动 ~5 s，
+单次推理 2.5 s（1024²）。每个进程固定占 200–300 MB CUDA 上下文。
+
 ## 构建（homePC）
 
 homePC 到 docker.io / PyPI 直连不稳：基础镜像复用已拉的 daocloud
@@ -153,7 +179,8 @@ gunicorn 单 worker + 2 线程、`preload_app=False`（CUDA 在 worker 进程内
 `CELLPOSE_DEFAULT_MODEL`（缺省 `cpsam`）、
 `CELLPOSE_EXPECTED_SHA256_<PRESET>`（设置后强校验）、
 `CELLPOSE_EAGER_LOAD=0`（关 import 期加载，测试用）、
-`CELLPOSE_MAX_BODY_BYTES`。
+`CELLPOSE_MAX_BODY_BYTES`、`CELLPOSE_IDLE_OFFLOAD_SECONDS`（空闲搬回内存，
+默认 120 秒，0 关闭）。
 
 ## 验证
 

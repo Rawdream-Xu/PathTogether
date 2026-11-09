@@ -231,7 +231,8 @@ def test_healthz_with_injected_predictor(client):
     assert r.status_code == 200
     body = r.get_json()
     assert body == {"ok": True, "device": "injected", "model": "sam2.1-hiera-b+",
-                    "pid": os.getpid()}
+                    "pid": os.getpid(), "resident": "cpu",
+                    "idle_offload_seconds": 120}
 
 
 def test_healthz_503_before_model_load_and_does_not_trigger_load(

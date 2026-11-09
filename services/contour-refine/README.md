@@ -14,12 +14,14 @@ PathTogether 平台侧入口：`POST /api/plugin/v1/slides/<slide>/contours/refi
 ### `GET /healthz`
 
 ```json
-{"ok": true, "device": "cuda", "model": "sam2.1-hiera-b+", "pid": 7}
+{"ok": true, "device": "cuda", "model": "sam2.1-hiera-b+", "pid": 7,
+ "resident": "gpu", "idle_offload_seconds": 120}
 ```
 
 只读本 **worker 进程**的就绪状态（不触发加载）：模型未加载/加载失败 →
 `ok=false` 且 HTTP 503。`pid` + `device` 用于确认模型确实加载在本 worker
 （见下「模型加载与 fork」），不能证明 master 或其它进程的 GPU 推理可用。
+`resident` 为 `gpu` / `cpu`（空闲搬回内存后仍 `ok=true`、仍可推理）。
 
 ### `POST /v1/refine`
 
@@ -68,6 +70,31 @@ PathTogether 平台侧入口：`POST /api/plugin/v1/slides/<slide>/contours/refi
    `0.3 ≤ ratio ≤ 1.3`；
 5. 最大外轮廓 → `approxPolyDP(eps = max(1.0, 0.006*perimeter))`；点数 > 500
    时逐级放大 epsilon 收敛。
+
+## 驻留协议 `hub.worker/v1`
+
+hub-infer（design v3 §6）通过本协议把模型按需搬进/搬出显存。直连本服务
+不受影响：收到推理请求时模型若在内存，会先自动搬回显存。搬运与推理共用
+进程内 `_INFERENCE_LOCK`，推理中的模型不会被搬走。
+
+- `GET /_worker/v1/state` →
+  `{"protocol":"hub.worker/v1","model":"sam2.1-hiera-b+","state":"loading|cpu|gpu|failed","busy":bool,"idle_seconds":float,"vram_reserved_mib":int|null,"local_idle_offload_seconds":int,"last_error":str|null}`；
+- `POST /_worker/v1/residency` `{"target":"gpu"|"cpu"}` →
+  200 `{"state":"gpu|cpu","elapsed_ms":int}`；模型加载中 409
+  `{"error":"loading"}`；target 非法 400；搬运失败 500
+  `{"error":"<异常类型名>"}` 且状态不变（留在内存，下次请求重试）；
+- 设置了 `CONTOUR_REFINE_TOKEN` 时这两个端点同样要求 `X-Refine-Token`；
+- 每次推理结束（无论成败）调用 `torch.cuda.empty_cache()`；
+- 空闲 `CONTOUR_REFINE_IDLE_OFFLOAD_SECONDS`（默认 120，0 关闭）后自动
+  搬回内存；线程只在 worker 进程内启动（gunicorn 保持 `preload_app=False`）；
+- 搬运用通用张量遍历器（`residency.move_tensors`）：`nn.Module.to()` 只搬
+  params/buffers，遍历器补上普通属性张量；SAM2 predictor 的 `_features`
+  缓存在搬回内存前先 `reset_predictor()`；
+- CPU-device 模式（无 CUDA 回落）永不搬回。
+
+实测基线（design v3 §1，RTX 2080 Ti 22528 MiB）：SAM2.1 hiera-b+ 显存权重
+450 MB，推理后缓存 1098 MB，清缓存后 496 MB；内存↔显存 0.05–0.17 s；冷启动
+~2.5 s，单次推理 0.13 s（1024²）。每个进程固定占 200–300 MB CUDA 上下文。
 
 ## 构建 / 运行（podman + NVIDIA CDI）
 
@@ -133,6 +160,7 @@ curl -s -X POST http://127.0.0.1:8970/v1/refine \
 | `SAM2_CONFIG` | `configs/sam2.1/sam2.1_hiera_b+.yaml` | SAM2 模型配置名 |
 | `CONTOUR_REFINE_TOKEN` | 未设置 | 设置后强制 `X-Refine-Token` 共享密钥 |
 | `CONTOUR_REFINE_EAGER_LOAD` | `1` | 启动即加载模型（worker 内；测试置 0 改惰性） |
+| `CONTOUR_REFINE_IDLE_OFFLOAD_SECONDS` | `120` | 空闲多久搬回内存（秒）；`0` 关闭 |
 | `CONTOUR_REFINE_MAX_IMAGE_EDGE` | `2048` | 入参图像长边上限（px） |
 | `CONTOUR_REFINE_MAX_BODY_BYTES` | `8388608` | 请求体上限（字节） |
 | `CONTOUR_REFINE_SCORE_MIN` | `0.75` | 接受分数下限 |
