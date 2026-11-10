@@ -16846,7 +16846,9 @@ def _slide_tile_impl(desc, level, x, y):
             if (token_payload.get("ctx") or {}).get("version") \
             == slide_render.CONTEXT_VERSION_MULTICHANNEL else "native_rgb"
     else:
-        cached_default = _default_fp_cached(safe, gen)
+        # R-15 收口：默认指纹缓存按 slide_id（skey）存取——与
+        # _resolve_pair_context 内 _default_fp_store 的键一致（P0-W1）。
+        cached_default = _default_fp_cached(skey, gen)
         if cached_default is not None:
             fp_pre, mode_pre = cached_default
 
@@ -16863,10 +16865,12 @@ def _slide_tile_impl(desc, level, x, y):
     # fast path：fp 已知 + spec 已知（或 legacy）→ 预查缓存；版本化请求在
     # 命中后再核 dv（dar 按当前文件签名派生；generation 过期则落解码路径）
     if fp_pre is not None and (pre_spec is not None or req_profile is None):
+        # R-15 收口：瓦片缓存预查按 slide_id（skey）——与 put 侧
+        # _tile_fp_key/_tile_cache_put 的键一致（P0-W1，审计 P0-1）。
         cached = _tile_cache_lookup_spec(
-            safe, gen, fp_pre, level, x, y, pre_spec) \
+            skey, gen, fp_pre, level, x, y, pre_spec) \
             if pre_spec is not None \
-            else _tile_cache_lookup(safe, gen, fp_pre, level, x, y)
+            else _tile_cache_lookup(skey, gen, fp_pre, level, x, y)
         if cached is not None and req_dv is not None and pre_spec is not None:
             try:
                 cur_dv = viewer_display.compute_display_version(
