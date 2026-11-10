@@ -183,18 +183,19 @@ def test_release_config_boundary_9p5e9(owner_client, monkeypatch):
 def test_format_acceptance_derived_from_registry(owner_client):
     # U2（§3.2）：受理词表从注册表派生——原生单文件 + zip（包）均建任务；
     # 裸 bundle（.mrxs）与未登记格式 422 说明原因（无 fallback 指引）。
-    # 2026-11-05：原始普通图片（.bmp/.jpg/.jpeg）不再建任务——422
-    # raster_requires_conversion（必须先在本机转 OME-TIFF）。
+    # P0-W6b（2026-11-11 解禁）：原始普通图片（.bmp/.jpg/.jpeg）恢复受理
+    # 直传——RasterSlide 已可读，沿用其伪装/截断/超限校验（worker 终审）。
     for name in ("cosapi-a.mrxs", "cosapinoext", "cosapi-a.exe"):
         r = _create(owner_client, filename=name)
         assert r.status_code == 422, name
-        assert r.get_json()["code"] == "cos_format_unsupported"
-    for name in ("cosapi-a.bmp", "cosapi-b.JPG", "cosapi-c.jpeg"):
+        assert r.get_json()["code"] == "cos_format_unsupported", name
+    for name, kind in (("cosapi-a.bmp", "native"), ("cosapi-b.JPG", "native"),
+                       ("cosapi-c.jpeg", "native")):
         r = _create(owner_client, filename=name)
-        assert r.status_code == 422, name
+        assert r.status_code == 202, name
         body = r.get_json()
-        assert body["code"] == "raster_requires_conversion", name
-        assert body["tools_url"] == "/tools/slides"
+        assert body["kind"] == kind, name
+        owner_client.post("/api/ingestions/%s/cancel" % body["job_id"])
     # R1：convert-required（kfb）不再建后端转换任务，引导本机「转换并上传」；
     # 阶段 1 起统一错误码 convert_in_browser（旧码 conversion_moved_to_browser
     # 保留在 conversion retry 410 路径；闸的完整断言见
@@ -507,6 +508,10 @@ def test_capability_payload_shapes(monkeypatch):
         assert "zip" in p["formats"] and "kfb" not in p["formats"]
         assert "kfb" in p["browser_convert"]["formats"]
         assert "mrxs" not in p["formats"]
+        # P0-W6b：普通图片恢复直传受理（词表与 direct_upload 清单一起放开）
+        for raster in ("jpg", "jpeg", "bmp"):
+            assert raster in p["formats"], raster
+            assert raster in p["direct_upload"]["formats"], raster
         # 配置门禁未过（结构性 < 产品上限）→ fail-closed 不可用
         monkeypatch.setattr(app_mod, "UPLOAD_PRODUCT_MAX_BYTES", 950_000)
         assert app_mod._cos_upload_capability_payload(

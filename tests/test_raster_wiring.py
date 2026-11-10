@@ -247,9 +247,9 @@ def test_slides_list_includes_raster_metadata():
 def test_slide_formats_endpoint_raster_image_row():
     """/api/slide-formats 含 raster-image 行：单文件、可选上传。
 
-    F8 起 browser_convert=available、import_mode=convert；2026-11-05 起
-    direct_import=closed——普通图片必须先在本机浏览器转换为 OME-TIFF，
-    原始图片不再直接导入（所有 BMP/JPEG 变体在浏览器内归一化）。
+    F8 起 browser_convert=available；P0-W6b（2026-11-11）起直传解禁——
+    direct_import=open、import_mode=direct-upload，原始图片可直接导入
+    （RasterSlide 直读；浏览器转换通道保留为可选归一化）。
     """
     c = _client()
     r = c.get("/api/slide-formats")
@@ -261,12 +261,11 @@ def test_slide_formats_endpoint_raster_image_row():
     assert it["capability"] == "native-single-file"
     assert it["canonical_format"] is None
     assert it["bundle_required"] is False
-    assert it["import_mode"] == "convert"
+    assert it["import_mode"] == "direct-upload"
     assert it["browser_convert"] == "available"
-    assert it["direct_import"] == "closed"
+    assert it["direct_import"] == "open"
     assert it["selectable_for_upload"] is True
     assert any("无物理标尺" in lim for lim in it["limits"])  # 用户向短句
-    assert any("不再直接导入" in lim for lim in it["limits"])
 
 
 def test_slide_formats_endpoint_extension_vocab_no_drift():
