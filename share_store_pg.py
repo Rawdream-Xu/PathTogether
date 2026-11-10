@@ -3015,19 +3015,53 @@ def update_project(pid, *, name=None, note=None, slides=None, slide_ids=None,
         conn.close()
 
 
-def add_slides_to_project(pid, slides, slide_ids=None):
+def _slide_owner_mismatch(cur, slide_id, name, proj_owner):
+    """P0-W2（审计 P0-2）：项目成员切片归属复核。True = 不一致或不可判定。
+
+    slide_id 优先直查，其次按名（legacy 冻结映射）；无行（历史名行/已删除
+    资产）视为不可判定 → 拒绝（fail-closed；HTTP 层解析失败在先，仅显式传
+    requester_role 的调用走到这里）。双方 owner 归一（'' → NULL）后比较。
+    """
+    if slide_id:
+        cur.execute("SELECT owner_user_id FROM slides WHERE slide_id=%s",
+                    (slide_id,))
+    elif name:
+        cur.execute("SELECT owner_user_id FROM slides WHERE legacy_filename=%s",
+                    (name,))
+    else:
+        return True
+    row = cur.fetchone()
+    if row is None:
+        return True
+    return (row["owner_user_id"] or None) != (proj_owner or None)
+
+
+def add_slides_to_project(pid, slides, slide_ids=None, requester_role=None):
     """向项目追加切片（去重保序）。返回更新后的 dict；不存在返回 None。
 
     P2（合同 §3.2）：slide_ids 优先或名数组；双列写入；同名不同 ID 可并存
     （去重键 = slide_id，NULL-ID 行按名去重保持旧行为）。
+    P0-W2（审计 P0-2）：切片归属校验——成员切片 owner 须与项目 owner 一致
+    （防他人切片被归档项目锁死），不一致 raise PermissionError（路由层映射
+    403）。requester_role="owner"（== user_store.ROLE_OWNER；本模块不
+    import user_store，与 _reject_guest_write 同口径用字面量）豁免——管理
+    语义；requester_role=None = 内部调用（百度/转换/producer 导入链，调用
+    前已自行复核 project.owner == 导入用户）不限制。
     """
     conn = _connect()
     try:
         with pg_store.transaction(conn) as c:
             with c.cursor() as cur:
-                cur.execute("SELECT project_id FROM projects WHERE project_id=%s", (pid,))
-                if cur.fetchone() is None:
+                cur.execute(
+                    "SELECT owner_user_id FROM projects WHERE project_id=%s",
+                    (pid,))
+                prow = cur.fetchone()
+                if prow is None:
                     return None
+                proj_owner = prow["owner_user_id"] or None
+                # None=内部调用（不限制）；"owner"=豁免；其余显式角色复核
+                check_ownership = requester_role is not None \
+                    and requester_role != "owner"
                 cur.execute("SELECT slide, slide_id FROM project_slides "
                             "WHERE project_id=%s ORDER BY position", (pid,))
                 prows = cur.fetchall()
@@ -3036,6 +3070,11 @@ def add_slides_to_project(pid, slides, slide_ids=None):
                 seen = set(existing)
                 pos = len(existing)
                 for s, sid in _project_slide_rows(cur, slides, slide_ids):
+                    if check_ownership and _slide_owner_mismatch(
+                            cur, sid, s, proj_owner):
+                        raise PermissionError(
+                            "切片 %s 归属与项目 owner 不一致，拒绝加入项目"
+                            % (sid or s))
                     if sid is not None:
                         if sid in seen_ids:
                             continue
@@ -3571,7 +3610,14 @@ def set_project_archived(pid, archived):
 
 
 def archived_slide_names():
-    """返回属于任意 archived 项目的切片名集合（归档只读判定用）。"""
+    """返回属于任意 archived 项目的切片名集合（归档只读判定用）。
+
+    P0-W2（审计 P0-2）：owner 一致性联接——成员切片 owner 与项目 owner
+    双方已知且不一致（毒化成员行：他人把我的切片挂进他的项目再归档）时
+    不计入归档集合（我的切片不被他人项目归档锁死）；任一方 NULL / 名行
+    不可解析（本地单租户与历史行）维持旧行为照旧锁定。slide_id 为权威
+    键，NULL-ID 名行走 legacy_filename 回退解析。
+    """
     conn = _connect()
     try:
         with pg_store.transaction(conn) as c:
@@ -3579,7 +3625,11 @@ def archived_slide_names():
                 cur.execute(
                     "SELECT ps.slide FROM project_slides ps "
                     "JOIN projects p ON p.project_id=ps.project_id "
-                    "WHERE p.archived=TRUE")
+                    "LEFT JOIN slides s ON s.slide_id=ps.slide_id "
+                    "OR (ps.slide_id IS NULL AND s.legacy_filename=ps.slide) "
+                    "WHERE p.archived=TRUE "
+                    "AND (s.owner_user_id IS NULL OR p.owner_user_id IS NULL "
+                    "OR s.owner_user_id=p.owner_user_id)")
                 return {r["slide"] for r in cur.fetchall()}
     finally:
         conn.close()
