@@ -1133,6 +1133,9 @@ def _reject_archived_slide(share, name, slide_id=None):
 
     P2（缺口②）：id_bundle 成员无 legacy 名——name 为 None 时按 slide_id
     查 project_slides 双写列（与 app.py `_slide_id_archived` 同语义）。
+    P0-W2（审计 P0-2）：ID 分支与 archived_slide_names 同口径的 owner 一致性
+    联接——项目 owner 与切片 owner 双方已知且不一致（毒化成员行：他人把
+    我的切片挂进他的项目再归档）时不判归档；任一方 NULL 维持旧行为。
     """
     if name is not None:
         return name in _archived_slide_names()
@@ -1147,7 +1150,10 @@ def _reject_archived_slide(share, name, slide_id=None):
             cur.execute(
                 "SELECT 1 FROM project_slides ps JOIN projects p "
                 "ON p.project_id = ps.project_id "
-                "WHERE ps.slide_id=%s AND p.archived LIMIT 1", (slide_id,))
+                "LEFT JOIN slides s ON s.slide_id = ps.slide_id "
+                "WHERE ps.slide_id=%s AND p.archived "
+                "AND (s.owner_user_id IS NULL OR p.owner_user_id IS NULL "
+                "OR s.owner_user_id=p.owner_user_id) LIMIT 1", (slide_id,))
             return cur.fetchone() is not None
     except Exception:  # noqa: BLE001
         return False
