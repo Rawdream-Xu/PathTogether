@@ -297,7 +297,35 @@ def test_archive_does_not_lock_foreign_slide():
 
 
 # =========================================================================== #
-# 6. 旧行为保真：双 NULL（本地单租户/名行不可解析）成员照旧可归档锁定
+# 6. 分享链路归档闸（share_server._reject_archived_slide）同口径
+# =========================================================================== #
+def test_share_channel_archived_gate_owner_consistent():
+    """/s/* 协作标注通道的归档闸：毒化成员行不锁死他人切片。
+
+    名分支经 share_store.archived_slide_names（已修复）；ID 分支是独立 SQL
+    副本（id_bundle 成员无名快照走该分支，P0-W2 复审补修）。"""
+    import share_server as share_srv
+    _owner, userA, userB = _setup_users()
+    sa = _touch("a.svs")
+    sb = _touch("b.svs")
+    _own(sa, userA["user_id"])
+    _own(sb, userB["user_id"])
+    pid = share_store.create_project(
+        "PA", slides=[sa], owner_user_id=userA["user_id"])["pid"]
+    # 毒化成员行（内部调用模拟修复前已落库数据）
+    share_store.add_slides_to_project(pid, [], slide_ids=[_sid(sb)])
+    share_store.set_project_archived(pid, True)
+
+    # 名分支：A 自己的切片拦（归档只读），B 的切片放行
+    assert share_srv._reject_archived_slide(None, sa) is True
+    assert share_srv._reject_archived_slide(None, sb) is False
+    # ID 分支（id_bundle 成员无名快照）：同口径
+    assert share_srv._reject_archived_slide(None, None, _sid(sa)) is True
+    assert share_srv._reject_archived_slide(None, None, _sid(sb)) is False
+
+
+# =========================================================================== #
+# 7. 旧行为保真：双 NULL（本地单租户/名行不可解析）成员照旧可归档锁定
 # =========================================================================== #
 def test_archived_names_null_owner_rows_still_locked():
     _owner, _userA, _userB = _setup_users()
