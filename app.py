@@ -10053,7 +10053,12 @@ def _subject_can_annotate_slide(role, uid, name):
 
 
 def _slide_id_archived(slide_id):
-    """slide_id 是否在归档项目内（P2：project_slides 双写后的归档只读判定）。"""
+    """slide_id 是否在归档项目内（P2：project_slides 双写后的归档只读判定）。
+
+    P0-W2（审计 P0-2）：与 archived_slide_names 同口径的 owner 一致性联接
+    ——项目 owner 与切片 owner 双方已知且不一致（毒化成员行）时不判归档
+    （他人项目归档不得锁死我的切片/run grant）；任一方 NULL 维持旧行为。
+    """
     if not slide_id:
         return False
     try:
@@ -10065,7 +10070,10 @@ def _slide_id_archived(slide_id):
             cur.execute(
                 "SELECT 1 FROM project_slides ps JOIN projects p "
                 "ON p.project_id = ps.project_id "
-                "WHERE ps.slide_id=%s AND p.archived LIMIT 1", (slide_id,))
+                "LEFT JOIN slides s ON s.slide_id = ps.slide_id "
+                "WHERE ps.slide_id=%s AND p.archived "
+                "AND (s.owner_user_id IS NULL OR p.owner_user_id IS NULL "
+                "OR s.owner_user_id=p.owner_user_id) LIMIT 1", (slide_id,))
             return cur.fetchone() is not None
     except Exception:  # noqa: BLE001
         return False
@@ -27620,35 +27628,21 @@ def api_share_claim(token):
 # --------------------------------------------------------------------------- #
 # 项目管理 API（管理员，内网）
 # --------------------------------------------------------------------------- #
-def _validate_slide_names(names):
-    """校验切片名列表：均需合法、扩展名受支持、文件存在。
-
-    返回 (clean_list, error_str)；成功时 error_str 为 None。
-    """
-    if not isinstance(names, list):
-        return None, "slides 需为数组"
-    clean = []
-    for name in names:
-        if not isinstance(name, str):
-            return None, "slides 含非法文件名"
-        safe = _sanitize_name(name)
-        if not safe or safe != name:
-            return None, "非法文件名: " + name
-        if safe.split(".")[-1].lower() not in SUPPORTED_EXTS:
-            return None, "不支持的文件类型: " + name
-        if not (UPLOAD_DIR / safe).is_file():
-            return None, "切片不存在: " + name
-        clean.append(safe)
-    return clean, None
-
-
 def _resolve_slide_refs_for_project(entries, *, field):
     """项目成员双字段解析（P2，合同 §3.2）。
 
     ``entries`` 是 [(name|None, slide_id|None), ...]；每个成员解析到已存在
     ready 资产（名走冻结别名；ID 直查），否则 400 指明哪一个。返回
     (names, slide_ids, error_response)。
+
+    P0-W2（审计 P0-2）：成员切片归属校验——user 仅可把自己的切片纳入项目
+    （public 可见 ≠ 可纳入，防他人切片被归档项目锁死）；owner 角色豁免
+    （管理语义，与 _can_access_project「owner 任意」/ _authorize_id_read 的
+    owner 分支同口径）。归属不一致 → 403 ``slide_not_owned``（fail-closed）。
     """
+    ident = current_identity()
+    owner_exempt = ident.get("role") == user_store.ROLE_OWNER
+    uid = ident.get("user_id") or None
     names, sids = [], []
     for name, sid in entries:
         desc, ref_err = _resolve_slide_ref_pair(sid, name)
@@ -27663,6 +27657,10 @@ def _resolve_slide_refs_for_project(entries, *, field):
         if desc.asset_state != slide_store.SlideState.READY:
             return None, None, (jsonify(
                 error="切片未发布，无法加入项目: %s" % (sid or name)), 400)
+        if not owner_exempt and (desc.owner_user_id or None) != uid:
+            return None, None, (jsonify(
+                error="切片不归属当前用户，无法加入项目: %s" % (sid or name),
+                code="slide_not_owned"), 403)
         names.append(desc.legacy_filename or desc.original_filename or "")
         sids.append(desc.slide_id)
     return names, sids, None
@@ -27747,7 +27745,8 @@ def api_project_create():
                                                slide_ids=legacy_sids)
                 if id_bundle_ids:
                     share_store.add_slides_to_project(
-                        pid, [], slide_ids=id_bundle_ids)
+                        pid, [], slide_ids=id_bundle_ids,
+                        requester_role=ident["role"])
             except Exception:
                 app.logger.warning("项目创建的 slide_id 双写补齐失败：%s",
                                    pid, exc_info=True)
@@ -27881,6 +27880,9 @@ def api_project_add_slides(pid):
 
     Stage 3a-2a：owner 任意；user 仅自己。P2（合同 §3.2）：slide_ids 优先；
     成员须解析到已存在 ready 资产；双列写入；同名不同 ID 可并存。
+    P0-W2（审计 P0-2）：成员切片归属校验（user 仅自己的切片，owner 角色
+    豁免）——HTTP 层 _resolve_slide_refs_for_project 先行，store 层复核
+    （PermissionError → 403，fail-closed）。
     """
     if not _can_access_project(pid):
         return _denied()
@@ -27892,7 +27894,12 @@ def api_project_add_slides(pid):
     names, sids, err = _resolve_slide_refs_for_project(entries, field="add")
     if err is not None:
         return err
-    proj = share_store.add_slides_to_project(pid, names, slide_ids=sids)
+    try:
+        proj = share_store.add_slides_to_project(
+            pid, names, slide_ids=sids,
+            requester_role=current_identity()["role"])
+    except PermissionError as e:
+        return jsonify(error=str(e), code="slide_not_owned"), 403
     if proj is None:
         return jsonify(error="项目不存在"), 404
     return jsonify(proj)
