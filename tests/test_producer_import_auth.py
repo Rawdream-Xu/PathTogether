@@ -151,10 +151,11 @@ def test_install_without_approval_fails_closed(monkeypatch, tmp_path):
         "permissions": ["slide:metadata:read", "slide:import"],
     }
     monkeypatch.setattr(
-        app_mod, "_read_plugin_bundle_manifest",
-        lambda key: (dict(manifest), None))
+        app_mod, "_read_plugin_bundle_manifest_raw",
+        lambda key: (b"", dict(manifest), None))
+    # P0-W3：安装路径把单次读取的 raw bytes 传给策略函数（manifest_bytes）
     monkeypatch.setattr(app_mod, "plugin_source_allowed",
-                        lambda key: (True, ""))
+                        lambda key, manifest_bytes=None: (True, ""))
     with app_mod.app.test_request_context("/api/admin/plugins/install"):
         inst, err = app_mod.install_plugin_bundle("approve-test")
         assert inst is None and err is not None

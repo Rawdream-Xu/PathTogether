@@ -3432,16 +3432,22 @@ def _plugin_dir(plugin_id):
 # --------------------------------------------------------------------------- #
 # 产品约束：不做 SaaS 级 PKI/插件商店。策略随代码/镜像版本化（repo 内
 # ``plugins/source-policy.json``，随 ``COPY plugins/`` 进镜像），owner 通过改这个文件
-# 批准某插件目录的 manifest 内容；**不写数据库**，重启生效。文件缺失 = dev 模式全放行。
+# 批准某插件目录的 manifest 内容；**不写数据库**，重启生效。
+# P0-W3（审计 P0-4a，2026-11-11）：语义由 fail-open 改为 **fail-closed**——未 pin
+# 插件默认拒绝，仅当策略显式配 ``"default": "allow"`` 时放行；策略文件缺失 /
+# 不可解析的空表情同未配置（不再 dev 模式全放行）。
 @functools.lru_cache(maxsize=1)
 def _plugin_source_policy():
     """模块级懒加载 + 缓存读取来源策略（manifest sha256 pin 表）。
 
     - env ``PLUGINS_SOURCE_POLICY_FILE`` 指定策略文件路径；缺省
       ``plugins/source-policy.json``（随镜像分发）。
-    - 文件缺失 / 不可解析 → 返回空 dict（**dev 模式全放行**），启动日志一行 warning。
+    - 文件缺失 / 不可解析 → 返回空 dict（**fail-closed**：空表下未 pin 插件
+      一律拒绝，见 plugin_source_allowed），启动日志一行 warning。
     - 返回 ``{ "<plugin_key>": "<sha256 hex>" | null, ... }``——key 是 ``plugins/`` 下
-      目录名，value 为期望的 manifest sha256（null = 显式放行）。
+      目录名，value 为期望的 manifest sha256（null = 显式放行）；保留键
+      ``"default"``：值为精确字符串 ``"allow"`` 时放行全部未 pin 插件（其余值
+      一律按拒绝），不与插件目录名冲突。
 
     缓存为模块级（``lru_cache(maxsize=1)``）：进程生命周期内策略固定，重启重新读取。
     测试可用 ``_plugin_source_policy.cache_clear()`` 在改 env 后强制重读。
@@ -3465,38 +3471,48 @@ def _plugin_source_policy():
     return data
 
 
-def plugin_source_allowed(plugin_id):
-    """检查插件来源策略是否放行（manifest sha256 pin，Stage 5-3）。
+def plugin_source_allowed(plugin_id, manifest_bytes=None):
+    """检查插件来源策略是否放行（manifest sha256 pin；P0-W3 起 fail-closed）。
 
-    返回 ``(allowed: bool, reason: str)``：
+    ``manifest_bytes``：调用方**已读取**的 manifest raw bytes（单次消费）。安装路径
+    （install_plugin_bundle）解析 manifest 与来源校验此前各读一次磁盘，竞速窗口内
+    两读内容可漂移（TOCTOU，审计 P0-4 附带项）；现在同一次读取的 bytes 同时供
+    JSON 解析与本函数哈希。``None`` 时本函数自读磁盘（UI 资产路由 / 首页注入等
+    单读者场景，无二次消费问题）。
 
-    - 策略未配置（dev 模式空表）→ ``(True, "source policy not configured (dev mode)")``；
-    - 插件不在策略表内（未 pin）→ ``(True, "source not pinned")``；
+    返回 ``(allowed: bool, reason: str)``（P0-W3 语义，默认拒绝）：
+
+    - 插件不在策略表内（未 pin；含策略文件缺失/不可解析的空表）→ 仅当策略
+      显式 ``"default": "allow"`` 时 ``(True, "source not pinned (default allow)")``，
+      否则 ``(False, "source not pinned")``——修复前对未 pin 插件放行的
+      fail-open 破绽（审计 P0-4a）；
     - 策略值为 ``null``（显式放行）→ ``(True, "explicitly allowed")``；
-    - manifest 缺失 → ``(False, "manifest missing")``；
-    - 策略期望 sha256 与磁盘 manifest 实际 sha256 不等 →
-      ``(False, "source policy mismatch")``；
+    - manifest 缺失（自读磁盘失败 / 目录不存在）→ ``(False, "manifest missing")``；
+    - 期望 sha256 与 manifest 实际 sha256 不等 → ``(False, "source policy mismatch")``；
     - 相等 → ``(True, "ok")``。
 
-    比较 hmac.compare_digest 常数时间（虽非密钥比较，零成本稳健）。manifest 读取用
-    raw bytes（``read_bytes``）与 ``shasum -a 256`` 结果一致，避免编码/换行归一漂移。
+    比较 hmac.compare_digest 常数时间（虽非密钥比较，零成本稳健）。哈希一律对
+    raw bytes 计算（``shasum -a 256`` 口径），避免编码/换行归一漂移；行尾契约由
+    ``.gitattributes``（``plugins/** text eol=lf``）保证检出即 LF（审计 P-3b）。
     """
     policy = _plugin_source_policy()
-    if not policy:
-        return (True, "source policy not configured (dev mode)")
     if plugin_id not in policy:
-        return (True, "source not pinned")
+        if policy.get("default") == "allow":
+            return (True, "source not pinned (default allow)")
+        return (False, "source not pinned")
     expected = policy[plugin_id]
     if expected is None:
         return (True, "explicitly allowed")
-    plugin_dir = _plugin_dir(plugin_id)
-    mf = plugin_dir / "manifest.json" if plugin_dir is not None else None
-    try:
-        digest = hashlib.sha256(mf.read_bytes()).hexdigest() if mf is not None else ""
-    except OSError:
-        return (False, "manifest missing")
-    if not digest:
-        return (False, "manifest missing")
+    if manifest_bytes is None:
+        plugin_dir = _plugin_dir(plugin_id)
+        mf = plugin_dir / "manifest.json" if plugin_dir is not None else None
+        try:
+            manifest_bytes = mf.read_bytes() if mf is not None else b""
+        except OSError:
+            return (False, "manifest missing")
+        if not manifest_bytes:
+            return (False, "manifest missing")
+    digest = hashlib.sha256(manifest_bytes).hexdigest()
     if hmac.compare_digest(digest, str(expected)):
         return (True, "ok")
     return (False, "source policy mismatch")
@@ -5324,7 +5340,9 @@ def plugin_ui_asset(plugin_id, filename):
 #      ui.slots 含 admin.workspace；
 #   ④ 存在该 plugin_id 且 enabled 的 installation 行。
 # 任何一步缺失/异常 → 不可信（_admin_plugin_trusted 内整体 try/except 兜底）。
-# 普通插件（viewer）沿用 plugin_source_allowed 的既有 fail-open 语义，不受影响。
+# 普通插件（viewer）走 plugin_source_allowed 的 P0-W3 fail-closed 语义：未 pin
+# 默认拒绝，仅策略显式 "default": "allow" 时放行（与 admin 的显式 pin 要求
+# 方向一致，宽松度不同——admin 永不接受 default 放行）。
 # --------------------------------------------------------------------------- #
 #: 代码级特权 admin 插件白名单（§8.2）：不随 manifest/策略文件/数据库变化，
 #: 新增 admin 插件必须改代码发版。
@@ -16251,15 +16269,19 @@ def _slide_delete_unified(desc, requested_by, *, legacy_response=False):
     随后同步尝试执行一次（用户感知与 P3 内联版一致）；执行异常返回 503
     （delete_retryable），daemon 按 lease+退避兜底。
 
-    可删态口径：id_bundle 恒 ready（状态机严格）；legacy 布局资产放行
-    ready/legacy/failed（迁移期清理语义——旧行 any-state 可删的能力保留，
-    failed 行的文件多已缺失，结算幂等不受影响）。staging 恒 409。
+    可删态口径：id_bundle 放行 ready/**failed**（P0-W4/审计 P0-3 d：
+    failed 产物包——_fail 撤包失败或历史遗留的孤儿——由删除编排兜底
+    收走；failed 从未结算 → accounted_bytes NULL → refund 0，不减账、
+    不破坏 R-12 幂等）；legacy 布局资产放行 ready/legacy/failed（迁移期
+    清理语义——旧行 any-state 可删的能力保留，failed 行的文件多已缺失，
+    结算幂等不受影响）。staging 恒 409。
     """
     sid = desc.slide_id
     legacy_layout = desc.storage_layout != slide_store.StorageLayout.ID_BUNDLE
     allowed = ((slide_store.SlideState.READY, slide_store.SlideState.LEGACY,
                 slide_store.SlideState.FAILED) if legacy_layout
-               else (slide_store.SlideState.READY,))
+               else (slide_store.SlideState.READY,
+                     slide_store.SlideState.FAILED))
     state = None
     import psycopg.rows
     conn = pg_store.connect()
@@ -18301,33 +18323,42 @@ def _parse_provides_registry(manifest):
     return out
 
 
-def _read_plugin_bundle_manifest(plugin_key):
-    """读取插件 bundle 的 manifest.json（plugin_key 是 plugins/ 下目录名）。
+def _read_plugin_bundle_manifest_raw(plugin_key):
+    """读取插件 bundle 的 manifest.json：**单次读取** raw bytes 并解析。
 
-    返回 (manifest_dict, None) 或 (None, (resp, status))：
+    返回 (raw_bytes, manifest_dict, None) 或 (None, None, (resp, status))：
     目录不存在/manifest 缺失/不可解析 → 400 invalid_request。
+
+    raw bytes 与 JSON 解析同源同读：安装路径把同一份 bytes 交给
+    plugin_source_allowed 做 sha256 pin 校验，消除「读两次、验第二次」的
+    TOCTOU 竞速（P0-W3；此前 _read_plugin_bundle_manifest 与
+    plugin_source_allowed 各自读盘，窗口内磁盘内容可变）。
     """
     plugin_dir = _plugin_dir(plugin_key)
     mf = plugin_dir / "manifest.json" if plugin_dir is not None else None
     if mf is None or not mf.is_file():
-        return None, (jsonify(error="插件目录或 manifest.json 不存在",
+        return None, None, (jsonify(error="插件目录或 manifest.json 不存在",
                               plugin=plugin_key), 400)
     try:
-        manifest = json.loads(mf.read_text(encoding="utf-8"))
+        raw = mf.read_bytes()
+        manifest = json.loads(raw.decode("utf-8"))
     except (OSError, ValueError) as e:
-        return None, (jsonify(error="manifest.json 解析失败：%s" % e,
+        return None, None, (jsonify(error="manifest.json 解析失败：%s" % e,
                               plugin=plugin_key), 400)
     if not isinstance(manifest, dict):
-        return None, (jsonify(error="manifest 顶层需为对象", plugin=plugin_key), 400)
-    return manifest, None
+        return None, None, (jsonify(error="manifest 顶层需为对象",
+                              plugin=plugin_key), 400)
+    return raw, manifest, None
 
 
 def install_plugin_bundle(plugin_key, approved_permissions=None):
     """安装/更新插件 bundle：解析 manifest → 来源策略 → 登记能力注册表。
 
     返回 (installation_dict, None) 或 (None, (resp, status))。流程（docs §4.1）：
-      1. manifest 读取（结构错误 400）；
-      2. 来源策略校验（sha256 pin 不符 403，沿用 plugin_source_allowed）；
+      1. manifest 读取（结构错误 400）——raw bytes 单次读取，解析与第 2 步
+         哈希校验消费同一份内容（TOCTOU 收敛，P0-W3）；
+      2. 来源策略校验（sha256 pin 不符 / 未 pin 且无 default:allow → 403，
+         plugin_source_allowed P0-W3 起 fail-closed）；
       3. provides 解析（任何校验错误 400——登记失败 = 安装失败，fail-closed）；
       4. 扩展权限审批（C5 合同 §2.1）：manifest.permissions 申请
          MANIFEST_APPROVAL_REQUIRED_PERMISSIONS（当前仅 slide:import）而
@@ -18336,10 +18367,10 @@ def install_plugin_bundle(plugin_key, approved_permissions=None):
       5. 同 plugin_id 已有安装行 → 整体替换 capabilities（版本随之刷新）；
          否则创建新安装行（secret 平台生成，明文不落盘不返回）。
     """
-    manifest, mf_err = _read_plugin_bundle_manifest(plugin_key)
+    raw_manifest, manifest, mf_err = _read_plugin_bundle_manifest_raw(plugin_key)
     if mf_err is not None:
         return None, mf_err
-    allowed, reason = plugin_source_allowed(plugin_key)
+    allowed, reason = plugin_source_allowed(plugin_key, manifest_bytes=raw_manifest)
     if not allowed:
         return None, (jsonify(error="来源策略拒绝：%s" % reason,
                               plugin=plugin_key), 403)
