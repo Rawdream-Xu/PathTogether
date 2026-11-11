@@ -42,6 +42,8 @@ IO——一切落盘经 slide_storage 的白名单原语（路径段全部服务
 from __future__ import annotations
 
 import hashlib
+import logging
+import os
 
 import cos_config
 import ingestion_store as ist
@@ -233,14 +235,20 @@ def handle_create(ident, body, product_max_bytes):
 
     # 创建后立即尝试准入（本地配额/水位/活跃上限；不足转等待）。
     # 首次部署 UPLOAD_DIR 可能尚不存在——先建根再探测（水位探测对不
-    # 存在目录抛异常会误把任务转 waiting）。
+    # 存在目录抛异常会误把任务转 waiting）。探测意外异常**记日志**——
+    # 静默吞掉会把真实故障（配置/权限）伪装成容量等待。
     try:
         import upload_guard
         root = _upload_root()
         os.makedirs(root, exist_ok=True)
         upload_guard.check_disk_watermark(root)
         watermark_ok = True
-    except Exception:  # noqa: BLE001 - 水位探测失败按不通过处理（fail-closed）
+    except upload_guard.DiskWatermarkExceeded:
+        watermark_ok = False          # 真水位不足：正常转等待
+    except Exception:  # noqa: BLE001 - 意外故障也按不通过处理（fail-closed）
+        logging.getLogger(__name__).warning(
+            "本地直传水位探测异常（按 fail-closed 转等待）",
+            exc_info=True)
         watermark_ok = False
     out = ist.try_admit_job(job["job_id"], disk_watermark_ok=watermark_ok)
     job = out["job"] or job
