@@ -354,7 +354,21 @@
 
   function togglePickerPop() {
     if (_pop && _pop.isConnected) { closePickerPop(); return; }
-    if (!_providers.length) return;
+    if (!_providers.length) {
+      // 空态引导：未配置供应商时给出可执行路径（owner 直达设置）
+      _pop = el("div", "llmv-pop llmv-pop-empty");
+      _pop.appendChild(el("div", "llmv-pop-title", "AI 供应商 / 模型"));
+      _pop.appendChild(el("p", "llmv-pop-hint",
+        "暂无可用供应商。请先在 账户设置 → AI 供应商 中新增（支持 DeepSeek / " +
+        "GLM / Qwen / 豆包 / OpenAI / Claude / Gemini 等主流视觉模型）。"));
+      document.body.appendChild(_pop);
+      var rr = _deps.caret.getBoundingClientRect();
+      _pop.style.left = Math.max(8, Math.min(rr.left,
+        window.innerWidth - (_pop.offsetWidth || 260) - 8)) + "px";
+      _pop.style.top = (rr.bottom + 6) + "px";
+      document.addEventListener("pointerdown", _popOutside, true);
+      return;
+    }
     var cur = effectivePick();
     _pop = el("div", "llmv-pop");
     _pop.setAttribute("role", "menu");

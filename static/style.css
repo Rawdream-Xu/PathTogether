@@ -5676,3 +5676,6 @@ body.app-mode-official { overflow: clip; }
 .llmv-pop-on { color: #1a73e8; font-weight: 600; }
 .llmv-pop-reset { border-top: 1px solid var(--line, #eee); margin-top: 4px;
   color: #666; padding-left: 12px; }
+/* 切换弹层空态引导 */
+.llmv-pop-empty { max-width: 300px; }
+.llmv-pop-hint { font-size: 12px; color: #666; margin: 8px 12px; line-height: 1.6; }

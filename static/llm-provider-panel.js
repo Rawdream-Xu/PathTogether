@@ -17,25 +17,52 @@
 (function () {
   "use strict";
 
-  // 预填模板（docs/llm-vision-w0-decisions.md D1；不含任何凭据）
+  // 预填模板（docs/llm-vision-w0-decisions.md D1；不含任何凭据）。
+  // 主流供应商全谱：models 首个为该家有视觉能力的推荐默认模型
+  //（models 列表可逗号分隔多个，均走 OpenAI 兼容 chat.completions）。
   var PRESETS = [
-    { id: "deepseek", label: "DeepSeek", base_url: "https://api.deepseek.com/v1",
-      models: "deepseek-chat" },
+    // —— 国内 ——
+    { id: "deepseek", label: "DeepSeek（深度求索）", base_url: "https://api.deepseek.com/v1",
+      models: "deepseek-chat, deepseek-reasoner" },
     { id: "glm", label: "智谱 GLM", base_url: "https://open.bigmodel.cn/api/paas/v4",
-      models: "glm-4v" },
-    { id: "qwen", label: "通义千问 Qwen-VL", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-      models: "qwen-vl-max" },
+      models: "glm-4v, glm-4v-plus, glm-4.5v" },
+    { id: "qwen", label: "通义千问 Qwen-VL（阿里百炼）", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      models: "qwen-vl-max, qwen-vl-plus, qwen2.5-vl-72b-instruct" },
+    { id: "doubao", label: "豆包视觉（火山引擎）", base_url: "https://ark.cn-beijing.volces.com/api/v3",
+      models: "doubao-1.5-vision-pro-32k, doubao-vision-pro-32k" },
+    { id: "hunyuan", label: "腾讯混元", base_url: "https://api.hunyuan.cloud.tencent.com/v1",
+      models: "hunyuan-vision" },
+    { id: "kimi", label: "Kimi（月之暗面）", base_url: "https://api.moonshot.cn/v1",
+      models: "moonshot-v1-8k-vision-preview, kimi-latest" },
+    { id: "step", label: "阶跃星辰 Step", base_url: "https://api.stepfun.com/v1",
+      models: "step-1v-8k, step-1o-turbo-vision" },
+    { id: "siliconflow", label: "硅基流动 SiliconFlow", base_url: "https://api.siliconflow.cn/v1",
+      models: "Qwen/Qwen2.5-VL-72B-Instruct, deepseek-ai/DeepSeek-VL2" },
+    // —— 国际 ——
     { id: "openai", label: "OpenAI", base_url: "https://api.openai.com/v1",
-      models: "gpt-4o" },
-    { id: "openrouter", label: "OpenRouter", base_url: "https://openrouter.ai/api/v1",
+      models: "gpt-4o, gpt-4o-mini, gpt-4.1" },
+    { id: "azure", label: "Azure OpenAI", base_url: "https://YOUR-RESOURCE.openai.azure.com/openai/v1",
+      models: "gpt-4o",
+      note: "Azure 预设：把 YOUR-RESOURCE 替换为你的资源名；部署密钥在 Azure 门户获取。" },
+    { id: "claude", label: "Claude（Anthropic 官方兼容层）", base_url: "https://api.anthropic.com/openai/v1",
+      models: "claude-sonnet-4-5, claude-opus-4-1" },
+    { id: "gemini", label: "Gemini（Google 官方兼容层）", base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+      models: "gemini-2.5-flash, gemini-2.0-flash" },
+    { id: "grok", label: "Grok（xAI）", base_url: "https://api.x.ai/v1",
+      models: "grok-2-vision-1212, grok-4" },
+    { id: "mistral", label: "Mistral", base_url: "https://api.mistral.ai/v1",
+      models: "pixtral-large-latest, mistral-medium-latest" },
+    { id: "openrouter", label: "OpenRouter（多模型聚合）", base_url: "https://openrouter.ai/api/v1",
+      models: "openai/gpt-4o, anthropic/claude-sonnet-4.5, google/gemini-2.0-flash-001" },
+    { id: "together", label: "Together AI", base_url: "https://api.together.xyz/v1",
+      models: "meta-llama/Llama-3.2-90B-Vision-Instruct-Turbo" },
+    { id: "groq", label: "Groq", base_url: "https://api.groq.com/openai/v1",
+      models: "meta-llama/llama-4-scout-17b-16e-instruct" },
+    { id: "ollama", label: "Ollama（本地模型）", base_url: "http://localhost:11434/v1",
+      models: "llama3.2-vision, llava",
+      note: "本地回环地址默认被 SSRF 防线拒绝：需在部署侧设置 LLM_VISION_ALLOW_PRIVATE_UPSTREAM=0 之外的环境放行策略（联系管理员）。" },
+    { id: "custom", label: "自定义 / 自建 vLLM", base_url: "",
       models: "" },
-    { id: "moonshot", label: "Moonshot", base_url: "https://api.moonshot.cn/v1",
-      models: "" },
-    { id: "claude", label: "Claude（OpenAI 兼容层）", base_url: "https://api.anthropic.com/openai/v1",
-      models: "claude-sonnet-4-5" },
-    { id: "gemini", label: "Gemini（OpenAI 兼容层）", base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
-      models: "gemini-2.0-flash" },
-    { id: "custom", label: "自定义 / 自建 vLLM", base_url: "", models: "" },
   ];
 
   var _deps = null;
@@ -141,8 +168,9 @@
   function renderForm(p) {
     var form = el("div", "llmp-form");
     var isEdit = !!p.provider_id;
+    var msg = el("p", "llmp-msg", "");   // 预设说明/校验/结果共用消息行
 
-    // 预设（仅新增时显示；选择后预填 base_url/models）
+    // 预设（仅新增时显示；选择后预填 base_url/models/默认模型）
     if (!isEdit) {
       var sel = document.createElement("select");
       sel.className = "llmp-input";
@@ -156,9 +184,15 @@
         if (!ps) return;
         fBaseUrl.value = ps.base_url;
         fModels.value = ps.models;
+        // 首个推荐模型作为默认模型预填（均在该家有视觉能力的模型）
+        var firstModel = ps.models.split(",")[0].trim();
+        if (firstModel) fDefaultModel.value = firstModel;
         if (ps.label && !fName.value) fName.value = ps.label.split("（")[0];
+        // 特殊预设提示（Azure 占位符 / 本地回环需部署侧放行）
+        msg.textContent = ps.note || "";
       });
-      form.appendChild(field("供应商预设", sel, "按供应商预填 base_url 模板（Claude/Gemini 走官方 OpenAI 兼容层）"));
+      form.appendChild(field("供应商预设", sel,
+        "按供应商预填 base_url 与推荐视觉模型（均走 OpenAI 兼容协议）"));
     }
 
     var fName = input("text", p.name, "如 DeepSeek");
@@ -176,7 +210,8 @@
     var fModels = input("text", (p.models || []).join(", "), "glm-4v, glm-4v-plus");
     form.appendChild(field("模型列表（逗号分隔）", fModels));
 
-    var fDefaultModel = input("text", p.default_model, "默认模型需在列表内");
+    var fDefaultModel = input("text", p.default_model,
+      "默认模型需在列表内（首个模型为该家推荐视觉模型）");
     form.appendChild(field("默认模型", fDefaultModel));
 
     var fEnabled = document.createElement("input");
@@ -186,7 +221,6 @@
     form.appendChild(field("启用", fEnabled));
     form.appendChild(field("设为平台默认（识图入口使用）", fIsDefault));
 
-    var msg = el("p", "llmp-msg", "");
     var foot = el("div", "llmp-form-foot");
 
     var testB = el("button", "btn secondary small", "测试连接");
