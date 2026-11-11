@@ -56,6 +56,9 @@
   <!-- COS 直传共享引擎（C4）：工作台与 /tools/slides 共用；先于 app.js 加载，
        提供 window.HP_COS_UPLOAD（无 DOM/无 i18n，依赖全部注入） -->
   <script src="/static/upload/cos-uploader.js?v=20261015"></script>
+  <!-- P0-W6a 本地直传引擎：分片直接 POST 平台（无 COS 凭证的裸部署通道）；
+       app.js 按 bootstrap.capabilities.local_upload 选择通道（local 优先） -->
+  <script src="/static/upload/local-uploader.js?v=20261111"></script>
   <script src="/static/upload/slide-sniff.js?v=20261106c"></script>
   <!-- MRXS「先选 .mrxs，再选同名数据文件夹」共享协助逻辑：classic script
        （无 DOM/i18n）；面板编排器与工作台接线都读 window.HP_MRXS_COMPANION -->
