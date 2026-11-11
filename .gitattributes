@@ -5,11 +5,17 @@
 # 契约：文本文件入库一律归一 LF（text=auto）；哈希敏感路径（plugins/**、
 # *.json、*.sh、*.py）出库（检出）也强制 LF——任意平台重新克隆，磁盘
 # 字节 == index blob == pin 计算输入。
+# P0-W6 追加（2026-11-11）：static 下 JS 与 tests/js 检出也强制 LF——前端
+# 测试大量按 app.js/inline-convert.js 的源码切片（indexOf 锚点）注入沙箱
+# 执行，CRLF 检出让锚点静默失配（Windows autocrlf 工作区上切片测试成片
+# 误报）；与 *.py 同款理由（切片/哈希敏感）。
 * text=auto
 *.json text eol=lf
 plugins/** text eol=lf
 *.sh text eol=lf
 *.py text eol=lf
+static/**/*.js text eol=lf
+tests/js/** text eol=lf
 # 证据/日志捕获件按字节保存：混合行尾是记录的一部分，不参与归一化
 # （renormalize 不改写这两个文件，避免审计证据字节漂移）
 artifacts/image-transport-upgrade/2026-09-06T02-09-45Z/B7/rollback-drill.log.txt -text
