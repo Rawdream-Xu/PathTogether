@@ -75,7 +75,6 @@ import cos_config  # noqa: E402
 import cos_pool_store  # noqa: E402
 import ingestion_store as ist  # noqa: E402
 import pg_store  # noqa: E402
-import slide_format_registry  # noqa: E402
 import slide_io  # noqa: E402
 import slide_publish  # noqa: E402
 import slide_storage  # noqa: E402
@@ -256,6 +255,34 @@ def _release_lease(job_id, token, state=None):
         ist.release_worker_lease(job_id, token)
     except Exception:  # noqa: BLE001
         _log.debug("release_worker_lease 失败（job=%s）", job_id)
+
+
+def _missing_scale_warnings(osr, path):
+    """上传期物理尺度探测（W6b）：无任何 mpp 来源 → ["mpp_missing"]。
+
+    判定与读端（app._read_metadata / share_server._read_metadata）的解析
+    优先级同构：properties 有 mpp-x（OME/厂商）→ 无警告；可按物镜倍率
+    估算（objective-power）→ 无警告；TIFF 分辨率标签在合理性窗口内
+    （slide_io.mpp_from_tiff_resolution 共享实现）→ 无警告；光栅图恒无
+    物理标尺（raster-image-compat §4.4：DPI/EXIF 不得当 µm/px）→ 缺失；
+    TMAP06 未标定产物 → 缺失。**警告不阻断**——随 warnings_json 透出，
+    前端引导经 W6c PATCH 补录。
+    """
+    try:
+        props = getattr(osr, "properties", None) or {}
+        if props.get("openslide.mpp-x") and props.get("openslide.mpp-y"):
+            return []
+        if getattr(osr, "is_raster_image", False):
+            return ["mpp_missing"]
+        if upload_direct_class.declares_unknown_physical_scale(path):
+            return ["mpp_missing"]
+        if props.get("openslide.objective-power"):
+            return []          # 读端可按倍率估算（estimated）
+        if slide_io.mpp_from_tiff_resolution(path)[0] is not None:
+            return []          # TIFF 真实标尺（tiff-resolution）
+        return ["mpp_missing"]
+    except Exception:  # noqa: BLE001 - 探测失败不构成失败依据
+        return []
 
 
 # --------------------------------------------------------------------------- #
@@ -719,6 +746,11 @@ def _fetch_range(cos, key, version_id, start, end, declared_size,
 def process_downloading(cos=None, state=None):
     """领取 DOWNLOADING：断点续传至读满 declared → 流式 SHA-256 → validating。
 
+    P0-W6a：``local_http`` 任务在此段**就地把 staging 件转 validating**
+    （无 COS 下载——分片已在 upload-complete 拼接为入口件），大小核对 +
+    流式 SHA-256 + checkpoint 记账后走与 COS 任务完全相同的
+    validating→readiness→publish 链（见 _local_download_finalize）。
+
     P4-b（合同 §5.3）：暂存件落 ``.staging/<job_id>/<worker_generation>/
     data.<ext>``（slide_storage.staging_dir；不再平铺 ``<job_id>.part``）
     ——重领换代后由 ``_adopt_staged_data`` 收养上一代断点件，续传语义不变：
@@ -747,6 +779,8 @@ def process_downloading(cos=None, state=None):
         [ist.DOWNLOADING], holding_token=state.get("download_token"))
     if job is None:
         return None
+    if (job.get("transport") or "") == ist.TRANSPORT_LOCAL:
+        return _local_download_finalize(job, state)
     job_id = job["job_id"]
     gen = job["worker_generation"]
     token = job["worker_lease_token"]
@@ -774,6 +808,66 @@ def process_downloading(cos=None, state=None):
                 ist._local_cleanup_finish(jid)
             except Exception:  # noqa: BLE001
                 _log.exception("延迟本地清理失败（job=%s）", jid)
+
+
+def _local_download_finalize(job, state):
+    """local_http 任务的 downloading 段（P0-W6a）：staging 就地校验。
+
+    分片已在 upload-complete 拼接为 ``.staging/<job_id>/0/data.<ext>``
+    （浏览器代），这里收养入本代目录 → 大小核对 → 流式 SHA-256（写入
+    checkpoint——validating 段直接复用，不重算）→ 转 validating。此后
+    open_slide 校验、统一发布、readiness 与 COS 任务同一条链。
+
+    R12：任务存储锁内重验（state=downloading、generation 未变）；确定性
+    失败（入口件缺失/大小不符）终态短事务，文件清理延迟到锁外。
+    """
+    job_id = job["job_id"]
+    gen = job["worker_generation"]
+    token = job["worker_lease_token"]
+    declared = int(job["declared_size"])
+    ext = (job.get("format_ext") or "").strip().lower() or "dat"
+    directory = _ensure_upload_dir()
+    cleanup_due = []
+    with task_storage_lock.task_storage_lock("ingestion_job", job_id):
+        if not _reverify_job_for_io(job_id, gen, ist.DOWNLOADING):
+            return None
+        staged = _adopt_staged_data(job_id, gen, ext, root=directory)
+        if staged is None:
+            try:
+                ist._terminate_fail_tx(job_id, gen, "part_missing")
+                cleanup_due.append(job_id)
+            except ist.StaleLease:
+                pass
+            _log.warning("本地直传入口件缺失（job=%s）", job_id)
+        elif os.path.getsize(staged) != declared:
+            try:
+                ist._terminate_fail_tx(job_id, gen, "local_size_mismatch")
+                cleanup_due.append(job_id)
+            except ist.StaleLease:
+                pass
+            _log.warning("本地直传入口件大小不符（job=%s）", job_id)
+        else:
+            sha = _sha256_file(staged)
+            try:
+                ist.worker_update_download_progress(
+                    job_id, gen, downloaded_bytes=declared,
+                    checkpoint={"next_offset": declared, "sha256": sha},
+                    wire_delta=0, logical_delta=declared)
+                ist.worker_begin_validating(job_id, gen)
+                _log.info("local_http 就地转 validating（job=%s）", job_id)
+            except ist.StaleLease:
+                return None
+            except ist.IngestionStateError:
+                return None  # 并发推进（取消/换代先赢）——静默放弃
+            _release_lease(job_id, token, state)
+            return job_id
+    for jid in cleanup_due:
+        try:
+            ist._local_cleanup_finish(jid)
+        except Exception:  # noqa: BLE001
+            _log.exception("延迟本地清理失败（job=%s）", jid)
+    _release_lease(job_id, token, state)
+    return None
 
 
 def _downloading_critical_section(cos, job, key, version_id, declared,
@@ -1077,14 +1171,10 @@ def _validating_critical_section(job, state, cleanup_due):
                     "内容级直传关闭命中（job=%s ext=%s）：JPEG 编码 Aperio "
                     "SVS 须在本机转换后上传", job_id, ext)
                 return None
-            # 2026-11-05：普通图片原图不再入库（创建闸已 422，这里兜住升级
-            # 窗口里仍在排队的旧任务）。只允许浏览器转换后的 OME-TIFF。
-            if slide_format_registry.is_raster_image_ext(
-                    job.get("filename") or job.get("safe_name") or entry):
-                _fail("raster_requires_conversion")
-                _log.warning("普通图片原图直传已关闭（job=%s ext=%s）："
-                             "须在本机转换后上传", job_id, ext)
-                return None
+            # P0-W6b（2026-11-11 解禁）：普通图片（.bmp/.jpg/.jpeg）直传
+            # 恢复受理——RasterSlide 直读，伪装/截断/超限校验由 open_slide
+            # 终审全量生效；缺 mpp 只落 warnings_json（不阻断）。
+            upload_warnings = []
             try:
                 # open_slide 试开+关（app.py:_validate_slide_file 同口径；
                 # format_hint 用客户端文件名——暂存件扩展名不参与逻辑格式判定）。
@@ -1092,9 +1182,13 @@ def _validating_critical_section(job, state, cleanup_due):
                     staged, format_hint=(job.get("filename")
                                          or job.get("safe_name") or entry))
                 try:
-                    opened.close()
-                except Exception:  # noqa: BLE001
-                    pass
+                    # W6b：物理尺度探测（close 前取 properties）。
+                    upload_warnings = _missing_scale_warnings(opened, staged)
+                finally:
+                    try:
+                        opened.close()
+                    except Exception:  # noqa: BLE001
+                        pass
             except slide_io.SlideValidationError as exc:
                 # upload-liveness：记录稳定机器码与底层异常类型（不含文件
                 # 内容/路径），并把白名单细节随终态落库（fail_detail）供
@@ -1111,6 +1205,8 @@ def _validating_critical_section(job, state, cleanup_due):
                 _log.warning("open_slide 校验失败（job=%s）：%s", job_id,
                              type(exc).__name__)
                 return None
+            if upload_warnings:
+                ist.note_warnings(job_id, upload_warnings)
             sha = (job.get("download_checkpoint_json") or {}).get("sha256") or ""
             if not sha:
                 sha = _sha256_file(staged)

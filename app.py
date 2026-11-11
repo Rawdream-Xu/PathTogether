@@ -70,6 +70,7 @@ import slide_io
 import slide_publish
 import slide_store
 import slide_storage
+import slide_meta_http
 import task_storage_lock
 # 先转换后上传阶段 1：direct_class 声明词表与头级核验（worker/百度共用
 # 实现；本文件只在创建时做词表/扩展名匹配，不做文件头读取）。
@@ -153,6 +154,7 @@ import cos_client
 import cos_config
 import cos_pool_store
 import ingestion_store
+import local_ingest_http
 import producer_import_store
 # SER-8 测试申请：通道已于 2026-10-09 §2 整体退役——test_application_store
 # 删除，/api/account/test-application 与 /api/admin/v1/test-applications*
@@ -2165,44 +2167,17 @@ def _to_float(v):
 
 
 def _mpp_from_tiff_resolution(path: Path):
-    """从 TIFF 分辨率标签（真实坐标尺）读取 mpp。
-
-    许多扫描仪/转换软件生成的 TIFF 类切片没有厂商 mpp 元数据，
-    但写入了标准的 XResolution/YResolution + ResolutionUnit 标签：
-    - ResolutionUnit=2（英寸）：mpp(µm/px) = 25400 / XResolution
-    - ResolutionUnit=3（厘米）：mpp(µm/px) = 10000 / XResolution
-    读取失败或数值不合理时返回 (None, None)。
-    """
-    try:
-        from PIL import Image
-        from PIL.TiffTags import TAGS_V2  # noqa: F401  确保标签表初始化
-
-        with Image.open(str(path)) as img:
-            tags = getattr(img, "tag_v2", None)
-            if not tags:
-                return None, None
-            x_res = _to_float(tags.get(282))  # XResolution
-            y_res = _to_float(tags.get(283))  # YResolution
-            unit = tags.get(296, 2)           # ResolutionUnit，默认英寸
-            if not x_res or x_res <= 0:
-                return None, None
-            factor = 25400.0 if unit == 2 else (10000.0 if unit == 3 else None)
-            if factor is None:
-                return None, None
-            mpp_x = factor / x_res
-            mpp_y = factor / y_res if y_res and y_res > 0 else mpp_x
-            # 合理性检查：病理切片 mpp 一般在 0.1 ~ 2.0 µm/px 之间
-            if 0.05 <= mpp_x <= 3.0:
-                return mpp_x, mpp_y
-    except Exception:
-        pass
-    return None, None
+    """从 TIFF 分辨率标签（真实坐标尺）读取 mpp（P0-W6 起共享实现）。"""
+    return slide_io.mpp_from_tiff_resolution(path)
 
 
-def _read_metadata(osr: OpenSlide, path: Path) -> dict:
+def _read_metadata(osr: OpenSlide, path: Path, slide_id: str = None) -> dict:
     """读取尺寸与 mpp 等元数据。
 
-    mpp 取值优先级（均为真实坐标尺，最后一个才是估算）：
+    mpp 取值优先级（均为真实坐标尺，最后一个才是估算；P0-W6c 起顶层为
+    手补覆盖）：
+    0. slide_mpp_overrides 手补行（来源 manual——W6c PATCH 补录，只覆盖
+       已补录的轴；``slide_id`` 为 None 时不查）
     1. 厂商元数据 openslide.mpp-x/y（Aperio/滨松等，最可靠）
     2. TIFF 标准分辨率标签 XResolution + ResolutionUnit
     3. 按扫描倍率估算 mpp = 10 / objective-power（标记为 estimated）
@@ -2218,6 +2193,12 @@ def _read_metadata(osr: OpenSlide, path: Path) -> dict:
     null``、``mpp_source = "missing"``，不落入下面的 TIFF 分辨率/倍率估算
     路径；``width/height`` 为 EXIF 方向校正后的像素尺寸。
     """
+    return slide_store.apply_mpp_override(
+        _read_file_metadata(osr, path), slide_id)
+
+
+def _read_file_metadata(osr: OpenSlide, path: Path) -> dict:
+    """文件级元数据（不含手补覆盖层——_read_metadata 的内层实现）。"""
     width, height = osr.dimensions
     props = osr.properties
     if getattr(osr, "is_raster_image", False):
@@ -2306,7 +2287,8 @@ def _slide_info_dict_desc(desc, path=None):
     def _read_meta():
         entry = _get_slide(desc)
         with slide_cache.borrow_pair(entry) as pair:
-            return _read_metadata(pair["osr"], path)
+            return _read_metadata(pair["osr"], path,
+                                  slide_id=desc.slide_id)
 
     if desc.storage_layout == slide_store.StorageLayout.ID_BUNDLE:
         # id_bundle：元数据以资产行为权威（R-02：alias 出参从 display_name
@@ -3210,6 +3192,15 @@ def _app_capabilities(mode):
         # 结论（COS→服务器不稳且不快于平台路径）→ 首期只允许用户手动选路，
         # 不做按大小自动导流（分流文档校准规则 3）。
         "cos_upload": _cos_upload_capability_payload(demo),
+        # P0-W6a：本地直传通道（无 COS 凭证的裸部署上传；静态派生、零 DB
+        # 查询、无秘密——available 只由 LOCAL_UPLOAD_CHANNEL 决定，demo 同
+        # cos 通道口径恒 False）。
+        "local_upload": local_ingest_http.capability_payload(
+            int(UPLOAD_PRODUCT_MAX_BYTES)) if not demo else {
+                "available": False,
+                "formats": sorted(local_ingest_http.accepted_formats()),
+                "max_size_bytes": int(UPLOAD_PRODUCT_MAX_BYTES),
+                "part_bytes": 0, "max_concurrent_parts": 0},
     }
 
 
@@ -3275,25 +3266,15 @@ def _cos_accepted_formats():
     不在直传集（需打包 zip）。后端权威下发（capability payload），前端不再
     维护第二份词表。
 
-    2026-11-05：普通图片（.bmp/.jpg/.jpeg）不再受理原始字节——必须先在本机
-    浏览器转换为 OME-TIFF，上调上传的是 .tif 产物。"""
+    P0-W6b（2026-11-11 解禁）：普通图片（.bmp/.jpg/.jpeg）恢复受理直传
+    ——RasterSlide 直读，伪装/截断/超限由 worker open_slide 终审。"""
     exts = set(slide_format_registry.capability_exts(
         slide_format_registry.CAP_NATIVE_SINGLE_FILE))
     if SERVER_CONVERSION_CREATION:
         exts |= _browser_convert_formats()
     exts.add("zip")
     exts.discard("mrxs")
-    exts -= {e.lstrip(".") for e in slide_format_registry.RASTER_IMAGE_EXTS}
     return exts
-
-
-def _raster_requires_conversion():
-    """普通图片的原图直传拒绝形态（2026-11-05 产品裁决）。"""
-    return (jsonify(
-        error="普通图片需先在本机浏览器转换为 OME-TIFF 后上传："
-              "原始 .bmp / .jpg / .jpeg 不能直接导入",
-        code="raster_requires_conversion",
-        tools_url=BROWSER_CONVERT_URL), 422)
 
 
 def _cos_ingestion_kind_for(safe):
@@ -3301,13 +3282,12 @@ def _cos_ingestion_kind_for(safe):
 
     native=原生单文件；zip=归档包；conversion=convert-required（KFB 族）。
     裸 bundle（.mrxs）与未登记格式拒绝并说明原因——不推荐另一后端
-    （U2 §4：删除 fallback 语义）。普通图片（.bmp/.jpg/.jpeg）一律 422
-    raster_requires_conversion：只接收浏览器转换后的 OME-TIFF。"""
+    （U2 §4：删除 fallback 语义）。P0-W6b：普通图片（.bmp/.jpg/.jpeg）
+    恢复 native 直传（2026-11-05 的 422 raster_requires_conversion 闸
+    退役；RasterSlide 校验流水全量生效）。"""
     ext = safe.rsplit(".", 1)[-1].lower() if "." in safe else ""
     if ext == "zip":
         return "zip", None
-    if slide_format_registry.is_raster_image_ext(safe):
-        return None, _raster_requires_conversion()
     cap = slide_format_registry.lookup(safe)["capability"]
     if cap == slide_format_registry.CAP_NATIVE_SINGLE_FILE:
         return "native", None
@@ -3322,61 +3302,26 @@ def _cos_ingestion_kind_for(safe):
 
 
 def _validate_direct_class(safe, kind, value):
-    """创建时的 direct_class 校验 + 直传关闭闸（阶段 1）。
+    """创建时的 direct_class 校验 + 直传关闭闸（阶段 1；P0-W6 起薄包装）。
 
-    返回 (规范化声明|None, None) 或 (None, 422 响应)。规则：
-
-    - 词表：ome-tiff / converter-bigtiff / legacy-direct /
-      ``unconverted-variant:<variant>``（白名单变体）；非法 → 422
-      invalid_direct_class；
-    - 声明须与扩展名匹配（ome-tiff/converter-bigtiff 只对 .tif/.tiff、
-      svs-jp2k 只对 .svs、legacy-direct 只对直传开放格式），否则 422
-      invalid_direct_class；
-    - 直传关闭格式（.svs）：没有合法 unconverted-variant:svs-jp2k 声明 →
-      422 convert_in_browser + tools_url（与 conversion_moved_to_browser
-      同形；zip 中的 MRXS 由 worker 在解包前拒绝同一错误码）；
-    - conversion 形态（kfb/kfbf）维持关闭 → convert_in_browser。
+    规则实现下沉到 ``upload_direct_class.validate_declaration``（COS 通道
+    与本地直传通道 local_ingest_http 共用同一实现与词表）；这里只做
+    Flask 响应转换。规则正文见被调函数 docstring：词表/扩展名匹配/
+    .svs 关闭闸（无 svs-jp2k 声明 → 422 convert_in_browser + tools_url）。
     """
-    ext = safe.rsplit(".", 1)[-1].lower() if "." in safe else ""
-    declared = None
-    if value is not None:
-        if not isinstance(value, str) or not value.strip():
-            return None, (jsonify(error="direct_class 需为非空字符串"),
-                          400)
-        declared = value.strip().lower()
-        if not upload_direct_class.is_direct_class(declared):
-            return None, (jsonify(error="未知的 direct_class 声明",
-                                  code="invalid_direct_class"), 422)
-    # 词表 ↔ 扩展名匹配
-    if declared == "ome-tiff" and ext not in ("tif", "tiff"):
-        return None, (jsonify(
-            error="ome-tiff 声明只适用于 .tif/.tiff 文件",
-            code="invalid_direct_class"), 422)
-    if declared == "converter-bigtiff" and ext not in ("tif", "tiff"):
-        return None, (jsonify(
-            error="converter-bigtiff 声明只适用于 .tif/.tiff 文件",
-            code="invalid_direct_class"), 422)
-    variant = upload_direct_class.variant_of(declared) if declared else None
-    if variant is not None and variant != "svs-jp2k":
-        return None, (jsonify(error="未知的 unconverted-variant 变体",
-                              code="invalid_direct_class"), 422)
-    if variant is not None and ext != "svs":
-        return None, (jsonify(
-            error="unconverted-variant:svs-jp2k 声明只适用于 .svs 文件",
-            code="invalid_direct_class"), 422)
-    # 直传关闭闸（阶段 1：.svs；kfb/kfbf 走 conversion 分支）——先于
-    # legacy-direct 的扩展名匹配裁定（关闭格式上的 legacy-direct 声明给
-    # 可行动的 convert_in_browser，不是词表错误）
-    if kind == "native" and ext in _direct_import_closed_formats() \
-            and variant != "svs-jp2k":
-        return None, (_convert_in_browser_closed(
-            "该格式已关闭直传：请在本机转换为 OME-TIFF 后上传"
-            "（切片转换工具 /tools/slides）"), 422)
-    if declared == "legacy-direct" and \
-            ext not in _direct_upload_formats():
-        return None, (jsonify(
-            error="legacy-direct 声明不适用于该扩展名",
-            code="invalid_direct_class"), 422)
+    declared, err = upload_direct_class.validate_declaration(
+        safe, kind, value,
+        closed_exts=_direct_import_closed_formats(),
+        legacy_direct_exts=_direct_upload_formats())
+    if err is not None:
+        status = int(err.get("status") or 400)
+        payload = {"error": err.get("error")}
+        if err.get("code"):
+            payload["code"] = err["code"]
+        if err.get("tools_url"):
+            payload["tools_url"] = err["tools_url"]
+            return None, (jsonify(**payload), 422)
+        return None, (jsonify(**payload), status)
     return declared, None
 
 
@@ -15784,6 +15729,13 @@ def _ingestion_state_body(job, *, queue_position=None):
         body["parts"] = [{"part_number": int(p["part_number"]),
                           "length": int(p["length"])}
                          for p in job["part_plan_json"]]
+        if (job.get("transport") or "") == ingestion_store.TRANSPORT_LOCAL:
+            # P0-W6a：本地直传的浏览器据此直接切片 POST（无签名步骤）。
+            body["part_bytes"] = max(
+                1, int(cos_config.LOCAL_INGEST_PART_BYTES))
+    # P0-W6a/W6b：通道字段——transport 全通道透出；local 任务附断点续传
+    # 权威清单（received_parts）与上传期警告（mpp_missing 等，不阻断）。
+    body.update(local_ingest_http.state_extras(job))
     # P4-b（合同 §5.6）：slide 引用从任务绑定读（job_slide_ref——job.slide_id
     # 创建即分配，结算前后都在）；不再按 slide_canonical_name 名字解析（新
     # 资产无 legacy_filename，按名 resolve 对 id_bundle 产物恒 None）。
@@ -16010,16 +15962,53 @@ def api_ingestion_upload_complete(job_id):
     """幂等记录「浏览器侧完成」（§4）：worker 随后核验远端对象。
 
     owner 触点先行刷新 client_seen_at（0084 liveness；终态冲突时同样算
-    在场证据）。"""
+    在场证据）。local_http 任务（P0-W6a）由 local_ingest_http 就地收口
+    （核对齐全 → 拼接 → queued），不走 COS Complete 核验。"""
     job, err = _ingestion_fetch(job_id)
     if err is not None:
         return err
     _touch_ingestion_client_seen(job)
+    if (job.get("transport") or "") == ingestion_store.TRANSPORT_LOCAL:
+        payload, status = local_ingest_http.handle_upload_complete(
+            current_identity(), job)
+        return jsonify(payload), status
     try:
         job = ingestion_store.request_upload_complete(job_id)
     except ingestion_store.IngestionStateError as e:
         return jsonify(error=str(e), code="ingestion_state_conflict"), 409
     return jsonify(_ingestion_state_body(job)), 202
+
+
+@app.route("/api/ingestions/local", methods=["POST"])
+def api_ingestions_local_create():
+    """P0-W6a：创建本地直传任务（local_http transport，无 COS 凭证可用）。
+
+    会话鉴权/CSRF 由全局闸覆盖；配额/水位/活跃上限在准入事务内裁定
+    （upload_guard 预约绑定）。逻辑全部在 local_ingest_http（薄接线）。"""
+    payload, status = local_ingest_http.handle_create(
+        current_identity(), request.get_json(silent=True) or {},
+        UPLOAD_PRODUCT_MAX_BYTES)
+    return jsonify(payload), status
+
+
+@app.route("/api/ingestions/<job_id>/parts/<int:part_number>",
+           methods=["POST"])
+def api_ingestion_part_upload_local(job_id, part_number):
+    """P0-W6a：本地直传分片上传（application/octet-stream 原始字节）。
+
+    ownership 与 client_seen 触点同 parts/sign；分片原子落 staging 后记
+    账（断点续传权威清单 local_parts_json）。"""
+    job, err = _ingestion_fetch(job_id)
+    if err is not None:
+        return err
+    _touch_ingestion_client_seen(job)
+    payload, status = local_ingest_http.handle_part_upload(
+        current_identity(), job, request.get_data(cache=False), part_number)
+    if status == 200:
+        resp = jsonify(payload)
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    return jsonify(payload), status
 
 
 @app.route("/api/ingestions/<job_id>/cancel", methods=["POST"])
@@ -21046,7 +21035,7 @@ def _slide_region_impl(desc):
             region = region.resize((ow, oh), Image.LANCZOS)
 
         # 读取 mpp 算放大倍率（供前端展示）
-        meta = _read_metadata(osr, path)
+        meta = _read_metadata(osr, path, slide_id=desc.slide_id)
         mpp = meta.get("mpp_x")
         mag = None
         if mpp and mpp > 0:
@@ -22249,7 +22238,7 @@ def internal_ai_region():
     entry = _get_slide(_region_target)
     with slide_cache.borrow_pair(entry) as pair:
         osr = pair["osr"]
-        meta = _read_metadata(osr, _region_path)
+        meta = _read_metadata(osr, _region_path, slide_id=_sid or None)
         mpp = meta.get("mpp_x")
     # 默认输出尺寸（max_long_edge 未给时用旧默认 1568×1568）
     if not out_w or out_w <= 0:
@@ -22616,7 +22605,9 @@ def _ai_slide_info_payload(pair, safe: str, *, path=None, scope_key=None,
     # P1-B2：path 为 resolver 解析后的绝对路径（读通道主路径）；缺省按
     # legacy 名拼（内容语义 mtime:size 不变）
     info_path = path if path is not None else (UPLOAD_DIR / safe)
-    meta = _read_metadata(osr, info_path)
+    meta = _read_metadata(osr, info_path, slide_id=(
+        scope_key if isinstance(scope_key, str)
+        and scope_key.startswith("sld_") else None))
     mpp = meta.get("mpp_x")
     # P2（R-15）：机器通道 info 的统计 scope / token 绑定键 = slide_id
     # （scope_key 由调用方传 descriptor 的 slide_id；缺省沿用名——无行兼容分支）
@@ -23435,7 +23426,7 @@ def _plugin_region_body(claims, safe, gate, sid, _region_path, body):
         entry = _get_slide(gate if gate is not None else safe)
         with slide_cache.borrow_pair(entry) as pair:
             osr = pair["osr"]
-            meta = _read_metadata(osr, _region_path)
+            meta = _read_metadata(osr, _region_path, slide_id=sid or None)
             mpp = meta.get("mpp_x")
         if not out_w or out_w <= 0:
             out_w = 1568
@@ -28361,13 +28352,15 @@ def api_slide_meta(name):
 
 @app.route("/api/slides/<slide_id>", methods=["PATCH"])
 def api_slide_patch_by_id(slide_id):
-    """按 slide_id 编辑切片元数据（P2 新端点，合同 §7）。
+    """按 slide_id 编辑切片元数据（P2 端点，合同 §7；P0-W6 起薄接线）。
 
-    JSON: {display_name?, note?, public?}（None 不改，空串清除 display_name/
-    note）。display_name 是唯一可编辑展示名（R-02：改名不动文件、不动
-    legacy_filename、不动授权、不触发内容 revision 变化）。权限矩阵与
-    POST /api/slide/<name>/meta 一致：public 仅 owner；user 仅自己的切片。
-    未知 ID → 404 slide_not_found；走 slide_store 元数据原语（不触文件）。
+    JSON: {display_name?, note?, public?, mpp_x?, mpp_y?}（None 不改，空串
+    清除 display_name/note）。display_name 是唯一可编辑展示名（R-02：改名
+    不动文件、不动 legacy_filename、不动授权、不触发内容 revision 变化）。
+    P0-W6c：mpp_x/mpp_y（µm/px，正数）手补物物理尺度——来源恒 manual、
+    bump asset_revision（元信息级，不换内容）、两轴显式 null 清除；权限
+    矩阵与 POST /api/slide/<name>/meta 一致：public 仅 owner；user 仅自己
+    的切片。未知 ID → 404 slide_not_found。逻辑在 slide_meta_http。
     """
     ident = current_identity()
     desc = None
@@ -28378,46 +28371,14 @@ def api_slide_patch_by_id(slide_id):
                            exc_info=True)
     if desc is None:
         return jsonify(error="切片不存在", code="slide_not_found"), 404
-    body = request.get_json(silent=True) or {}
-    display_name = body.get("display_name", None)
-    note = body.get("note", None)
-    public = body.get("public", None)
-    if display_name is not None and not isinstance(display_name, str):
-        return jsonify(error="display_name 需为字符串"), 400
-    if note is not None and not isinstance(note, str):
-        return jsonify(error="note 需为字符串"), 400
-    if public is not None and not isinstance(public, bool):
-        return jsonify(error="public 需为布尔值"), 400
-    if public is not None and ident["role"] != user_store.ROLE_OWNER:
-        return jsonify(error="仅 owner 可设置公开状态"), 403
-    if ident["role"] != user_store.ROLE_OWNER:
-        if (desc.owner_user_id or None) != ident["user_id"]:
-            return jsonify(error="只能编辑自己切片的元数据"), 403
-    changed = []
-    try:
-        if display_name is not None:
-            if not slide_store.update_display_name(desc.slide_id, display_name):
-                return jsonify(error="切片不存在"), 404
-            changed.append("display_name")
-        if note is not None:
-            if not slide_store.update_note(desc.slide_id, note):
-                return jsonify(error="切片不存在"), 404
-            changed.append("note")
-        if public is not None:
-            if not slide_store.set_public(desc.slide_id, public):
-                return jsonify(error="切片不存在"), 404
-            changed.append("public")
-    except ValueError as e:
-        return jsonify(error=str(e)), 400
-    _audit("slide.meta.patch", target_type="slide",
-           target_id=desc.slide_id, slide=desc.legacy_filename,
-           slide_id=desc.slide_id, detail={"fields": changed})
-    fresh = slide_store.resolve_slide_id(desc.slide_id)
-    return jsonify(ok=True,
-                   slide_id=desc.slide_id,
-                   display_name=(fresh.display_name if fresh else None),
-                   note=(fresh.note if fresh else ""),
-                   public=bool(fresh.public) if fresh else None)
+    payload, status = slide_meta_http.handle_patch(
+        ident, desc, request.get_json(silent=True) or {})
+    if status == 200:
+        _audit("slide.meta.patch", target_type="slide",
+               target_id=desc.slide_id, slide=desc.legacy_filename,
+               slide_id=desc.slide_id,
+               detail={"fields": payload.get("changed") or []})
+    return jsonify(payload), status
 
 
 # --------------------------------------------------------------------------- #

@@ -176,6 +176,77 @@ def staging_task_dir(task_id, *, root=None) -> Path:
     return _root(root) / _STAGING_DIRNAME / task
 
 
+def write_staging_part(task_id, generation, part_number, data, *,
+                       root=None) -> Path:
+    """本地直传通道（P0-W6a）分片原子落盘（ingestion 专用原语）。
+
+    目标 ``.staging/<task_id>/<generation>/parts/<part_number>``；全部路径段
+    经 _safe_component 白名单（task_id=inj_hex、generation 服务端代次、
+    part_number 正整数），无任何用户可控片段。先写临时文件 + fsync +
+    os.replace（同目录原子替换）——重传同号覆盖（断点续传语义），崩溃
+    不留半片。返回最终分片路径。调用方负责任务存储锁（R12）。
+    """
+    gen_dir = staging_dir(task_id, generation, root=root)
+    parts_dir = gen_dir / "parts"
+    parts_dir.mkdir(parents=True, exist_ok=True)
+    seg = _safe_component(str(int(part_number)), "part_number")
+    tmp = parts_dir / (seg + ".tmp")
+    with open(tmp, "wb") as fh:
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+    final = parts_dir / seg
+    os.replace(tmp, final)
+    return final
+
+
+def join_staging_parts(task_id, generation, part_numbers, entry_ext, *,
+                       root=None) -> Path:
+    """本地直传通道（P0-W6a）分片顺序拼接为暂存入口件（ingestion 专用）。
+
+    ``.staging/<task_id>/<generation>/parts/<n>``（按 part_numbers 顺序）
+    → ``.staging/<task_id>/<generation>/data.<ext>``（tmp + fsync + 原子
+    replace，崩溃重试幂等）；ext 经 _FORMAT_EXT_RE 白名单。缺任一分片
+    文件抛 FileNotFoundError（调用方按 parts_incomplete/重试处理）。
+    返回入口件路径。
+    """
+    gen_dir = staging_dir(task_id, generation, root=root)
+    parts_dir = gen_dir / "parts"
+    ext = (entry_ext or "").strip().lower().lstrip(".")
+    if not _FORMAT_EXT_RE.match(ext):
+        raise ValueError("entry_ext 非白名单小写扩展名：%r" % (entry_ext,))
+    entry = gen_dir / ("%s.%s" % (_ENTRY_BASENAME, ext))
+    tmp = gen_dir / ("%s.%s.joining" % (_ENTRY_BASENAME, ext))
+    with open(tmp, "wb") as out:
+        for n in part_numbers:
+            seg = _safe_component(str(int(n)), "part_number")
+            part_path = parts_dir / seg
+            if not part_path.is_file():
+                raise FileNotFoundError("分片缺失：%s" % seg)
+            with open(part_path, "rb") as pf:
+                while True:
+                    buf = pf.read(1 << 20)
+                    if not buf:
+                        break
+                    out.write(buf)
+        out.flush()
+        os.fsync(out.fileno())
+    os.replace(tmp, entry)
+    return entry
+
+
+def discard_staging_parts(task_id, generation, part_numbers, *,
+                          root=None) -> None:
+    """收口后的分片残件清理（best-effort；remove_staging_tree 兜底）。"""
+    parts_dir = staging_dir(task_id, generation, root=root) / "parts"
+    for n in part_numbers:
+        seg = _safe_component(str(int(n)), "part_number")
+        try:
+            (parts_dir / seg).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def remove_staging_tree(task_id, *, root=None) -> bool:
     """删除任务暂存整树（P3 合同 §3.3 第 8 步：清 staging 后再释放预占）。
 

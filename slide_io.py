@@ -369,6 +369,43 @@ def _to_float(v):
         return None
 
 
+def mpp_from_tiff_resolution(path):
+    """从 TIFF 标准分辨率标签（真实坐标尺）读取 mpp → (mpp_x, mpp_y)。
+
+    P0-W6 起为共享实现（此前 app.py 与 share_server.py 各持一份副本；本
+    函数与那两份逐行同构）：
+
+    - ResolutionUnit=2（英寸）：mpp(µm/px) = 25400 / XResolution；
+    - ResolutionUnit=3（厘米）：mpp(µm/px) = 10000 / XResolution；
+    - 合理性窗口 0.05–3.0 µm/px：默认未标定的 72/96 dpi 占位（≈353/265
+      µm/px）落在窗外被丢弃（实测样本 zhouzhiping-48.tif 正是此情况——
+      正确行为，交给 W6c 手动补录）。
+    读取失败/数值不合理返回 (None, None)。
+    """
+    try:
+        from PIL.TiffTags import TAGS_V2  # noqa: F401  确保标签表初始化
+
+        with Image.open(str(path)) as img:
+            tags = getattr(img, "tag_v2", None)
+            if not tags:
+                return None, None
+            x_res = _to_float(tags.get(282))   # XResolution
+            y_res = _to_float(tags.get(283))   # YResolution
+            unit = tags.get(296, 2)            # ResolutionUnit，默认英寸
+            if not x_res or x_res <= 0:
+                return None, None
+            factor = 25400.0 if unit == 2 else (10000.0 if unit == 3 else None)
+            if factor is None:
+                return None, None
+            mpp_x = factor / x_res
+            mpp_y = factor / y_res if y_res and y_res > 0 else mpp_x
+            if 0.05 <= mpp_x <= 3.0:
+                return mpp_x, mpp_y
+    except Exception:  # noqa: BLE001 - 非法标签/非 TIFF 一律 (None, None)
+        pass
+    return None, None
+
+
 # --------------------------------------------------------------------------- #
 # Batch 2：多通道 OME 元数据与 level 一致性（供 slide_render 复用）
 # --------------------------------------------------------------------------- #

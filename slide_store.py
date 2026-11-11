@@ -822,6 +822,86 @@ def set_public(slide_id, public, *, conn=None) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# 手动物理尺度补录（P0-W6c，0094 slide_mpp_overrides）
+# --------------------------------------------------------------------------- #
+def get_mpp_override(slide_id, *, conn=None):
+    """读手补 mpp 行 → {"mpp_x": …, "mpp_y": …} | None（无行/任一轴有值）。
+
+    表约束保证至少一轴非 NULL（全 None 由 set_mpp_override 删行表达）；
+    读端经 apply_mpp_override 以本行为最高优先级覆盖文件推导值。
+    """
+    with _session(conn) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT mpp_x, mpp_y FROM slide_mpp_overrides "
+                "WHERE slide_id=%s", (slide_id,))
+            row = cur.fetchone()
+    if row is None:
+        return None
+    return {"mpp_x": row["mpp_x"], "mpp_y": row["mpp_y"]}
+
+
+def set_mpp_override(slide_id, mpp_x, mpp_y, updated_by, *, conn=None):
+    """补录/清除手补 mpp（来源恒 manual）。
+
+    - 任一轴非 None → UPSERT（None 轴保持库内现值）；返回新行。
+    - 两轴全 None → DELETE（清除补录，读端回落文件推导）；返回 None。
+    行缺失（slides 无此 slide_id）抛 ValueError。
+    """
+    sid = (slide_id or "").strip()
+    if not sid:
+        raise ValueError("slide_id 不能为空")
+    with _session(conn) as c:
+        with c.cursor() as cur:
+            cur.execute("SELECT 1 FROM slides WHERE slide_id=%s", (sid,))
+            if cur.fetchone() is None:
+                raise ValueError("切片不存在：%s" % sid)
+            if mpp_x is None and mpp_y is None:
+                cur.execute(
+                    "DELETE FROM slide_mpp_overrides WHERE slide_id=%s", (sid,))
+                return None
+            cur.execute(
+                "INSERT INTO slide_mpp_overrides (slide_id, mpp_x, mpp_y, "
+                "updated_by, updated_at) VALUES (%s,%s,%s,%s,now()) "
+                "ON CONFLICT (slide_id) DO UPDATE SET "
+                "mpp_x=COALESCE(EXCLUDED.mpp_x, "
+                "slide_mpp_overrides.mpp_x), "
+                "mpp_y=COALESCE(EXCLUDED.mpp_y, "
+                "slide_mpp_overrides.mpp_y), "
+                "updated_by=EXCLUDED.updated_by, updated_at=now()",
+                (sid, mpp_x, mpp_y, (updated_by or "").strip() or "unknown"))
+            cur.execute(
+                "SELECT mpp_x, mpp_y FROM slide_mpp_overrides "
+                "WHERE slide_id=%s", (sid,))
+            row = cur.fetchone()
+    return {"mpp_x": row["mpp_x"], "mpp_y": row["mpp_y"]}
+
+
+def apply_mpp_override(meta, slide_id):
+    """读端覆盖层（app._read_metadata / share_server._read_metadata 共用）：
+
+    有手补行 → 对应轴覆盖为 manual 值、mpp_source="manual"（只覆盖已补录
+    的轴，另一轴保持文件推导值）；无行原样返回。这就是 mpp 解析的顶层
+    优先级：manual > metadata > tiff-resolution > estimated > missing。
+    """
+    if not slide_id:
+        return meta
+    try:
+        ov = get_mpp_override(slide_id)
+    except Exception:  # noqa: BLE001 - override 读失败不阻断元数据读取
+        return meta
+    if not ov:
+        return meta
+    out = dict(meta)
+    if ov["mpp_x"] is not None:
+        out["mpp_x"] = ov["mpp_x"]
+    if ov["mpp_y"] is not None:
+        out["mpp_y"] = ov["mpp_y"]
+    out["mpp_source"] = "manual"
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # 删除编排辅助（P3 合同 §5 最小正确版；P5 再统一两阶段）
 #
 # id_bundle 资产没有 legacy_filename，旧按名清理函数（share_store 的

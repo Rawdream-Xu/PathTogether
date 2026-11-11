@@ -135,6 +135,9 @@ _BUSINESS_TABLES = (
     # 0034 起：切片可见性显式授权（owner 读隔离的直授表；无外键，显式
     # 列出防跨用例残留授权）
     "slide_view_grants",
+    # 0094 起：W6c mpp 手动补录（slides FK CASCADE 已覆盖，显式列出保证
+    # descriptor/缓存相关用例从干净状态开始）
+    "slide_mpp_overrides",
     # 0018 起：金额计费（admin-billing §6）。billing_price_books 的迁移
     # 种子会随 TRUNCATE 清掉——需要种子的用例用 tests/_billing_helpers
     # .seed_price_books() 幂等重放 migrations/0018_billing.sql +
