@@ -253,12 +253,12 @@ describe("Wave 3：文件选择器 accept 派生与静态 fallback", () => {
 		expect(rasterRow).toBeTruthy();
 		expect(rasterRow![1]).toBe("True");
 		expect(rasterRow![0]).toMatch(/"\.bmp",\s*"\.jpg",\s*"\.jpeg"/);
-		// F8 + 2026-11-05：browser_convert=available、import_mode=convert，
-		// 直传关闭（普通图片必须先在本机转换为 OME-TIFF）
+		// F8 + P0-W6b（2026-11-11 解禁）：browser_convert=available（可选
+		// 归一化），直传恢复开放（RasterSlide 直读，伪装/截断/超限由服务端
+		// open_slide 终审）
 		expect(rasterRow![0]).toMatch(/"browser_convert":\s*"available"/);
-		expect(rasterRow![0]).toMatch(/"direct_import":\s*"closed"/);
-		expect(rasterRow![0]).toMatch(/"import_mode":\s*"convert"/);
-		expect(rasterRow![0]).toContain("在本机浏览器中转换为 OME-TIFF 后上传");
+		expect(rasterRow![0]).toMatch(/"direct_import":\s*"open"/);
+		expect(rasterRow![0]).toMatch(/"import_mode":\s*"direct-upload"/);
 	});
 });
 
