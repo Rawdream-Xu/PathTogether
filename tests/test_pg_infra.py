@@ -13,6 +13,9 @@
   - 外键冒烟：slide_assets.slide_id → slides（含违规插入失败 + ON DELETE CASCADE）；
   - change_log.bigserial 单调自增。
 """
+import inspect
+import re
+
 import pytest
 
 # 缺基建依赖时整模块 skip（不 fail）
@@ -94,6 +97,9 @@ def test_schema_migrations_recorded(conn):
     with conn.cursor() as cur:
         cur.execute("SELECT filename FROM schema_migrations ORDER BY filename")
         rows = [r[0] for r in cur.fetchall()]
+    # 登记契约（fail-closed）：migrations/*.sql 的每个文件都必须在本清单
+    # 按编号升序登记——ensure_schema 会把未登记文件应用并写入
+    # schema_migrations，本断言随即失败。新迁移合入时在清单尾部追加条目。
     # 3b-1 只应有 0001；3b-2 追加 0002_roi_payload.sql（ROI 全量负载 + 插入序）；
     # 3c-1 追加 0003_comments.sql（评论线程）；3c-2 追加 0004_audit.sql（审计+归档）；
     # 4-1a 追加 0005_plugin.sql（插件安装凭证 + run grant）；
@@ -377,7 +383,48 @@ def test_schema_migrations_recorded(conn):
         # subject_type 词表由 'user' 放宽为 'user'|'owner'——owner 迁移
         # Credit 钱包后同样走 hold 预占/结算。
         "0093_owner_credit_holds.sql",
+        # 任务流 P0-W6（2026-11-11）本地直传通道 + mpp 补录：
+        # ingestion_jobs 增加 local_http 存储形态（本地裸部署无 COS 凭证的
+        # 上传通道，分片账本落 local_parts_json）；warnings_json 承载上传期
+        # 警告（jpg/未标定 tif 的 mpp_missing 等随状态体透出）；
+        # slide_mpp_overrides 手动物理尺度补录表（mpp 解析优先级
+        # manual > metadata > tiff-resolution > estimated > missing，
+        # 改动 bump slide_assets revision）。
+        "0094_ingestion_local_channel.sql",
+        # P1-W0 LLM 视觉供应商（docs/llm-vision-w0-decisions.md）：纯
+        # OpenAI 兼容层供应商配置表——api_key Fernet 密文（^enc: CHECK 在
+        # 数据库层兜底永不存明文，公共视图只回显 api_key_tail4）、base_url
+        # 仅 owner 可配；owner 级共享（无 per-user 行），is_default 全局
+        # 至多一行（部分唯一索引）。
+        "0094_llm_providers.sql",
     ]
+
+
+def test_migrations_dir_files_all_recorded():
+    """磁盘侧 fail-closed 守卫：migrations/ 目录的每个条目都必须是 .sql
+    且被 test_schema_migrations_recorded 的权威清单覆盖。
+
+    ensure_schema 按 glob('*.sql') 发现迁移（pg_store.py:128）：非 .sql
+    的杂项文件会被【静默跳过】（不应用也不记录），上面的 DB 侧断言对此
+    盲区（rows 来自 schema_migrations，不含被跳过的文件）。本守卫直接
+    对照磁盘目录与清单，堵住两条泄漏路径：
+      1. 目录里出现非 .sql 条目（迁移存错后缀/杂物）→ 立即失败；
+      2. 新增 .sql 未登记（本批 0094 两例的原始回归形态）→ 立即失败。
+    """
+    expected = _expected_migration_filenames()
+    on_disk = sorted(p.name for p in pg_store.migrations_dir().iterdir())
+    non_sql = [n for n in on_disk if not n.endswith(".sql")]
+    assert non_sql == [], "migrations/ 出现非 .sql 条目: %s" % non_sql
+    assert on_disk == expected, (
+        "migrations/ 磁盘内容与登记清单不一致；多出 %s，缺登记 %s"
+        % (sorted(set(on_disk) - set(expected)),
+           sorted(set(expected) - set(on_disk))))
+
+
+def _expected_migration_filenames():
+    """从 test_schema_migrations_recorded 源码提取登记清单（单一事实源）。"""
+    src = inspect.getsource(test_schema_migrations_recorded)
+    return sorted(re.findall(r'"(\d{4}_[A-Za-z0-9_]+\.sql)"', src))
 
 
 # --------------------------------------------------------------------------- #

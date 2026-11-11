@@ -99,17 +99,17 @@ def test_capability_routes_convert_required_to_browser(monkeypatch):
     # 仍 open——JPEG2000 等变体在头级嗅探按 temporary 分流）；
     # VMS：转换可用（.vms 入口 + 同目录 tile JPEG 完整包；direct_import 仍
     # open——VMU 等在入口级嗅探按 temporary 分流）；
-    # F8：普通图片转换可用；2026-11-05 起普通图片（bmp/jpg/jpeg）一律先在
-    # 浏览器转换为 OME-TIFF（其余变体先由浏览器解码归一化），direct_import
-    # closed——不在直传清单里
+    # F8：普通图片转换可用；P0-W6b（2026-11-11）起普通图片（bmp/jpg/jpeg）
+    # 恢复直传受理（raster-image 目录行 direct_import=open，RasterSlide
+    # 按真实字节校验伪装/截断），browser_convert 保留为可选归一化通道。
     assert {"kfb", "kfbf", "svs", "mrxs", "scn", "tif", "tiff",
             "ndpi", "vms", "bif", "bmp", "jpg", "jpeg", "tmap"} == set(p["browser_convert"]["formats"])
     assert p["browser_convert"]["url"] == "/tools/slides"
-    # direct_upload 清单：直传开放格式（不含 svs/kfb/kfbf/mrxs/zip）
+    # direct_upload 清单：直传开放格式（不含 svs/kfb/kfbf/mrxs/zip；
+    # P0-W6b 起 raster 图像 bmp/jpg/jpeg 在列）
     du = set(p["direct_upload"]["formats"])
     assert {"tif", "tiff", "ome.tif", "ome.tiff", "ndpi", "vms", "vmu",
-            "scn", "bif", "svslide"} == du
-    assert not ({"bmp", "jpg", "jpeg"} & du)
+            "scn", "bif", "svslide", "bmp", "jpg", "jpeg"} == du
 
 
 def test_image_does_not_start_legacy_executors_by_default():
