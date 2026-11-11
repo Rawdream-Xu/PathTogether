@@ -80,7 +80,11 @@ def test_sample_manifest_validates_and_policy_pin_matches():
                       / "manifest.json")
     assert set(policy) == {"sample-annotator", "sample-tma-score",
                            "pathtogether-admin", "pathsegmentor-measure",
-                           "pathtogether-baidu-import"}
+                           "pathtogether-baidu-import", "sdk"}
+    # sdk：仓库内平台自带 SDK（plugins/sdk 无 manifest.json，无哈希可 pin），
+    # 浏览器桥客户端 /plugins/sdk/ui/* 经显式 null 放行（有意白名单，
+    # fail-closed 语义下不落回默认放行）
+    assert policy["sdk"] is None
     assert policy["sample-annotator"] == _sha256(SAMPLE_MANIFEST)
     assert policy["sample-tma-score"] == _sha256(TMA_MANIFEST)
     assert policy["pathtogether-admin"] == _sha256(admin_manifest)

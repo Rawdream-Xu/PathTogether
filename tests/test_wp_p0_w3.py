@@ -219,7 +219,9 @@ def test_gitattributes_lf_contract_and_pin_hashes():
         assert rule in ga, "缺少行尾规则：%s" % rule
 
     policy = json.loads(REPO_POLICY.read_text(encoding="utf-8"))
-    pinned = {k: v for k, v in policy.items() if k != "default"}
+    # null 值（显式放行，如平台自带 sdk）无哈希可对账，只对 pin 值验哈希
+    pinned = {k: v for k, v in policy.items()
+              if k != "default" and v is not None}
     # repo 策略不得自带 default:allow（fail-closed 不允许被默认配置冲掉）
     assert "default" not in policy
     # 申请 slide:import 最高敏感权限的 baidu-import 必须在 pin 表内（P0-4a）
@@ -280,6 +282,15 @@ def test_install_policy_uses_same_single_read_as_parse(monkeypatch):
     assert inst is None and err is not None
     assert err[1] == 403
     assert "source policy mismatch" in err[0].get_json()["error"]
+
+
+def test_sdk_null_explicitly_allowed():
+    """平台自带 SDK（plugins/sdk，无 manifest.json）经显式 null 放行。
+
+    修复前它靠「未 pin 默认放行」的 fail-open 被服务；fail-closed 后必须
+    在策略里显式声明（有意白名单），语义从「默认放行」变「显式放行」。
+    """
+    assert app_mod.plugin_source_allowed("sdk") == (True, "explicitly allowed")
 
 
 # --------------------------------------------------------------------------- #
