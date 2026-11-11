@@ -10653,7 +10653,8 @@
     // 创建并提示，**不回退 V1/V2**；词表与上限以服务端 capability 为唯一
     // 权威（cosUploadEligible 判定），不合格即说明原因。P0-W6a：本地通道
     //（local_upload）可用即视为可用（两通道任一可用即可上传）。
-    if (!activeUploadConfig()) {
+    if (!((typeof LOCAL_UPLOAD_CONFIG !== "undefined" &&
+           LOCAL_UPLOAD_CONFIG) || COS_UPLOAD_CONFIG)) {
       row.markError();
       row.setStage("upload.cos.unavailable");
       row.finish(10000);
@@ -11155,8 +11156,13 @@
       if (opts.onOutcome) opts.onOutcome(body, err);
     }
     // P0-W6a：通道解析（local 优先；两引擎 createUpload 对外合同同形）。
-    // 引擎缺失/配置非法同样走「建引擎前失败」出口（P2 问题 1）。
-    var channel = uploadEngineFor();
+    // 函数内联判定（不引外部 helper，切片测试可独立运行）：local 引擎+
+    // 配置可用走本地直传，否则回落 COS。引擎缺失/配置非法同样走「建引擎
+    // 前失败」出口（P2 问题 1）。
+    var channel = (typeof LOCAL_UPLOAD_CONFIG !== "undefined" &&
+                   LOCAL_UPLOAD_CONFIG && window.HP_LOCAL_UPLOAD)
+      ? { engine: window.HP_LOCAL_UPLOAD, config: LOCAL_UPLOAD_CONFIG }
+      : { engine: window.HP_COS_UPLOAD, config: COS_UPLOAD_CONFIG };
     if (!channel.engine || !channel.config) {
       row.markError();
       row.setStage("upload.stage.failed");
