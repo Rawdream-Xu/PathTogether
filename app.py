@@ -21277,6 +21277,57 @@ def api_ai_config():
     return jsonify(out)
 
 
+# =========================================================================== #
+# P1-W0：LLM 视觉供应商薄接线（实现全部在 llm_provider_http / llm_provider_store /
+# llm_vision；决策见 docs/llm-vision-w0-decisions.md）。api_key 加密复用上方
+# ai_secret Fernet key 文件（0600 范式）——factory 注入一次，store 不 import app。
+# 错误信封 {error, code, retryable?, details?}；CSRF 由全局 before_request 覆盖。
+# =========================================================================== #
+import llm_provider_store as _llm_provider_store
+_llm_provider_store.set_fernet_factory(_load_or_create_ai_secret)
+
+
+@app.route("/api/llm/providers", methods=["GET"])
+def api_llm_providers():
+    import llm_provider_http
+    return _jsonify_pair(llm_provider_http.list_providers(current_identity()))
+
+
+@app.route("/api/llm/providers", methods=["POST"])
+def api_llm_provider_create():
+    import llm_provider_http
+    return _jsonify_pair(llm_provider_http.create_provider(
+        current_identity(), request.get_json(silent=True) or {}))
+
+
+@app.route("/api/llm/providers/<provider_id>", methods=["PATCH"])
+def api_llm_provider_update(provider_id):
+    import llm_provider_http
+    return _jsonify_pair(llm_provider_http.update_provider(
+        current_identity(), provider_id, request.get_json(silent=True) or {}))
+
+
+@app.route("/api/llm/providers/<provider_id>", methods=["DELETE"])
+def api_llm_provider_delete(provider_id):
+    import llm_provider_http
+    return _jsonify_pair(llm_provider_http.delete_provider(
+        current_identity(), provider_id))
+
+
+@app.route("/api/llm/test", methods=["POST"])
+def api_llm_test():
+    import llm_provider_http
+    return _jsonify_pair(llm_provider_http.test_connection(
+        current_identity(), request.get_json(silent=True) or {}))
+
+
+@app.route("/api/llm/vision", methods=["POST"])
+def api_llm_vision():
+    import llm_provider_http
+    return _jsonify_pair(llm_provider_http.vision(
+        current_identity(), request.get_json(silent=True) or {}))
+
+
 def _apply_user_max_steps_view(out, own, source):
     """user 视角 GET 回显的 max_steps 字段组（原地补充，docs §9.2/§8.3）。
 
