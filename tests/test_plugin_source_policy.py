@@ -147,6 +147,8 @@ def test_builtin_plugin_bundle_file_hashes_match_disk():
         .read_text(encoding="utf-8"))
     problems = []
     for plugin_id in sorted(policy):
+        if policy[plugin_id] is None:
+            continue  # null = 显式放行（如平台自带 sdk，无 manifest.json），无哈希对账义务
         plugin_dir = REPO_ROOT / "plugins" / plugin_id
         manifest_path = plugin_dir / "manifest.json"
         assert manifest_path.is_file(), plugin_id
