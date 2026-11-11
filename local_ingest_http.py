@@ -276,8 +276,12 @@ def _local_state_body(job):
 # 分片上传 / 完成
 # --------------------------------------------------------------------------- #
 def _upload_root():
-    """UPLOAD_DIR 解析（app 常量为权威——isolate_app 的 per-test monkeypatch
-    对其生效；延迟 import 避免循环依赖，运行时 app 已完成初始化）。"""
+    """UPLOAD_DIR 解析——env 动态读（与 cos_ingest_worker.upload_dir 同款，
+    单一来源；web 侧分片落盘与 worker 侧收养/校验/发布必须同一棵 staging
+    树，绝不允许两侧各自缓存不同的根）。env 缺失时回落 app 常量。"""
+    root = os.environ.get("UPLOAD_DIR")
+    if root:
+        return root
     import app
     return app.UPLOAD_DIR
 

@@ -75,8 +75,11 @@ def _local_env(tmp_path, monkeypatch):
 
     刻意**不**设置 COS 凭证/COS_UPLOAD_CAPABILITY（保持默认 off）——
     本地通道必须在「COS 完全不可用」的裸部署形态下可用。
+    UPLOAD_DIR 同时改 app 常量与 env：web 侧（local_ingest_http）与
+    worker 侧（cos_ingest_worker）按 env 同源解析，两侧必须同一棵树。
     """
-    isolate_app(monkeypatch, tmp_path / "data")
+    _data, _upload = isolate_app(monkeypatch, tmp_path / "data")
+    monkeypatch.setenv("UPLOAD_DIR", str(_upload))
     monkeypatch.setattr(app_mod, "UPLOAD_PRODUCT_MAX_BYTES", 800_000)
     monkeypatch.setattr(upload_guard, "UPLOAD_RESERVED_FREE_BYTES", 0)
     monkeypatch.setattr(cos_config, "LOCAL_INGEST_PART_BYTES", 64)
