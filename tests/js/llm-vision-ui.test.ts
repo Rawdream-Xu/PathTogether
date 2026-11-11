@@ -43,6 +43,25 @@ describe("llm-vision-ui：pickProvider", () => {
   });
 });
 
+describe("llm-vision-ui：applyStoredPick（切换记忆）", () => {
+  const providers = [
+    { provider_id: "a", name: "A", models: ["m1", "m2"], is_default: true },
+    { provider_id: "b", name: "B", models: ["m3"], is_default: false },
+  ];
+
+  it("有效记忆原样返回", () => {
+    expect(V.applyStoredPick(providers, { provider_id: "b", model: "m3" }))
+      .toEqual({ provider_id: "b", model: "m3" });
+  });
+
+  it("供应商被删/禁用或模型下架 → null（回落平台默认）", () => {
+    expect(V.applyStoredPick(providers, { provider_id: "gone", model: "m1" })).toBeNull();
+    expect(V.applyStoredPick(providers, { provider_id: "a", model: "off-shelf" })).toBeNull();
+    expect(V.applyStoredPick(providers, null)).toBeNull();
+    expect(V.applyStoredPick([], { provider_id: "a", model: "m1" })).toBeNull();
+  });
+});
+
 describe("llm-vision-ui：renderCardText / sourceLabel", () => {
   it("HTML 转义 + 换行成 <br>", () => {
     expect(V.renderCardText("a<b>&'\"c\nd"))

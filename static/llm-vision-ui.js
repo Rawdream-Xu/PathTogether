@@ -82,6 +82,48 @@
     return list[0];
   }
 
+  var PICK_KEY = "hp_llm_vision_pick";
+
+  /** 读取已存的切换选择（localStorage），仍有效（供应商+模型都在）才返回。 */
+  function applyStoredPick(providers, stored) {
+    if (!stored || typeof stored !== "object") return null;
+    var pid = stored.provider_id, m = stored.model;
+    if (!pid || !m) return null;
+    var list = providers || [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && list[i].provider_id === pid &&
+          (list[i].models || []).indexOf(m) >= 0) {
+        return { provider_id: pid, model: m };
+      }
+    }
+    return null;  // 已失效（供应商删除/停用/模型下架）→ 回落平台默认
+  }
+
+  function loadStoredPick() {
+    try {
+      return applyStoredPick(_providers,
+        JSON.parse(localStorage.getItem(PICK_KEY) || "null"));
+    } catch (e) { return null; }
+  }
+
+  function saveStoredPick(pick) {
+    try {
+      if (pick) localStorage.setItem(PICK_KEY, JSON.stringify(pick));
+      else localStorage.removeItem(PICK_KEY);
+    } catch (e) { /* 无痕模式等：仅不记忆，不阻断 */ }
+  }
+
+  /** 当前生效选择：用户切换记忆优先，否则平台默认供应商+其默认模型。 */
+  function effectivePick() {
+    var stored = loadStoredPick();
+    if (stored) return stored;
+    var def = pickProvider(_providers);
+    if (!def) return null;
+    var m = def.default_model && (def.models || []).indexOf(def.default_model) >= 0
+      ? def.default_model : (def.models || [])[0];
+    return m ? { provider_id: def.provider_id, model: m } : null;
+  }
+
   /** 结果文本 → 安全 HTML（转义 + 换行成 <br>；超长截断由 CSS 处理）。 */
   function renderCardText(text) {
     return esc(text).replace(/\r?\n/g, "<br>");
@@ -207,9 +249,9 @@
         sel.appendChild(o);
       });
     });
-    var def = pickProvider(_providers);
-    if (def && def.default_model) {
-      var want = JSON.stringify({ provider_id: def.provider_id, model: def.default_model });
+    var def = effectivePick();
+    if (def) {
+      var want = JSON.stringify({ provider_id: def.provider_id, model: def.model });
       for (var i = 0; i < sel.options.length; i++) {
         if (sel.options[i].value === want) { sel.selectedIndex = i; break; }
       }
@@ -293,6 +335,69 @@
   }
 
   // ------------------------------------------------------------------ //
+  // 供应商/模型切换窗口（工具栏 ▾ 弹层；选择记 localStorage）
+  // ------------------------------------------------------------------ //
+
+  var _pop = null;
+
+  function closePickerPop() {
+    if (_pop && _pop.isConnected) _pop.remove();
+    _pop = null;
+    if (_deps && _deps.caret) _deps.caret.setAttribute("aria-expanded", "false");
+    document.removeEventListener("pointerdown", _popOutside, true);
+  }
+
+  function _popOutside(e) {
+    if (_pop && _pop.isConnected && !_pop.contains(e.target) &&
+        !_deps.caret.contains(e.target)) closePickerPop();
+  }
+
+  function togglePickerPop() {
+    if (_pop && _pop.isConnected) { closePickerPop(); return; }
+    if (!_providers.length) return;
+    var cur = effectivePick();
+    _pop = el("div", "llmv-pop");
+    _pop.setAttribute("role", "menu");
+    _pop.setAttribute("aria-label", "AI 供应商切换");
+    _pop.appendChild(el("div", "llmv-pop-title", "AI 供应商 / 模型"));
+    _providers.forEach(function (pv) {
+      if (!(pv.models || []).length) return;
+      var head = el("div", "llmv-pop-group",
+        esc(pv.name) + (pv.is_default
+          ? ' <span class="llmp-badge">平台默认</span>' : ""));
+      _pop.appendChild(head);
+      (pv.models || []).forEach(function (m) {
+        var sel = cur && cur.provider_id === pv.provider_id && cur.model === m;
+        var item = el("div", "llmv-pop-item" + (sel ? " llmv-pop-on" : ""),
+          (sel ? "✓ " : "") + esc(m));
+        item.setAttribute("role", "menuitemradio");
+        item.setAttribute("aria-checked", sel ? "true" : "false");
+        item.addEventListener("click", function () {
+          saveStoredPick({ provider_id: pv.provider_id, model: m });
+          closePickerPop();
+          if (_panel && _panel.isConnected) renderPanel();  // 面板同步当前选择
+        });
+        _pop.appendChild(item);
+      });
+    });
+    var reset = el("div", "llmv-pop-item llmv-pop-reset", "恢复平台默认");
+    reset.addEventListener("click", function () {
+      saveStoredPick(null);
+      closePickerPop();
+      if (_panel && _panel.isConnected) renderPanel();
+    });
+    _pop.appendChild(reset);
+    document.body.appendChild(_pop);
+    // 定位：按钮正下方（fixed；#toolbar overflow 会裁剪，故挂 body）
+    var r = _deps.caret.getBoundingClientRect();
+    _pop.style.left = Math.max(8, Math.min(r.left,
+      window.innerWidth - (_pop.offsetWidth || 240) - 8)) + "px";
+    _pop.style.top = (r.bottom + 6) + "px";
+    _deps.caret.setAttribute("aria-expanded", "true");
+    document.addEventListener("pointerdown", _popOutside, true);
+  }
+
+  // ------------------------------------------------------------------ //
   // 装配与可见性
   // ------------------------------------------------------------------ //
 
@@ -303,9 +408,14 @@
       return res.json().catch(function () { return {}; });
     }).then(function (d) {
       if (!d) return;
-      _providers = d.providers || [];
+      // owner 视图含禁用行（enabled:false）；user 视图无该字段=默认启用
+      _providers = (d.providers || []).filter(function (p) {
+        return p && p.enabled !== false;
+      });
       var usable = pickProvider(_providers);
       _deps.btn.hidden = !usable;
+      if (_deps.caret) _deps.caret.hidden = !usable;
+      if (usable && _pop && _pop.isConnected) closePickerPop();  // 列表已变，旧弹层作废
     }).catch(function () { _deps.btn.hidden = true; });
   }
 
@@ -317,6 +427,12 @@
         if (!_providers.length) { loadProviders(); }
         renderPanel();   // 无取图时自动触发 captureRegion
       });
+      if (deps.caret) {
+        deps.caret.addEventListener("click", function () {
+          if (!_providers.length) loadProviders();
+          togglePickerPop();
+        });
+      }
       loadProviders();
     },
     refreshProviders: loadProviders,
@@ -324,6 +440,7 @@
     _pure: {
       buildRegionUrl: buildRegionUrl,
       pickProvider: pickProvider,
+      applyStoredPick: applyStoredPick,
       renderCardText: renderCardText,
       sourceLabel: sourceLabel,
       DEFAULT_PROMPT: DEFAULT_PROMPT,

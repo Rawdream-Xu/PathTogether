@@ -1660,6 +1660,7 @@
     acctSettingsLlm: $("acct-settings-llm"),
     llmProvidersPanel: $("llm-providers-panel"),
     llmVisionBtn: $("llm-vision-btn"),
+    llmVisionCaret: $("llm-vision-caret"),
     // AI 面板外框拖动/调整大小（改版第四轮 §1.4；demo 面板无这些 id → 空引用）
     aiPanel: $("ai-panel"),
     aiPanelHeader: $("ai-panel-header"),
@@ -14994,15 +14995,21 @@
     if (els.acctSettingsAdmin) {
       els.acctSettingsAdmin.hidden = !!previewState || actorRole !== "owner";
     }
-    // P1-W0c：owner 专属「AI 供应商」区块（llm-provider-panel.js 渲染/拉取）
+    // P1-W0c：「AI 供应商」区块——owner 管理面板 / user 只读清单（均不进
+    // 预览态；配置写操作仍仅 owner，服务端 403 兜底）
     if (els.acctSettingsLlm) {
-      var llmOwner = !previewState && actorRole === "owner" &&
+      var llmReady = !previewState && (actorRole === "owner" || actorRole === "user") &&
         window.HP_LLM_PROVIDERS && els.llmProvidersPanel;
-      els.acctSettingsLlm.hidden = !llmOwner;
-      if (llmOwner) {
-        HP_LLM_PROVIDERS.mount({
-          container: els.llmProvidersPanel, apiFetch: apiFetch });
-        HP_LLM_PROVIDERS.refresh();
+      els.acctSettingsLlm.hidden = !llmReady;
+      if (llmReady) {
+        if (actorRole === "owner") {
+          HP_LLM_PROVIDERS.mount({
+            container: els.llmProvidersPanel, apiFetch: apiFetch });
+          HP_LLM_PROVIDERS.refresh();
+        } else {
+          HP_LLM_PROVIDERS.mountUser({
+            container: els.llmProvidersPanel, apiFetch: apiFetch });
+        }
       }
     }
     els.acctSettingsMask.style.display = "";
@@ -15671,11 +15678,12 @@
     // 账户设置对话框（docs/owner-parity-plan-20261106.md §D；所有登录用户）
     initAcctSettings();
 
-    // P1-W0d：查看器「AI 识图」按钮（llm-vision-ui.js；取图优先选中选框，
-    // 否则当前视野——level0ViewportBbox 单一实现复用）
+    // P1-W0d：查看器「AI 识图」按钮 + 供应商切换窗口（llm-vision-ui.js；
+    // 取图优先选中选框，否则当前视野——level0ViewportBbox 单一实现复用）
     if (window.HP_LLM_VISION && els.llmVisionBtn) {
       HP_LLM_VISION.mount({
         btn: els.llmVisionBtn,
+        caret: els.llmVisionCaret,
         container: viewer && viewer.container,
         apiFetch: apiFetch,
         getSlide: function () { return state.slide; },

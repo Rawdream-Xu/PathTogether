@@ -5662,3 +5662,17 @@ body.app-mode-official { overflow: clip; }
 .llmv-error { color: #b00020; }
 .llmv-card-body { white-space: normal; word-break: break-word; margin-top: 2px; }
 .llmv-card-foot { margin-top: 4px; font-size: 11px; color: #888; }
+/* 供应商/模型切换弹层（工具栏 ▾；挂 body 防 #toolbar overflow 裁剪） */
+.llmv-caret, .llm-vision-caret { padding: 0 6px; }
+.llmv-pop { position: fixed; z-index: 1300; min-width: 240px; max-height: 60vh;
+  overflow: auto; background: #fff; border: 1px solid var(--line, #ccc);
+  border-radius: 8px; box-shadow: 0 8px 30px rgba(0,0,0,.18); padding: 6px 0; }
+.llmv-pop-title { font-weight: 700; font-size: 13px; padding: 4px 12px 6px;
+  border-bottom: 1px solid var(--line, #eee); margin-bottom: 4px; }
+.llmv-pop-group { font-size: 12px; font-weight: 600; color: #555;
+  padding: 6px 12px 2px; }
+.llmv-pop-item { padding: 5px 12px 5px 24px; font-size: 13px; cursor: pointer; }
+.llmv-pop-item:hover { background: #f0f4ff; }
+.llmv-pop-on { color: #1a73e8; font-weight: 600; }
+.llmv-pop-reset { border-top: 1px solid var(--line, #eee); margin-top: 4px;
+  color: #666; padding-left: 12px; }

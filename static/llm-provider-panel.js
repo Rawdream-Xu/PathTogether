@@ -313,6 +313,37 @@
     });
   }
 
+  function refreshUser() {
+    var root = _deps && _deps.container;
+    if (!root) return Promise.resolve();
+    return api({ url: "/api/llm/providers" }).then(function (r) {
+      root.innerHTML = "";
+      var rows = (r.status === 200 && r.json && r.json.providers) || [];
+      if (!rows.length) {
+        root.appendChild(el("p", "llmp-empty",
+          "平台尚未配置 AI 识图供应商；请联系管理员在设置中配置。"));
+        return;
+      }
+      // user 视图（服务端已过滤禁用行）：只读展示，配置入口在管理员侧
+      rows.forEach(function (p) {
+        var line = el("div", "llmp-row");
+        var meta = el("div", "llmp-meta");
+        meta.appendChild(el("span", "llmp-name",
+          esc(p.name) + (p.is_default ? ' <span class="llmp-badge">默认</span>' : "")));
+        meta.appendChild(el("span", "llmp-models",
+          esc("模型：" + ((p.models || []).join("、") || "—"))));
+        line.appendChild(meta);
+        root.appendChild(line);
+      });
+      root.appendChild(el("p", "llmp-hint",
+        "以上为管理员配置的平台共享供应商；查看器「🔍 识图 ▾」可切换。"));
+    }).catch(function () {
+      var root2 = _deps.container;
+      root2.innerHTML = "";
+      root2.appendChild(el("p", "llmp-empty", "供应商信息加载失败，请稍后重试。"));
+    });
+  }
+
   var API = {
     mount: function (deps) {
       _deps = deps;
@@ -320,6 +351,10 @@
         // owner 专属：宿主已控制容器显隐（非 owner 不 mount）
         render();
       }
+    },
+    mountUser: function (deps) {
+      _deps = deps;   // 只读视图：refreshUser 渲染（user 端点只给最小字段）
+      return refreshUser();
     },
     refresh: refresh,
     // vitest / Node 侧纯函数出口
