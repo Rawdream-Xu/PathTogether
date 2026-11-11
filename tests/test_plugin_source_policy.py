@@ -69,17 +69,25 @@ def test_sample_manifest_validates_and_policy_pin_matches():
     # 防漂移守卫：内置插件的 manifest sha256 pin 均须与磁盘一致
     # （pathtogether-admin pin 是 admin 宿主信任链的硬前提——_admin_plugin_trusted
     # fail-closed 要求显式 pin + hash 精确匹配，docs §8.2。pathsegmentor-measure
-    # 为测量插件 PoC 的显式 pin，2026-10-13——策略对未列出 key 放行，新
-    # bundle 必须进入本集合，否则漏出防漂移守卫）
+    # 为测量插件 PoC 的显式 pin，2026-10-13。P0-W3（审计 P0-4a，2026-11-11）：
+    # pathtogether-baidu-import（申请 slide:import 最高敏感权限）入 pin 表；
+    # 同步策略语义改 fail-closed——未 pin 默认拒绝，未列出 key 的新 bundle
+    # 必须进入本集合才能被放行，防漂移守卫由「可选」变「强制」）
     admin_manifest = REPO_ROOT / "plugins" / "pathtogether-admin" / "manifest.json"
     psm_manifest = (REPO_ROOT / "plugins" / "pathsegmentor-measure"
                     / "manifest.json")
+    baidu_manifest = (REPO_ROOT / "plugins" / "pathtogether-baidu-import"
+                      / "manifest.json")
     assert set(policy) == {"sample-annotator", "sample-tma-score",
-                           "pathtogether-admin", "pathsegmentor-measure"}
+                           "pathtogether-admin", "pathsegmentor-measure",
+                           "pathtogether-baidu-import"}
     assert policy["sample-annotator"] == _sha256(SAMPLE_MANIFEST)
     assert policy["sample-tma-score"] == _sha256(TMA_MANIFEST)
     assert policy["pathtogether-admin"] == _sha256(admin_manifest)
     assert policy["pathsegmentor-measure"] == _sha256(psm_manifest)
+    assert policy["pathtogether-baidu-import"] == _sha256(baidu_manifest)
+    # P0-W3：repo 策略不得自带 default:allow（fail-closed 不被默认配置冲掉）
+    assert "default" not in policy
     # pathtogether-admin manifest（Manifest v1.1 adminPermissions）须通过校验器
     admin = json.loads(admin_manifest.read_text(encoding="utf-8"))
     assert M.validate_manifest(admin) == []

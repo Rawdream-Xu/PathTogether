@@ -151,8 +151,8 @@ def test_install_without_approval_fails_closed(monkeypatch, tmp_path):
         "permissions": ["slide:metadata:read", "slide:import"],
     }
     monkeypatch.setattr(
-        app_mod, "_read_plugin_bundle_manifest",
-        lambda key: (dict(manifest), None))
+        app_mod, "_read_plugin_bundle_manifest_raw",
+        lambda key: (b"", dict(manifest), None))
     monkeypatch.setattr(app_mod, "plugin_source_allowed",
                         lambda key: (True, ""))
     with app_mod.app.test_request_context("/api/admin/plugins/install"):
