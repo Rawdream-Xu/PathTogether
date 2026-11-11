@@ -248,6 +248,22 @@ scripts/release-plugin-bundle.sh verify pathtogether-admin <version>
 `/admin/plugin-assets/pathtogether-admin/ui/index.html` owner 200。
 **admin bundle 更新绝不直接覆盖正在服务的目录**（只新增 release + 切换）。
 
+### P0-W3（2026-11-11）起来源策略语义：fail-closed
+
+审计 P0-4 修复后 `plugin_source_allowed` 默认拒绝，运维口径变化：
+
+- **未 pin 插件一律 403**（安装与 UI 资产两路径）；策略文件缺失/损坏同样拒绝
+  （不再 dev 模式全放行）。放行未 pin 插件的**唯一**开关是策略显式
+  `"default": "allow"`（repo 策略不配置该键；仅隔离 dev 环境按需自配）。
+- 平台自带 `plugins/sdk`（无 manifest.json）以 `"sdk": null` 显式放行——
+  白名单决策，勿当作可复制的先例给第三方插件用。
+- **pin 哈希按 LF 行尾计算**：`.gitattributes`（`plugins/** text eol=lf` 等）
+  保证任意平台检出 manifest 即 LF；手工计算 `shasum -a 256` 前确认工作区
+  文件为 LF（旧 Windows 克隆的 CRLF 工作区会全量失配——重克隆或
+  `git checkout -- <file>` 刷新后再算）。
+- 新插件上线流程不变：改 `plugins/source-policy.json` 增 pin → 随镜像部署 →
+  release 脚本 `--pin` 校验（步骤 10 ①②③）。
+
 ## 步骤 11 —— 三身份验证 `/admin`（owner / user / 匿名）+ 重启后复验
 
 | 身份 | 期望 |

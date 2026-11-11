@@ -201,9 +201,12 @@ def test_untrusted_when_policy_file_missing(monkeypatch, tmp_path):
     monkeypatch.setenv("PLUGINS_SOURCE_POLICY_FILE",
                        str(tmp_path / "nonexistent.json"))
     app_mod._plugin_source_policy.cache_clear()
-    # viewer 插件同策略下是 dev 模式全放行（fail-open 兼容不变）……
-    assert app_mod.plugin_source_allowed("sample-annotator")[0] is True
-    # ……但 admin 永远 fail-closed
+    # P0-W3（审计 P0-4a）：策略文件缺失不再 dev 模式全放行——未 pin 的
+    # viewer 插件同样拒绝（fail-closed；放行须策略显式 "default": "allow"
+    # 或逐插件 pin）……
+    assert app_mod.plugin_source_allowed("sample-annotator") == \
+        (False, "source not pinned")
+    # ……admin 侧报因依旧是策略未配置（空表）
     assert app_mod._admin_plugin_trusted("pathtogether-admin") == \
         (False, "source policy not configured")
 

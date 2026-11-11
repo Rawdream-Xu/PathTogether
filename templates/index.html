@@ -75,6 +75,10 @@
   <!-- 标注纯几何 helper（§5.4 polygon / §6.2 旋转投影；主站与分享页共用，
        无 DOM/i18n 依赖；必须在 app.js 之前加载） -->
   <script src="/static/anno-geometry.js?v=20261009a"></script>
+  <!-- P1-W0c：owner「AI 供应商」设置面板（依赖注入；app.js 接线，仅工作台加载） -->
+  <script src="/static/llm-provider-panel.js?v=20261111"></script>
+  <!-- P1-W0d：查看器「AI 识图」（当前视野/选框 → /api/llm/vision；结果进评论流卡片） -->
+  <script src="/static/llm-vision-ui.js?v=20261111"></script>
   <!-- AI 面板外框共享模块（拖动/缩放/建议提示条；正式版与 Demo 同源） -->
   <script src="/static/ai-panel-shell.js?v=20261102a"></script>
   <script src="/static/app.js?v=20261107a"></script>

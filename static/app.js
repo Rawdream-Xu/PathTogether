@@ -1656,6 +1656,10 @@
     acctSettingsChangeEmail: $("acct-settings-changeemail"),
     acctSettingsDatashare: $("acct-settings-datashare"),
     acctSettingsAdmin: $("acct-settings-admin"),
+    // P1-W0：AI 供应商面板（owner 专属区块）与查看器「AI 识图」按钮
+    acctSettingsLlm: $("acct-settings-llm"),
+    llmProvidersPanel: $("llm-providers-panel"),
+    llmVisionBtn: $("llm-vision-btn"),
     // AI 面板外框拖动/调整大小（改版第四轮 §1.4；demo 面板无这些 id → 空引用）
     aiPanel: $("ai-panel"),
     aiPanelHeader: $("ai-panel-header"),
@@ -14969,6 +14973,17 @@
     if (els.acctSettingsAdmin) {
       els.acctSettingsAdmin.hidden = !!previewState || actorRole !== "owner";
     }
+    // P1-W0c：owner 专属「AI 供应商」区块（llm-provider-panel.js 渲染/拉取）
+    if (els.acctSettingsLlm) {
+      var llmOwner = !previewState && actorRole === "owner" &&
+        window.HP_LLM_PROVIDERS && els.llmProvidersPanel;
+      els.acctSettingsLlm.hidden = !llmOwner;
+      if (llmOwner) {
+        HP_LLM_PROVIDERS.mount({
+          container: els.llmProvidersPanel, apiFetch: apiFetch });
+        HP_LLM_PROVIDERS.refresh();
+      }
+    }
     els.acctSettingsMask.style.display = "";
     acctSettingsLoadCredit();
     acctSettingsLoadStorage();
@@ -15634,6 +15649,29 @@
 
     // 账户设置对话框（docs/owner-parity-plan-20261106.md §D；所有登录用户）
     initAcctSettings();
+
+    // P1-W0d：查看器「AI 识图」按钮（llm-vision-ui.js；取图优先选中选框，
+    // 否则当前视野——level0ViewportBbox 单一实现复用）
+    if (window.HP_LLM_VISION && els.llmVisionBtn) {
+      HP_LLM_VISION.mount({
+        btn: els.llmVisionBtn,
+        container: viewer && viewer.container,
+        apiFetch: apiFetch,
+        getSlide: function () { return state.slide; },
+        getCaptureRect: function () {
+          if (editItem && editItem.type === "rect" &&
+              isFinite(editItem.x) && isFinite(editItem.w) && editItem.w > 0) {
+            return { x: Math.round(editItem.x), y: Math.round(editItem.y),
+                     w: Math.round(editItem.w), h: Math.round(editItem.h),
+                     source: "selection" };
+          }
+          var b = level0ViewportBbox();
+          return b && b.w > 0 && b.h > 0
+            ? { x: b.x, y: b.y, w: b.w, h: b.h, source: "viewport" } : null;
+        },
+        toast: toast,
+      });
+    }
 
     // user max_steps 只读同步（AI 预算管理 UI 已迁入 admin 插件，PR5）
     initAiMaxStepsSync();

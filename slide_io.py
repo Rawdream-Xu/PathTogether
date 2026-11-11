@@ -39,6 +39,9 @@ import os
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from defusedxml import ElementTree as DefusedET
+from defusedxml.common import DefusedXmlException
+
 import numpy as np
 from PIL import Image
 
@@ -301,6 +304,24 @@ def open_slide(path, *, format_hint=None):
 # --------------------------------------------------------------------------- #
 # OME-TIFF 元数据解析
 # --------------------------------------------------------------------------- #
+def _safe_ome_xml_root(text):
+    """解析上传文件内嵌 OME-XML 的唯一安全入口（P0-W5）。
+
+    stdlib ET 不拒绝 DOCTYPE/ENTITY，恶意嵌套实体可在解析期指数展开
+    （billion-laughs；expat 2.4+ 的内建兜底只拦超过激活阈值的指数放大，
+    低放大/链式实体照常展开）。defusedxml 在 DTD/实体声明处直接拒绝
+    （forbid_dtd/forbid_entities），不进入展开，也不解析外部实体。
+
+    解析失败（含任何 DOCTYPE/ENTITY、非良构 XML）返回 None；调用方按
+    「元数据缺失」语义处理。
+    """
+    try:
+        return DefusedET.fromstring(
+            text, forbid_dtd=True, forbid_entities=True)
+    except (ET.ParseError, DefusedXmlException, ValueError):
+        return None
+
+
 def _parse_ome_mpp(ome_xml: str):
     """解析 OME-XML，返回 (mpp_x, mpp_y, objective_power)。
 
@@ -310,9 +331,8 @@ def _parse_ome_mpp(ome_xml: str):
     """
     if not ome_xml:
         return None, None, None
-    try:
-        root = ET.fromstring(ome_xml)
-    except ET.ParseError:
+    root = _safe_ome_xml_root(ome_xml)
+    if root is None:
         return None, None, None
 
     # OME-XML 命名空间
@@ -419,9 +439,8 @@ def _parse_ome_channels(ome_xml, series_index):
     """
     if not ome_xml:
         return None
-    try:
-        root = ET.fromstring(ome_xml)
-    except ET.ParseError:
+    root = _safe_ome_xml_root(ome_xml)
+    if root is None:
         return None
     ns = ""
     if root.tag.startswith("{"):
@@ -723,9 +742,8 @@ class TiffFileSlide:
             ome_xml = None
         if not ome_xml:
             return
-        try:
-            root = ET.fromstring(ome_xml)
-        except ET.ParseError:
+        root = _safe_ome_xml_root(ome_xml)
+        if root is None:
             return
         files = set()
         for elem in root.iter():

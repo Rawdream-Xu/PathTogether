@@ -1,0 +1,16 @@
+# P0-W3（审计 P-3，2026-11-11）：行尾契约。
+# 破绽：无本文件时 Windows autocrlf 克隆把 manifest 检出为 CRLF，工作区
+# sha256 与 plugins/source-policy.json 的 pin（LF 哈希）全失配；且入库侧
+# 不同平台贡献者可能提交 CRLF blob，使 pin 随克隆漂移。
+# 契约：文本文件入库一律归一 LF（text=auto）；哈希敏感路径（plugins/**、
+# *.json、*.sh、*.py）出库（检出）也强制 LF——任意平台重新克隆，磁盘
+# 字节 == index blob == pin 计算输入。
+* text=auto
+*.json text eol=lf
+plugins/** text eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+# 证据/日志捕获件按字节保存：混合行尾是记录的一部分，不参与归一化
+# （renormalize 不改写这两个文件，避免审计证据字节漂移）
+artifacts/image-transport-upgrade/2026-09-06T02-09-45Z/B7/rollback-drill.log.txt -text
+docs/review-evidence/slide-tools/C2/results/csp-headers.txt -text
