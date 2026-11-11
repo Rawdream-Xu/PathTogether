@@ -186,15 +186,18 @@ def test_local_channel_available_without_cos(owner_client):
 
 def test_local_capability_in_bootstrap(owner_client):
     """capability 下发 local_upload：无 COS 时仍可用；formats 含 jpg/bmp/tif。"""
-    r = owner_client.get("/app")
-    assert r.status_code == 200
-    caps = r.get_json()["capabilities"]
+    with app_mod.app.test_request_context("/app"):
+        caps = app_mod._app_capabilities("official")
     local = caps["local_upload"]
     assert local["available"] is True
     assert local["part_bytes"] == 64
     assert local["max_size_bytes"] == 800_000
     for ext in ("jpg", "jpeg", "bmp", "tif", "zip"):
         assert ext in local["formats"], ext
+    # demo 模式与 COS 通道同口径恒不可用
+    with app_mod.app.test_request_context("/demo"):
+        assert app_mod._app_capabilities("demo")[
+            "local_upload"]["available"] is False
 
 
 def test_local_create_validates_size_and_name(owner_client):
@@ -227,9 +230,11 @@ def test_local_create_quota_gate(user_client, monkeypatch):
     try:
         with pg_store.transaction(conn) as c:
             with c.cursor() as cur:
+                # quota 行由 reserve 首次自动建——这里预置极小配额
                 cur.execute(
-                    "UPDATE upload_user_quotas SET quota_bytes=%s "
-                    "WHERE user_id=%s", (100, "user-1"))
+                    "INSERT INTO upload_user_quotas (user_id, quota_bytes) "
+                    "VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET "
+                    "quota_bytes=EXCLUDED.quota_bytes", ("user-1", 100))
     finally:
         conn.close()
     r = user_client.post("/api/ingestions/local", json=dict(
@@ -376,7 +381,10 @@ def test_cancel_local_job_releases_reservation(user_client):
     job = ist.get_job(job_id)
     assert job["local_reservation_id"]  # 曾绑定
     rid = job["local_reservation_id"]
-    assert upload_guard.get_reservation(rid) is None  # 已释放
+    res = upload_guard.get_reservation(rid)
+    # 释放语义：行保留（审计）但不再持有容量
+    assert res is not None and res["state"] == "released"
+    assert not upload_guard.reservation_holds_capacity(res)
 
 
 # --------------------------------------------------------------------------- #

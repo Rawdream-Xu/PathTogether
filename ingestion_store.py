@@ -1461,7 +1461,7 @@ def note_warnings(job_id, warnings):
                     "UPDATE ingestion_jobs SET warnings_json=%s, "
                     "updated_at=now() WHERE job_id=%s AND state = ANY(%s)",
                     (json.dumps(sorted(set(clean))), job_id,
-                     list(ACTIVE_UPLOAD_STATES + [READY, COMPLETED])))
+                     list(ACTIVE_UPLOAD_STATES | {READY, COMPLETED})))
     finally:
         conn.close()
 
