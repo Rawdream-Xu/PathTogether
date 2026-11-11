@@ -20,6 +20,18 @@ def _env(tmp_path, monkeypatch):
 
 
 def test_dbg_admit_reason():
+    import pg_store
+    conn = pg_store.connect()
+    try:
+        with pg_store.transaction(conn) as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO users (user_id, login_id, display_name, role, "
+                    "disabled, created_at, auth_version) VALUES (%s,%s,%s,"
+                    "%s,false,now(),1) ON CONFLICT DO NOTHING",
+                    ("dbg-1", "dbg-1@x", "dbg-1", "user"))
+    finally:
+        conn.close()
     job, _ = ist.create_waiting_job(
         owner_user_id="dbg-1", owner_role="user",
         filename="x.tif", safe_name="x.tif", format_ext="tif",
