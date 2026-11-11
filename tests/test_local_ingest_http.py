@@ -302,6 +302,33 @@ def test_upload_complete_requires_all_parts(owner_client):
 # --------------------------------------------------------------------------- #
 # W6a+W6b：端到端（状态机 + 统一发布 + 阅片）
 # --------------------------------------------------------------------------- #
+def test_worker_completing_duty_ignores_local_transport(owner_client):
+    """P0-W6b2 回归（4.6GB 产物实报 409 的根因）：local_http 任务在
+    completing 态（web 侧正在拼接，GB 级产物耗时数秒）绝不能被 worker 的
+    COS completing duty 领走——COS 合同下无 object_key/upload_id 的任务
+    是「计划丢失」终态 fail（part_plan_lost），但 local 任务这两个字段
+    本就恒空（无远端会话）。正确行为：识别 transport 直接释放租约空转，
+    任务保持 completing 等拼接收口。"""
+    body, data = _create_local(owner_client)
+    job_id = body["job_id"]
+    _put_parts(owner_client, job_id, data, body["parts"])
+    # 直改 store 推进到 completing（模拟「分片齐备 → request_upload_complete
+    # 之后、拼接完成之前」的时间窗——实报里 4.6GB 拼接持续约 3s）
+    ist.request_upload_complete(job_id)
+    assert ist.get_job(job_id)["state"] == ist.COMPLETING
+    # worker 的 COS duty 空转放行（RED 现状：fail part_plan_lost）
+    ciw.process_completing(state={})
+    job = ist.get_job(job_id)
+    assert job["state"] == ist.COMPLETING, job   # 未被终态
+    assert job["fail_code"] is None
+    # web 侧拼接收口仍可完成 → 全链路照常
+    r = owner_client.post("/api/ingestions/%s/upload-complete" % job_id)
+    assert r.status_code == 202, r.get_json()
+    assert r.get_json()["state"] == "queued"
+    job = _drive_worker(owner_client, job_id)
+    assert job["state"] == "completed", job
+
+
 def test_nonpyramidal_tif_end_to_end(owner_client):
     """实测样本形态（非金字塔 stripped .tif）全链路：上传→发布→阅片 info。"""
     data = _mk_png_like_tif(width=80, height=60)
