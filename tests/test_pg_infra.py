@@ -13,6 +13,9 @@
   - 外键冒烟：slide_assets.slide_id → slides（含违规插入失败 + ON DELETE CASCADE）；
   - change_log.bigserial 单调自增。
 """
+import inspect
+import re
+
 import pytest
 
 # 缺基建依赖时整模块 skip（不 fail）
@@ -395,6 +398,33 @@ def test_schema_migrations_recorded(conn):
         # 至多一行（部分唯一索引）。
         "0094_llm_providers.sql",
     ]
+
+
+def test_migrations_dir_files_all_recorded():
+    """磁盘侧 fail-closed 守卫：migrations/ 目录的每个条目都必须是 .sql
+    且被 test_schema_migrations_recorded 的权威清单覆盖。
+
+    ensure_schema 按 glob('*.sql') 发现迁移（pg_store.py:128）：非 .sql
+    的杂项文件会被【静默跳过】（不应用也不记录），上面的 DB 侧断言对此
+    盲区（rows 来自 schema_migrations，不含被跳过的文件）。本守卫直接
+    对照磁盘目录与清单，堵住两条泄漏路径：
+      1. 目录里出现非 .sql 条目（迁移存错后缀/杂物）→ 立即失败；
+      2. 新增 .sql 未登记（本批 0094 两例的原始回归形态）→ 立即失败。
+    """
+    expected = _expected_migration_filenames()
+    on_disk = sorted(p.name for p in pg_store.migrations_dir().iterdir())
+    non_sql = [n for n in on_disk if not n.endswith(".sql")]
+    assert non_sql == [], "migrations/ 出现非 .sql 条目: %s" % non_sql
+    assert on_disk == expected, (
+        "migrations/ 磁盘内容与登记清单不一致；多出 %s，缺登记 %s"
+        % (sorted(set(on_disk) - set(expected)),
+           sorted(set(expected) - set(on_disk))))
+
+
+def _expected_migration_filenames():
+    """从 test_schema_migrations_recorded 源码提取登记清单（单一事实源）。"""
+    src = inspect.getsource(test_schema_migrations_recorded)
+    return sorted(re.findall(r'"(\d{4}_[A-Za-z0-9_]+\.sql)"', src))
 
 
 # --------------------------------------------------------------------------- #
