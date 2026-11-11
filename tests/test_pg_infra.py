@@ -377,6 +377,20 @@ def test_schema_migrations_recorded(conn):
         # subject_type 词表由 'user' 放宽为 'user'|'owner'——owner 迁移
         # Credit 钱包后同样走 hold 预占/结算。
         "0093_owner_credit_holds.sql",
+        # 任务流 P0-W6（2026-11-11）本地直传通道 + mpp 补录：
+        # ingestion_jobs 增加 local_http 存储形态（本地裸部署无 COS 凭证的
+        # 上传通道，分片账本落 local_parts_json）；warnings_json 承载上传期
+        # 警告（jpg/未标定 tif 的 mpp_missing 等随状态体透出）；
+        # slide_mpp_overrides 手动物理尺度补录表（mpp 解析优先级
+        # manual > metadata > tiff-resolution > estimated > missing，
+        # 改动 bump slide_assets revision）。
+        "0094_ingestion_local_channel.sql",
+        # P1-W0 LLM 视觉供应商（docs/llm-vision-w0-decisions.md）：纯
+        # OpenAI 兼容层供应商配置表——api_key Fernet 密文（^enc: CHECK 在
+        # 数据库层兜底永不存明文，公共视图只回显 api_key_tail4）、base_url
+        # 仅 owner 可配；owner 级共享（无 per-user 行），is_default 全局
+        # 至多一行（部分唯一索引）。
+        "0094_llm_providers.sql",
     ]
 
 
