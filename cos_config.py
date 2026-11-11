@@ -129,6 +129,24 @@ COS_FAST_RELAY_READ_TIMEOUT = _env_int("COS_FAST_RELAY_READ_TIMEOUT", 60)
 COS_UPLOAD_CAPABILITY = _env_str("COS_UPLOAD_CAPABILITY", "off")
 
 # --------------------------------------------------------------------------- #
+# 本地直传通道（P0-W6a，2026-11-11）：无 COS 凭证的裸部署上传通道。
+# 分片由浏览器直接 POST 平台（/api/ingestions/<job>/parts/<n>）写 staging，
+# 复用 ingestion 状态机与 slide_publish 统一发布；配额闸沿用 upload_guard。
+# --------------------------------------------------------------------------- #
+#: 通道开关：on=可用（默认——本地裸部署开箱即传）；off=关闭（纯 COS 部署
+#: 可显式关闭，capacity payload 随之 available=false）。
+LOCAL_UPLOAD_CHANNEL = _env_str("LOCAL_UPLOAD_CHANNEL", "on")
+#: 本地直传分片字节数（默认 8 MB；单请求体上限需 ≥ 此值）。
+LOCAL_INGEST_PART_BYTES = _env_int("LOCAL_INGEST_PART_BYTES", 8_000_000)
+#: 本地直传浏览器并发分片数（与 COS 通道同一起点）。
+LOCAL_INGEST_PART_CONCURRENCY = _env_int("LOCAL_INGEST_PART_CONCURRENCY", 3)
+
+
+def local_upload_enabled():
+    """本地直传通道是否开启（env 词表判定；非 on 一律关闭，fail-closed）。"""
+    return LOCAL_UPLOAD_CHANNEL == "on"
+
+# --------------------------------------------------------------------------- #
 # 桶与凭证（worker/签名共用；缺失即 blocked_external_input）
 # --------------------------------------------------------------------------- #
 COS_BUCKET = _env_str("COS_BUCKET")

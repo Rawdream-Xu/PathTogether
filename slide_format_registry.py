@@ -372,13 +372,12 @@ _CATALOG_DISPLAY = (
         "canonical_format": None,
         "bundle_required": False,
         "browser_convert": "available",
-        "direct_import": "closed",
-        "import_mode": "convert",
-        "limits": ["在本机浏览器中转换为 OME-TIFF 后上传（识别未压缩 "
-                   "24/32 位 BMP 与三分量基线 JPEG；其余 BMP/JPEG 变体先"
-                   "在浏览器内统一转换为 24 位 BMP 再转换；整图按瓦片"
-                   "重编码，无物理标尺）；原始 .bmp / .jpg / .jpeg 不再"
-                   "直接导入"],
+        "direct_import": "open",
+        "import_mode": "direct-upload",
+        "limits": ["P0-W6b（2026-11-11）起恢复直传：原始 .bmp / .jpg / "
+                   ".jpeg 可直接上传（伪装/截断/超限按内容校验拒绝）；"
+                   "浏览器转换通道保留为可选归一化；普通图片无物理标尺"
+                   "（µm/px），测量需先在切片元数据中补录"],
         "selectable_for_upload": True,
     },
     {

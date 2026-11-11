@@ -41,6 +41,7 @@ worker/百度路径的 OOM 面）。ZIP 检查只扫中央目录文件名。
 from __future__ import annotations
 
 import json
+import re
 import struct
 import xml.etree.ElementTree as ET
 import zipfile
@@ -128,6 +129,66 @@ def variant_of(value):
     if s.startswith(VARIANT_PREFIX):
         return s[len(VARIANT_PREFIX):]
     return None
+
+
+#: 整对象 sha256 声明的形态（64 位十六进制；创建端校验共用）。
+SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def validate_declaration(safe, kind, value, *, closed_exts,
+                         legacy_direct_exts):
+    """创建时的 direct_class 声明校验 + 直传关闭闸（P0-W6 起双通道共用）。
+
+    从 app._validate_direct_class 移植为纯 dict 契约（不依赖 Flask）：
+    返回 ``(declared|None, None)`` 或 ``(None, error_dict)``，error_dict 含
+    ``error/code/status``（+ 可选 ``tools_url``）——COS 通道（app.py 薄
+    wrapper 转 jsonify）与本地直传通道（local_ingest_http 直接消费）同一
+    语义同一实现。
+
+    - 词表：ome-tiff / converter-bigtiff / legacy-direct /
+      ``unconverted-variant:<variant>``（白名单变体）；非法 → 422
+      invalid_direct_class；
+    - 声明须与扩展名匹配（ome-tiff/converter-bigtiff 只对 .tif/.tiff、
+      svs-jp2k 只对 .svs、legacy-direct 只对 legacy_direct_exts 内扩展名）；
+    - 直传关闭闸：``kind=="native"`` 且扩展名在 ``closed_exts``（目录行
+      direct_import=closed 派生，如 .svs）且无合法 svs-jp2k 变体声明 →
+      422 convert_in_browser + tools_url（可行动指引，不是词表错误）。
+    """
+    ext = safe.rsplit(".", 1)[-1].lower() if "." in safe else ""
+    declared = None
+    if value is not None:
+        if not isinstance(value, str) or not value.strip():
+            return None, {"error": "direct_class 需为非空字符串",
+                          "code": None, "status": 400}
+        declared = value.strip().lower()
+        if not is_direct_class(declared):
+            return None, {"error": "未知的 direct_class 声明",
+                          "code": "invalid_direct_class", "status": 422}
+    if declared == "ome-tiff" and ext not in ("tif", "tiff"):
+        return None, {"error": "ome-tiff 声明只适用于 .tif/.tiff 文件",
+                      "code": "invalid_direct_class", "status": 422}
+    if declared == "converter-bigtiff" and ext not in ("tif", "tiff"):
+        return None, {"error": "converter-bigtiff 声明只适用于 .tif/.tiff 文件",
+                      "code": "invalid_direct_class", "status": 422}
+    variant = variant_of(declared) if declared else None
+    if variant is not None and variant != "svs-jp2k":
+        return None, {"error": "未知的 unconverted-variant 变体",
+                      "code": "invalid_direct_class", "status": 422}
+    if variant is not None and ext != "svs":
+        return None, {
+            "error": "unconverted-variant:svs-jp2k 声明只适用于 .svs 文件",
+            "code": "invalid_direct_class", "status": 422}
+    if kind == "native" and ext in set(closed_exts or ()) \
+            and variant != "svs-jp2k":
+        return None, {
+            "error": "该格式已关闭直传：请在本机转换为 OME-TIFF 后上传"
+                     "（切片转换工具 /tools/slides）",
+            "code": "convert_in_browser", "status": 422,
+            "tools_url": "/tools/slides"}
+    if declared == "legacy-direct" and ext not in set(legacy_direct_exts or ()):
+        return None, {"error": "legacy-direct 声明不适用于该扩展名",
+                      "code": "invalid_direct_class", "status": 422}
+    return declared, None
 
 
 # --------------------------------------------------------------------------- #

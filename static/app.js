@@ -10655,8 +10655,10 @@
     // U3（统一 COS，docs/cos-only-upload-agent-plan-20260928.md §4）：新任务
     // 只建 ingestion。能力不可用（capability off / 容量配置门禁未过）→ 禁用
     // 创建并提示，**不回退 V1/V2**；词表与上限以服务端 capability 为唯一
-    // 权威（cosUploadEligible 判定），不合格即说明原因。
-    if (!COS_UPLOAD_CONFIG) {
+    // 权威（cosUploadEligible 判定），不合格即说明原因。P0-W6a：本地通道
+    //（local_upload）可用即视为可用（两通道任一可用即可上传）。
+    if (!((typeof LOCAL_UPLOAD_CONFIG !== "undefined" &&
+           LOCAL_UPLOAD_CONFIG) || COS_UPLOAD_CONFIG)) {
       row.markError();
       row.setStage("upload.cos.unavailable");
       row.finish(10000);
@@ -10793,22 +10795,45 @@
 
   var COS_UPLOAD_CONFIG = resolveCosConfig();
 
+  // P0-W6a：本地直传通道（window.HP_LOCAL_UPLOAD，static/upload/
+  // local-uploader.js）。唯一权威 bootstrap.capabilities.local_upload
+  //（app.py _app_capabilities）——available 与 COS 凭证无关（本地裸部署
+  // 即 true）。通道选择：local 可用优先本地（不经外网；COS 配置后两
+  // 通道并存，本地恒优先）；local 不可用时回落 COS。
+  function resolveLocalConfig() {
+    if (!window.HP_LOCAL_UPLOAD) return null;
+    try {
+      var caps = window.HP_APP_BOOTSTRAP && window.HP_APP_BOOTSTRAP.capabilities;
+      return window.HP_LOCAL_UPLOAD.resolveConfig(caps && caps.local_upload);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  var LOCAL_UPLOAD_CONFIG = resolveLocalConfig();
+
+  // 当前生效的上传通道配置（local 优先；引擎选择在 uploadFileCos 内联）。
+  function activeUploadConfig() {
+    return LOCAL_UPLOAD_CONFIG || COS_UPLOAD_CONFIG;
+  }
+
   // U3：手动选路开关退役（统一 COS，无按大小/格式分流）。
+  // P0-W6a：词表/上限判定改用当前生效通道（local 优先，两通道词表同源
+  // 自注册表——W6b 起 jpg/jpeg/bmp 直传解禁随服务端 capability 自动生效）。
   function cosUploadEligible(file) {
-    // 词表/上限全部来自服务端 capability（注册表派生 + 产品上限）——前端
-    // 不再维护第二份格式例外（zip/conversion 由服务端受理，裸 mrxs 由
-    // 服务端拒绝并提示打包）。
-    if (!COS_UPLOAD_CONFIG) return false;
+    var cfg = activeUploadConfig();
+    if (!cfg) return false;
     if (!file || typeof file.size !== "number") return false;
-    if (file.size <= 0 || file.size > COS_UPLOAD_CONFIG.max_size_bytes) return false;
+    if (file.size <= 0 || file.size > cfg.max_size_bytes) return false;
     var name = file.name || "";
     var ext = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
-    return COS_UPLOAD_CONFIG.formats.indexOf(ext) >= 0;
+    return cfg.formats.indexOf(ext) >= 0;
   }
 
   function cosIneligibleReason(file) {
+    var cfg = activeUploadConfig() || { max_size_bytes: 0 };
     if (file && typeof file.size === "number" &&
-        (file.size <= 0 || file.size > COS_UPLOAD_CONFIG.max_size_bytes)) {
+        (file.size <= 0 || file.size > cfg.max_size_bytes)) {
       return tt("upload.cos.err.too_large");
     }
     return tt("upload.cos.err.format_unsupported");
@@ -11128,7 +11153,15 @@
       dropVisPoke();        // 注销可见性触点（别留悬空监听）
       if (opts.onOutcome) opts.onOutcome(body, err);
     }
-    if (!window.HP_COS_UPLOAD || !COS_UPLOAD_CONFIG) {
+    // P0-W6a：通道解析（local 优先；两引擎 createUpload 对外合同同形）。
+    // 函数内联判定（不引外部 helper，切片测试可独立运行）：local 引擎+
+    // 配置可用走本地直传，否则回落 COS。引擎缺失/配置非法同样走「建引擎
+    // 前失败」出口（P2 问题 1）。
+    var channel = (typeof LOCAL_UPLOAD_CONFIG !== "undefined" &&
+                   LOCAL_UPLOAD_CONFIG && window.HP_LOCAL_UPLOAD)
+      ? { engine: window.HP_LOCAL_UPLOAD, config: LOCAL_UPLOAD_CONFIG }
+      : { engine: window.HP_COS_UPLOAD, config: COS_UPLOAD_CONFIG };
+    if (!channel.engine || !channel.config) {
       row.markError();
       row.setStage("upload.stage.failed");
       row.finish(10000);
@@ -11241,10 +11274,10 @@
         settleOutcome(null, { cancelled: true, __cancelled: true });
         return;
       }
-      upload = window.HP_COS_UPLOAD.createUpload({
+      upload = channel.engine.createUpload({
         source: file,
         apiFetch: apiFetch,
-        config: COS_UPLOAD_CONFIG,
+        config: channel.config,
         // 阶段 1：创建 ingestion 时携带嗅探出的直传类别声明（服务端词表校验，
         // worker 在 open_slide 前头级核验；无声明则不带字段——存量语义不变）
         createBody: opts.directClass ? { direct_class: opts.directClass } : null,

@@ -154,19 +154,17 @@ def test_raster_image_whitelist_synced():
     U5（检查点 B）：app._upload_ext_allowed 已退役——受理判定经
     _cos_ingestion_kind_for（注册表派生）。
 
-    2026-11-05：原始 .bmp/.jpg/.jpeg 不再建 ingestion（422
-    raster_requires_conversion）；上传的是浏览器转换后的 OME-TIFF。"""
+    P0-W6b（2026-11-11 解禁）：.bmp/.jpg/.jpeg 恢复直传受理（native）——
+    RasterSlide 已可读，伪装/截断/超限校验由 open_slide 终审。"""
     import app
 
     assert {"bmp", "jpg", "jpeg"} <= app.SUPPORTED_EXTS
     with app.app.test_request_context("/"):
         for name in ("a.bmp", "a.JPG", "a.jpeg"):
             kind, err = app._cos_ingestion_kind_for(name.lower())
-            assert kind is None and err is not None, name
-            assert err[1] == 422, name
-            assert err[0].get_json()["code"] == "raster_requires_conversion", name
+            assert kind == "native" and err is None, name
         # 大小写不敏感 + kfb/kfbf 走 convert-required 通道、未知仍拒绝
-        assert app._cos_ingestion_kind_for("a.BMP")[0] is None
+        assert app._cos_ingestion_kind_for("a.BMP")[0] == "native"
         assert app._cos_ingestion_kind_for("a.kfb")[0] == "conversion"
         assert app._cos_ingestion_kind_for("a.kfbf")[0] == "conversion"
         assert app._cos_ingestion_kind_for("a.png")[0] is None  # 未知仍拒绝
@@ -176,8 +174,8 @@ def test_raster_image_whitelist_synced():
 def test_public_catalog_raster_image_row():
     """目录单列一条 raster-image：转换可用、可选上传、用户向短句（F8）。
 
-    2026-11-05：直传关闭（direct_import=closed）——普通图片必须先在本机
-    浏览器转换为 OME-TIFF，原始图片不进入平台受理集。"""
+    P0-W6b（2026-11-11 解禁）：直传恢复开放（direct_import=open）——
+    RasterSlide 直读原始图片；浏览器转换通道保留（格式归一化可选）。"""
     rows = {item["id"]: item for item in reg.public_catalog()}
     item = rows["raster-image"]
     assert item["display_name"] == "普通图片（BMP / JPEG）"
@@ -185,13 +183,12 @@ def test_public_catalog_raster_image_row():
     assert item["capability"] == reg.CAP_NATIVE_SINGLE_FILE
     assert item["canonical_format"] is None
     assert item["bundle_required"] is False
-    assert item["import_mode"] == "convert"
+    assert item["import_mode"] == "direct-upload"
     assert item["browser_convert"] == "available"
-    assert item["direct_import"] == "closed"
+    assert item["direct_import"] == "open"
     assert item["selectable_for_upload"] is True
     assert item["limits"], "用户向短句必须非空"
-    assert "在本机浏览器中转换为 OME-TIFF 后上传" in "".join(item["limits"])
-    assert "不再直接导入" in "".join(item["limits"])
+    assert "无物理标尺" in "".join(item["limits"])
 
 
 def test_public_catalog_user_wording_no_internal_terms():
@@ -259,11 +256,11 @@ def test_public_catalog_direct_class_flags():
     assert rows["vms"]["import_mode"] == "convert"
     assert rows["vms"]["browser_convert"] == "available"
     assert rows["vms"]["direct_import"] == "open"
-    # F8 + 2026-11-05：普通图片（BMP/JPEG）转换可用且直传关闭——所有
-    # BMP/JPEG 变体先在浏览器解码归一化，再统一转成 OME-TIFF 上传。
-    assert rows["raster-image"]["import_mode"] == "convert"
+    # F8 + P0-W6b：普通图片（BMP/JPEG）转换可用且直传恢复开放——原始
+    # 图片可直传（RasterSlide 直读），浏览器转换通道保留为可选归一化。
+    assert rows["raster-image"]["import_mode"] == "direct-upload"
     assert rows["raster-image"]["browser_convert"] == "available"
-    assert rows["raster-image"]["direct_import"] == "closed"
+    assert rows["raster-image"]["direct_import"] == "open"
     # Ventana BIF 浏览器转换器已落地（重叠瓦片拼接重编码）；直传保持
     # 开放（转换器落地与直传关闭是两个独立决定）
     assert rows["bif"]["import_mode"] == "convert"
@@ -289,8 +286,7 @@ def test_public_catalog_direct_class_flags():
 def test_catalog_flag_derived_vocabularies():
     """catalog_rows_by_flag 派生两张词表（app 能力下发/关闭闸共用）。"""
     closed = reg.catalog_rows_by_flag("direct_import", "closed")
-    assert closed == {"svs", "mrxs", "kfb", "kfbf", "tmap",
-                      "bmp", "jpg", "jpeg"}
+    assert closed == {"svs", "mrxs", "kfb", "kfbf", "tmap"}
     # F5/F6/F8：tif/tiff、ndpi、vms 与 raster-image（bmp/jpg/jpeg）加入
     # browser_convert 集合（direct_import 仍 open）；TMAP06 转换可用且
     # 直传关闭
@@ -307,8 +303,8 @@ def test_vendor_names_corrected():
     assert rows["svslide"]["display_name"].startswith("Sakura")
 
 
-def test_capability_vocabularies_exclude_raster_originals():
-    """2026-11-05：直传清单与 COS 受理词表都不再包含原始普通图片。
+def test_capability_vocabularies_include_raster_originals():
+    """P0-W6b（2026-11-11 解禁）：直传清单与受理词表恢复包含原始普通图片。
 
     前端只据服务端下发的这两张清单决定直传/受理；OME-TIFF 产物仍照常
     受理（.tif/.ome.tif），既有 raster 切片的读取不受影响。
@@ -318,8 +314,8 @@ def test_capability_vocabularies_exclude_raster_originals():
     raster = {"bmp", "jpg", "jpeg"}
     direct = app._direct_upload_formats()
     accepted = app._cos_accepted_formats()
-    assert not (direct & raster)
-    assert not (accepted & raster)
+    assert raster <= direct
+    assert raster <= accepted
     assert {"tif", "tiff"} <= direct
     assert "ome.tif" in direct
     assert {"tif", "tiff"} <= accepted
