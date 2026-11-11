@@ -37,7 +37,29 @@ def test_dbg_admit_reason():
         filename="x.tif", safe_name="x.tif", format_ext="tif",
         declared_size=128, transport=ist.TRANSPORT_LOCAL)
     print("\ncreated:", job["job_id"], job["state"], job["transport"])
-    out = ist.try_admit_job(job["job_id"], disk_watermark_ok=True)
+    # 复刻 handle_create 的探测段（含 mkdir + watermark）
+    import local_ingest_http as lih
+    import upload_guard as ug
+    import os
+    try:
+        root = lih._upload_root()
+        os.makedirs(root, exist_ok=True)
+        ug.check_disk_watermark(root)
+        wm = True
+    except Exception as exc:
+        wm = False
+        print("watermark probe FAILED:", type(exc).__name__, exc)
+    out = ist.try_admit_job(job["job_id"], disk_watermark_ok=wm)
     print("outcome:", out["outcome"], "reason:", out["reason"],
           "state:", out["job"]["state"])
+    if out["outcome"] != "admitted":
+        import pg_store
+        conn = pg_store.connect()
+        with conn.cursor() as cur:
+            cur.execute("SELECT reservation_id, user_id, state, holder_kind,"
+                        " holder_id, origin FROM upload_reservations "
+                        "ORDER BY reserved_at DESC LIMIT 5")
+            for row in cur.fetchall():
+                print("resv:", dict(row))
+        conn.close()
     assert out["outcome"] == "admitted", out["reason"]
