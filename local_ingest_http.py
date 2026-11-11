@@ -231,10 +231,14 @@ def handle_create(ident, body, product_max_bytes):
             return _err(str(e), code="ingestion_owner_missing", status=500)
         return _err(str(e), code="cos_waiting_limit", status=409)
 
-    # 创建后立即尝试准入（本地配额/水位/活跃上限；不足转等待）
+    # 创建后立即尝试准入（本地配额/水位/活跃上限；不足转等待）。
+    # 首次部署 UPLOAD_DIR 可能尚不存在——先建根再探测（水位探测对不
+    # 存在目录抛异常会误把任务转 waiting）。
     try:
         import upload_guard
-        upload_guard.check_disk_watermark(_upload_root())
+        root = _upload_root()
+        os.makedirs(root, exist_ok=True)
+        upload_guard.check_disk_watermark(root)
         watermark_ok = True
     except Exception:  # noqa: BLE001 - 水位探测失败按不通过处理（fail-closed）
         watermark_ok = False

@@ -403,7 +403,8 @@ def test_local_requires_csrf_token(monkeypatch):
         s["auth_version"] = 1
     r = raw.post("/api/ingestions/local", json=dict(
         filename="x.tif", declared_size=128))
-    assert r.status_code == 403           # 全局 CSRF 闸（写请求无 token）
+    assert r.status_code == 400           # 全局 CSRF 闸（写请求无 token）
+    assert r.get_json()["error"] == "csrf_required"
 
 
 def test_part_upload_ownership_enforced(owner_client, user_client):
