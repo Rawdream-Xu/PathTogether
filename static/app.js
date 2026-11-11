@@ -15239,6 +15239,9 @@
       };
     }
     return (tbFoldSteps = [
+      // P1-W0d：AI 识图/切换入口最低频（可从 ⋯ 菜单重进），溢出时最先让位
+      foldStep("llm-vision-caret"),
+      foldStep("llm-vision-btn"),
       foldStep("rgb-badge"),
       foldStep("mpp-setter"),
       foldStep("zoom-native"),
@@ -15684,6 +15687,7 @@
       HP_LLM_VISION.mount({
         btn: els.llmVisionBtn,
         caret: els.llmVisionCaret,
+        moreItem: $("tbb-more-llm-vision"),
         container: viewer && viewer.container,
         apiFetch: apiFetch,
         getSlide: function () { return state.slide; },

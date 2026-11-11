@@ -201,6 +201,9 @@
         {% if mode == 'demo' or histopilot_ui_enabled %}
         <button id="tbb-more-ai" class="tool-btn" data-i18n-title="tb.ai.title" data-i18n="tb.ai.more">✨ AI 读片</button>
         {% endif %}
+        {# P1-W0d：识图入口被溢出收纳折入 ⋯ 时的菜单项（llm-vision-ui.js 显隐与主按钮同步） #}
+        <button id="tbb-more-llm-vision" class="tool-btn" role="menuitem"
+                title="AI 识图（当前视野/选框 → 视觉大模型描述）" hidden>🔍 AI 识图</button>
         {% if C.annotate %}
         <button id="anno-all-btn" class="tool-btn" role="menuitem" data-i18n="tb.anno.show.all" disabled>显示全部标记</button>
         {% endif %}

@@ -415,6 +415,8 @@
       var usable = pickProvider(_providers);
       _deps.btn.hidden = !usable;
       if (_deps.caret) _deps.caret.hidden = !usable;
+      // ⋯ 菜单项与主按钮同显隐（窄视口溢出收纳后的备选入口）
+      if (_deps.moreItem) _deps.moreItem.hidden = !usable;
       if (usable && _pop && _pop.isConnected) closePickerPop();  // 列表已变，旧弹层作废
     }).catch(function () { _deps.btn.hidden = true; });
   }
@@ -431,6 +433,12 @@
         deps.caret.addEventListener("click", function () {
           if (!_providers.length) loadProviders();
           togglePickerPop();
+        });
+      }
+      if (deps.moreItem) {
+        deps.moreItem.addEventListener("click", function () {
+          if (!_providers.length) loadProviders();
+          renderPanel();
         });
       }
       loadProviders();
