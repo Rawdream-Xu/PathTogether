@@ -11766,7 +11766,12 @@
         ? window.HP_INLINE_CONVERT.normalizeConfig(caps) : null,
       directUploadFormats: (cos.direct_upload && cos.direct_upload.formats) || null,
       browserConvertFormats: (cos.browser_convert && cos.browser_convert.formats) || null,
-      cosConfig: resolveCosConfig(),
+      // P0-W6 后续：这个槽位是「当前生效的上传通道配置」（activeUploadConfig
+      // ——local 优先，COS 配置后并存但本地恒优先）。inline-convert 的入队/
+      // 门禁/产物闸只认「有可用通道配置」，对两通道同形消费；引擎选择在
+      // app.js 的 createEntryUpload 按 cfg 来源分派——本地裸部署（无 COS
+      // 凭证）的转换产物（KFB→BigTIFF 等）同样可传。
+      cosConfig: activeUploadConfig(),
     };
   }
 
@@ -12249,7 +12254,17 @@
     var name = entry.artifactName || entry.name;
     var declaration = window.HP_INLINE_CONVERT
       ? window.HP_INLINE_CONVERT.artifactDeclaration(entry.artifactCls) : null;
-    var cfg = resolveCosConfig();
+    // P0-W6 后续：产物上传用「当前生效的上传通道配置」（local 优先——
+    // 与 inlineCaps 注入编排器的同一来源；COS 不可用而本地通道可用时，
+    // 转换产物走本地直传引擎，见 createEntryUpload 的分派）。函数内联
+    // 三级判定（切片测试沙箱按注入逐级可见；resolveCosConfig 兜底与
+    // 旧切片用例的注入兼容）。
+    var cfg = (typeof LOCAL_UPLOAD_CONFIG !== "undefined" &&
+               LOCAL_UPLOAD_CONFIG) ||
+              (typeof COS_UPLOAD_CONFIG !== "undefined" &&
+               COS_UPLOAD_CONFIG) ||
+              (typeof resolveCosConfig === "function"
+               ? resolveCosConfig() : null);
     if (!cfg) return Promise.reject({ data: { code: "cos_unavailable" } });
     // 复核 #4：建引擎之前等身份落定——createEntryUpload 的 storage.save
     // （upload.account）、引擎 opts.account、getJob 后的归属复核 `me` 都以
@@ -12380,7 +12395,13 @@
     }
     if (acct === null) acct = String(currentUserId || "");
     return new Promise(function (resolve, reject) {
-      var upload = window.HP_COS_UPLOAD.createUpload({
+      // P0-W6 后续：引擎随 cfg 来源分派——inlineCaps 在 COS 不可用而本地
+      // 通道可用时注入 LOCAL_UPLOAD_CONFIG，此时产物上传走本地直传引擎
+      //（两引擎 createUpload 对外合同同形；typeof 保护切片测试沙箱）。
+      var localEng = (typeof LOCAL_UPLOAD_CONFIG !== "undefined" &&
+                      cfg === LOCAL_UPLOAD_CONFIG && window.HP_LOCAL_UPLOAD)
+        ? window.HP_LOCAL_UPLOAD : null;
+      var upload = (localEng || window.HP_COS_UPLOAD).createUpload({
         source: {
           name: name, size: artifact.size,
           slice: function (s, e) { return artifact.slice(s, e); },
