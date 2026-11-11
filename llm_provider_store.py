@@ -202,21 +202,22 @@ def create_provider(*, name, base_url, api_key, models, default_model,
     pid = "lp_" + secrets.token_hex(12)
     conn = _connect()
     try:
-        with pg_store.transaction(conn) as cur:
-            if is_default:
-                cur.execute("UPDATE llm_providers SET is_default=false "
-                            "WHERE is_default")
-            cur.execute(
-                "INSERT INTO llm_providers (provider_id, name, base_url, "
-                "api_key_encrypted, api_key_tail4, models, default_model, "
-                "enabled, is_default, created_by) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
-                (pid, name, base_url, encrypted, api_key[-4:],
-                 psycopg.types.json.Jsonb(models), dm or models[0],
-                 bool(enabled), bool(is_default), created_by))
-            row = _row_to_dict(cur.fetchone())
-            _audit(cur, "llm_provider.created",
-                   {"provider_id": pid, "name": name})
+        with pg_store.transaction(conn) as c:
+            with c.cursor() as cur:
+                if is_default:
+                    cur.execute("UPDATE llm_providers SET is_default=false "
+                                "WHERE is_default")
+                cur.execute(
+                    "INSERT INTO llm_providers (provider_id, name, base_url, "
+                    "api_key_encrypted, api_key_tail4, models, default_model, "
+                    "enabled, is_default, created_by) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                    (pid, name, base_url, encrypted, api_key[-4:],
+                     psycopg.types.json.Jsonb(models), dm or models[0],
+                     bool(enabled), bool(is_default), created_by))
+                row = _row_to_dict(cur.fetchone())
+                _audit(cur, "llm_provider.created",
+                       {"provider_id": pid, "name": name})
     except psycopg.errors.UniqueViolation as exc:
         # 0000 语义：name 唯一 / provider_id 撞（后者概率忽略）
         raise ValidationError("供应商名称已存在") from exc
@@ -232,63 +233,70 @@ def update_provider(provider_id: str, *, expected_revision=None, **fields) -> di
     """
     conn = _connect()
     try:
-        with pg_store.transaction(conn) as cur:
-            cur.execute("SELECT * FROM llm_providers WHERE provider_id=%s "
-                        "FOR UPDATE", (provider_id,))
-            row = cur.fetchone()
-            if row is None:
-                raise NotFoundError("供应商不存在")
-            if expected_revision is not None \
-                    and int(expected_revision) != int(row["revision"]):
-                raise RevisionConflictError("配置已被他人修改，请刷新后重试")
+        with pg_store.transaction(conn) as c:
+            with c.cursor() as cur:
+                cur.execute("SELECT * FROM llm_providers WHERE provider_id=%s "
+                            "FOR UPDATE", (provider_id,))
+                row = cur.fetchone()
+                if row is None:
+                    raise NotFoundError("供应商不存在")
+                if expected_revision is not None \
+                        and int(expected_revision) != int(row["revision"]):
+                    raise RevisionConflictError("配置已被他人修改，请刷新后重试")
 
-            sets, params = [], []
-            if "name" in fields:
-                sets.append("name=%s"); params.append(_validate_name(fields["name"]))
-            if "base_url" in fields:
-                sets.append("base_url=%s")
-                params.append(validate_base_url(fields["base_url"]))
-            if "models" in fields:
-                sets.append("models=%s"); params.append(
-                    psycopg.types.json.Jsonb(_validate_models(fields["models"])))
-            if "api_key" in fields and str(fields["api_key"] or "").strip():
-                plain = str(fields["api_key"]).strip()
-                if len(plain) < 8:
-                    raise ValidationError("api_key 需为至少 8 位字符串")
-                sets.append("api_key_encrypted=%s"); params.append(_encrypt(plain))
-                sets.append("api_key_tail4=%s"); params.append(plain[-4:])
-            if "default_model" in fields:
-                dm = str(fields["default_model"] or "").strip()
-                models = fields.get("models")
-                if models is None:
-                    cur.execute("SELECT models FROM llm_providers "
-                                "WHERE provider_id=%s", (provider_id,))
-                    models = (cur.fetchone() or {}).get("models") or []
-                dm_valid = dm in list(models)
-                if dm and not dm_valid:
-                    raise ValidationError("default_model 需在 models 列表内")
-                sets.append("default_model=%s"); params.append(dm)
-            if "enabled" in fields:
-                sets.append("enabled=%s"); params.append(bool(fields["enabled"]))
-            if "is_default" in fields:
-                if fields["is_default"]:
-                    cur.execute("UPDATE llm_providers SET is_default=false "
-                                "WHERE is_default")
-                sets.append("is_default=%s")
-                params.append(bool(fields["is_default"]))
-            if not sets:
-                return public_provider(_row_to_dict(row))
-            sets.append("updated_at=now()")
-            sets.append("revision=revision+1")
-            params.append(provider_id)
-            cur.execute("UPDATE llm_providers SET %s WHERE provider_id=%s "
-                        "RETURNING *" % ",".join(sets), tuple(params))
-            out = _row_to_dict(cur.fetchone())
-            changed = sorted(k for k in fields if k != "api_key")
-            if "api_key" in fields and str(fields["api_key"] or "").strip():
-                changed.append("api_key")  # 只记“换了 key”这一事实，绝不记值
-            _audit(cur, "llm_provider.updated",
-                   {"provider_id": provider_id, "fields": changed})
+                sets, params = [], []
+                if "name" in fields:
+                    sets.append("name=%s")
+                    params.append(_validate_name(fields["name"]))
+                if "base_url" in fields:
+                    sets.append("base_url=%s")
+                    params.append(validate_base_url(fields["base_url"]))
+                if "models" in fields:
+                    sets.append("models=%s")
+                    params.append(psycopg.types.json.Jsonb(
+                        _validate_models(fields["models"])))
+                if "api_key" in fields and str(fields["api_key"] or "").strip():
+                    plain = str(fields["api_key"]).strip()
+                    if len(plain) < 8:
+                        raise ValidationError("api_key 需为至少 8 位字符串")
+                    sets.append("api_key_encrypted=%s")
+                    params.append(_encrypt(plain))
+                    sets.append("api_key_tail4=%s")
+                    params.append(plain[-4:])
+                if "default_model" in fields:
+                    dm = str(fields["default_model"] or "").strip()
+                    models = fields.get("models")
+                    if models is None:
+                        cur.execute("SELECT models FROM llm_providers "
+                                    "WHERE provider_id=%s", (provider_id,))
+                        models = (cur.fetchone() or {}).get("models") or []
+                    if dm and dm not in list(models):
+                        raise ValidationError("default_model 需在 models 列表内")
+                    sets.append("default_model=%s")
+                    params.append(dm)
+                if "enabled" in fields:
+                    sets.append("enabled=%s")
+                    params.append(bool(fields["enabled"]))
+                if "is_default" in fields:
+                    if fields["is_default"]:
+                        cur.execute("UPDATE llm_providers SET is_default=false "
+                                    "WHERE is_default")
+                    sets.append("is_default=%s")
+                    params.append(bool(fields["is_default"]))
+                if not sets:
+                    return public_provider(_row_to_dict(row))
+                sets.append("updated_at=now()")
+                sets.append("revision=revision+1")
+                params.append(provider_id)
+                cur.execute(
+                    "UPDATE llm_providers SET " + ", ".join(sets) +
+                    " WHERE provider_id=%s RETURNING *", tuple(params))
+                out = _row_to_dict(cur.fetchone())
+                changed = sorted(k for k in fields if k != "api_key")
+                if "api_key" in fields and str(fields["api_key"] or "").strip():
+                    changed.append("api_key")  # 只记“换了 key”这一事实，绝不记值
+                _audit(cur, "llm_provider.updated",
+                       {"provider_id": provider_id, "fields": changed})
     finally:
         conn.close()
     return public_provider(out)
@@ -297,14 +305,15 @@ def update_provider(provider_id: str, *, expected_revision=None, **fields) -> di
 def delete_provider(provider_id: str) -> None:
     conn = _connect()
     try:
-        with pg_store.transaction(conn) as cur:
-            cur.execute("DELETE FROM llm_providers WHERE provider_id=%s "
-                        "RETURNING name", (provider_id,))
-            row = cur.fetchone()
-            if row is None:
-                raise NotFoundError("供应商不存在")
-            _audit(cur, "llm_provider.deleted",
-                   {"provider_id": provider_id, "name": row["name"]})
+        with pg_store.transaction(conn) as c:
+            with c.cursor() as cur:
+                cur.execute("DELETE FROM llm_providers WHERE provider_id=%s "
+                            "RETURNING name", (provider_id,))
+                row = cur.fetchone()
+                if row is None:
+                    raise NotFoundError("供应商不存在")
+                _audit(cur, "llm_provider.deleted",
+                       {"provider_id": provider_id, "name": row["name"]})
     finally:
         conn.close()
 
@@ -313,18 +322,19 @@ def set_default(provider_id: str) -> None:
     """设默认（全局唯一；不存在 404）。"""
     conn = _connect()
     try:
-        with pg_store.transaction(conn) as cur:
-            cur.execute("SELECT name FROM llm_providers WHERE provider_id=%s "
-                        "FOR UPDATE", (provider_id,))
-            if cur.fetchone() is None:
-                raise NotFoundError("供应商不存在")
-            cur.execute("UPDATE llm_providers SET is_default=false "
-                        "WHERE is_default")
-            cur.execute("UPDATE llm_providers SET is_default=true, "
-                        "updated_at=now(), revision=revision+1 "
-                        "WHERE provider_id=%s", (provider_id,))
-            _audit(cur, "llm_provider.default_set",
-                   {"provider_id": provider_id})
+        with pg_store.transaction(conn) as c:
+            with c.cursor() as cur:
+                cur.execute("SELECT name FROM llm_providers WHERE provider_id=%s "
+                            "FOR UPDATE", (provider_id,))
+                if cur.fetchone() is None:
+                    raise NotFoundError("供应商不存在")
+                cur.execute("UPDATE llm_providers SET is_default=false "
+                            "WHERE is_default")
+                cur.execute("UPDATE llm_providers SET is_default=true, "
+                            "updated_at=now(), revision=revision+1 "
+                            "WHERE provider_id=%s", (provider_id,))
+                _audit(cur, "llm_provider.default_set",
+                       {"provider_id": provider_id})
     finally:
         conn.close()
 

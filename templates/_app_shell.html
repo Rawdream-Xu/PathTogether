@@ -126,6 +126,9 @@
       <span class="tb-sep" aria-hidden="true"></span>
       <button id="ai-btn" class="tool-btn ai-btn" data-i18n-title="tb.ai.title" {% if mode != 'demo' %}disabled {% endif %}title="AI 读片助手"><span data-i18n="tb.ai">✨ AI</span></button>
       {% endif %}
+      {# P1-W0d：AI 识图（默认隐藏；llm-vision-ui.js 探测到可用供应商后显示）#}
+      <button id="llm-vision-btn" class="tool-btn llm-vision-btn" type="button"
+              title="AI 识图（当前视野/选框 → 视觉大模型描述）" hidden>🔍 识图</button>
 
       {# 多通道通道着色（Batch 4）：默认隐藏，info 带 multichannel 能力才由
          channel-controls.js 显示；RGB 切片最多显示灰色「原始 RGB」小标识 #}
@@ -632,6 +635,12 @@
               <div class="acct-settings-actions">
                 <button type="button" id="acct-settings-datashare" class="btn secondary small" data-i18n="acct.datashare">数据共享</button>
               </div>
+            </div>
+            {# P1-W0c：owner 专属「AI 供应商」面板（llm-provider-panel.js 渲染；
+               非 owner 由 app.js 保持 hidden）#}
+            <div class="acct-settings-section" id="acct-settings-llm" hidden>
+              <p class="acct-settings-section-title">AI 供应商</p>
+              <div id="llm-providers-panel"></div>
             </div>
             <div class="acct-settings-actions acct-settings-owner-actions">
               <a id="acct-settings-admin" class="btn secondary small"

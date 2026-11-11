@@ -48,12 +48,13 @@ PLAINTEXT_2 = _dummy_secret()    # 换 key 用例的哑 api_key
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
     isolate_app(monkeypatch, tmp_path)
-    # 每用例注入独立 Fernet（真实加解密，密钥随机）
+    # 每用例注入独立 Fernet（真实加解密，密钥随机）；yield 出实例供
+    # 「不可用→恢复」类用例回挂
     fer = Fernet(Fernet.generate_key())
     monkeypatch.setattr(store, "_fernet_factory", lambda: fer)
     # 默认拒绝私网；个别用例自行覆盖 env
     monkeypatch.delenv("LLM_VISION_ALLOW_PRIVATE_UPSTREAM", raising=False)
-    yield
+    yield fer
 
 
 @pytest.fixture(autouse=True)
@@ -70,6 +71,8 @@ def _dns(monkeypatch):
             return [ipaddress.ip_address("127.0.0.1")]
         if h in ("metadata.google.internal", "metadata.goog", "metadata"):
             return [ipaddress.ip_address("169.254.169.254")]
+        if h == "internal.corp.example" or h.endswith(".internal"):
+            return [ipaddress.ip_address("10.20.30.40")]
         return [ipaddress.ip_address("93.184.216.34")]
 
     monkeypatch.setattr(llm_vision, "_host_ips", fake_ips)
@@ -118,7 +121,7 @@ def test_provider_for_call_returns_plaintext_only_server_side():
     assert full["api_key"] == PLAINTEXT  # 仅服务端调用上游用
 
 
-def test_fernet_unavailable_rejects_new_key_but_keeps_old(monkeypatch):
+def test_fernet_unavailable_rejects_new_key_but_keeps_old(monkeypatch, _isolate):
     row = _create()
     monkeypatch.setattr(store, "_fernet_factory", lambda: None)
     with pytest.raises(store.SecretUnavailableError):
@@ -129,6 +132,8 @@ def test_fernet_unavailable_rejects_new_key_but_keeps_old(monkeypatch):
     # 不动 key 的更新照常
     out = store.update_provider(row["provider_id"], enabled=False)
     assert out["enabled"] is False
+    # 密钥恢复可用后旧密文照常解出（fail-closed 只拒绝新写入，不毁存量）
+    monkeypatch.setattr(store, "_fernet_factory", lambda: _isolate)
     assert store.get_provider_for_call(row["provider_id"])["api_key"] == PLAINTEXT
 
 
@@ -153,7 +158,7 @@ def test_fernet_unavailable_rejects_new_key_but_keeps_old(monkeypatch):
 ])
 def test_base_url_rejected(url):
     with pytest.raises(store.BaseUrlInvalidError):
-        _create(name="Bad-%s" % abs(hash(url)) % 1000, base_url=url)
+        _create(name="Bad-%d" % (abs(hash(url)) % 100000), base_url=url)
 
 
 @pytest.mark.parametrize("url", [
@@ -162,7 +167,7 @@ def test_base_url_rejected(url):
     "https://open.bigmodel.cn/api/paas/v4",
 ])
 def test_base_url_accepted(url):
-    row = _create(name="Ok-%s" % abs(hash(url)) % 1000, base_url=url)
+    row = _create(name="Ok-%d" % (abs(hash(url)) % 100000), base_url=url)
     assert row["base_url"] == url
 
 
@@ -211,9 +216,13 @@ def test_update_revision_cas():
     row = _create(name="CAS")
     with pytest.raises(store.RevisionConflictError):
         store.update_provider(row["provider_id"], expected_revision=999,
-                              default_model="m2")
+                              name="CAS-9")
+    # default_model 需与 models 同请求保持一致（换默认需同时扩 models）
+    with pytest.raises(store.ValidationError):
+        store.update_provider(row["provider_id"], default_model="m2")
     out = store.update_provider(row["provider_id"],
                                 expected_revision=row["revision"],
+                                models=["deepseek-chat", "m2"],
                                 default_model="m2")
     assert out["revision"] == row["revision"] + 1
     assert out["default_model"] == "m2"
@@ -253,7 +262,8 @@ def test_models_must_be_list_of_strings():
 
 def test_audit_rows_written_without_key_material():
     row = _create(name="Audited")
-    store.update_provider(row["provider_id"], default_model="m9")
+    store.update_provider(row["provider_id"], models=["deepseek-chat", "m9"],
+                          default_model="m9")
     store.set_default(row["provider_id"])
     store.delete_provider(row["provider_id"])
     conn = pg_connection()

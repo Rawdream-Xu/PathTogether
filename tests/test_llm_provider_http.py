@@ -209,8 +209,10 @@ def test_owner_crud_roundtrip(users):
     assert item["base_url"] == "https://open.bigmodel.cn/api/paas/v4"
     assert item["is_default"] is True
 
+    # 换默认模型需同请求扩 models（default_model ∈ models 契约）
     r = c.patch("/api/llm/providers/%s" % pid,
-                json={"default_model": "glm-4v-plus", "api_key": ""})
+                json={"models": ["glm-4v", "glm-4v-plus"],
+                      "default_model": "glm-4v-plus", "api_key": ""})
     assert r.status_code == 200
     assert r.get_json()["default_model"] == "glm-4v-plus"
     assert r.get_json()["api_key_tail4"] == PLAINTEXT[-4:], "空 key=保留旧值"
@@ -358,6 +360,7 @@ def test_vision_api_key_never_in_response_or_logs(users, monkeypatch, caplog):
 def test_vision_rate_limited(users, monkeypatch):
     _make_provider()
     monkeypatch.setattr(http, "_VISION_RATE_PER_MIN", 1)
+    monkeypatch.setattr(http, "_VISION_BURST", 0)
     http._RATE_LIMITER.reset()
     monkeypatch.setattr(llm_vision, "requests",
                         _FakeUpstream(response=_vision_ok_response()))
@@ -417,15 +420,16 @@ def test_vision_request_time_ssrf_dns_rebind(users, monkeypatch):
     # 直写一行（模拟历史脏数据/绕过）：字面量是公网域名
     fer = store._fernet_factory()
     enc = "enc:" + fer.encrypt(PLAINTEXT.encode()).decode()
+    dirty_pid = "lp_" + secrets.token_hex(12)
     conn = pg_connection()
     try:
         with pg_store.transaction(conn) as cur:
             cur.execute(
                 "INSERT INTO llm_providers (provider_id, name, base_url, "
                 "api_key_encrypted, models, default_model, is_default, created_by) "
-                "VALUES ('lp_%s', 'Rebind', 'https://rebind.example.com/v1', %s, "
+                "VALUES (%s, 'Rebind', 'https://rebind.example.com/v1', %s, "
                 "'[\"m\"]'::jsonb, 'm', true, 'u_owner')",
-                (secrets.token_hex(12), enc))
+                (dirty_pid, enc))
     finally:
         conn.close()
     # DNS 现在解析到私网（rebinding）

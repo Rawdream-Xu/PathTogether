@@ -261,6 +261,9 @@ _BUSINESS_TABLES = (
     # 0092 起：付费存储扩容（users 外键 CASCADE 已覆盖，显式列出防跨用例
     # 残留扩容行干扰 extra_quota_bytes / sweep 断言）
     "storage_expansions",
+    # 0094 起：P1-W0 LLM 视觉供应商（无 FK，显式列出防跨用例残留行污染
+    # name 唯一约束与 is_default 默认解析）
+    "llm_providers",
 )
 
 @pytest.fixture(scope="session")
