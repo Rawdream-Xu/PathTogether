@@ -90,10 +90,10 @@ def handle_patch(ident, desc, body):
         return {"error": "只能编辑自己切片的元数据", "code": None}, 403
     mpp_x, err_x = _validate_mpp(mpp_x, "mpp_x")
     if err_x:
-        return err_x
+        return err_x, int(err_x.get("status") or 422)
     mpp_y, err_y = _validate_mpp(mpp_y, "mpp_y")
     if err_y:
-        return err_y
+        return err_y, int(err_y.get("status") or 422)
 
     changed = []
     try:
