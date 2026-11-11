@@ -10,8 +10,10 @@
   - 默认「未删除」= ``asset_state <> 'deleted'``：deleted 墓碑排除，
     **deleting 保留**（删除中不是已删除，直到清理真正完成）；
   - staging 永不进 viewable，也不提供任何清理路径：临时查看 409
-    slide_not_servable、DELETE 409（staging 恒 409；id_bundle 的 failed 行
-    同样 409——普通删除只接受 ready，failed 墓碑不得塞进普通删除接口）；
+    slide_not_servable、DELETE 409（staging 恒 409）；id_bundle 的 failed
+    行可由普通删除接口收走（audit P0-3 d：failed 产物包——撤包失败或
+    历史孤儿——由删除编排兜底清理，failed 从未结算 → refund 0；专测见
+    tests/test_wp_p0_w4.py::test_delete_orchestration_collects_failed_id_bundle）；
   - deleted 墓碑继续保留在库（旧别名不可重绑/删除幂等/审计依赖），本轮
     没有任何数据维护动作；
   - 未注册盘上文件独立出线（``unregistered_items`` + ``orphan_files``），
@@ -290,17 +292,22 @@ def test_staging_never_viewable_nor_cleanable():
                 (ids["staging"],), fetch=True)[0][0] == 0
 
     # 普通 DELETE（/api/slides/<slide_id>）：staging 恒 409——不得放宽
-    # staging 删除门；id_bundle failed 墓碑同样 409（本轮不做数据维护，
-    # 失败行的移出只能走显式归档/筛选元数据设计，见 docs）
+    # staging 删除门；id_bundle failed 行可被删除编排收走（audit P0-3 d，
+    # 同 tests/test_wp_p0_w4.py），清理后行保留为 deleted 墓碑
     rs = co.delete("/api/slides/%s" % ids["staging"])
     assert rs.status_code == 409, rs.get_data(as_text=True)
     assert rs.get_json()["code"] == "slide_state_conflict"
     rf = co.delete("/api/slides/%s" % ids["failed"])
-    assert rf.status_code == 409, rf.get_data(as_text=True)
-    assert rf.get_json()["code"] == "slide_state_conflict"
-    # 未删除档仍看得见这两行（拒绝删除 ≠ 从清单消失）
+    assert rf.status_code == 200, rf.get_data(as_text=True)
+    assert rf.get_json()["state"] == "deleted"
+    rows = _sql("SELECT asset_state FROM slides WHERE slide_id=%s",
+                (ids["failed"],), fetch=True)
+    assert rows and rows[0][0] == "deleted", "failed 清理后落 deleted 墓碑"
+    # 未删除档仍看得见 staging 行（拒绝删除 ≠ 从清单消失）；
+    # failed 行随删除完成转入 deleted 档（默认视图排除墓碑）
     names = {i["slide_id"] for i in _inventory(co, "limit=200")["items"]}
-    assert ids["staging"] in names and ids["failed"] in names
+    assert ids["staging"] in names
+    assert ids["failed"] not in names
 
 
 # --------------------------------------------------------------------------- #
