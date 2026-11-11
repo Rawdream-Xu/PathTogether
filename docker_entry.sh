@@ -179,8 +179,20 @@ esac
 # ingestion_jobs 排水（核对/合并/版本化下载/本地入库/readiness/清理/对账）。
 # 默认关闭：COS capability 未上线（§8 off），避免生产无谓空转噪声；
 # COS 部署时随 env 开启（COS_INGEST_WORKER=1 且配置 bucket/region/secret）。
+# P0-W6a（2026-11-11）：本地直传通道（LOCAL_UPLOAD_CHANNEL，默认 on）也
+# 由同一 worker 排水（local_http 任务在 downloading 段就地转 validating，
+# 无 COS 凭证依赖）——通道开启即拉起，空转成本为每轮一次空 claim 查询。
 # ---------------------------------------------------------------------------
+_local_channel="$(printf '%s' "${LOCAL_UPLOAD_CHANNEL:-on}" | tr '[:upper:]' '[:lower:]')"
 _cos_worker="$(printf '%s' "${COS_INGEST_WORKER:-0}" | tr '[:upper:]' '[:lower:]')"
+case "$_cos_worker" in
+  1|true|yes|on) ;;
+  *)
+    case "$_local_channel" in
+      1|true|yes|on) _cos_worker=1 ;;
+    esac
+    ;;
+esac
 case "$_cos_worker" in
   1|true|yes|on)
     echo "[entry] starting cos_ingest_worker --loop"
