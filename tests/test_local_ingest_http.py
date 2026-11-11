@@ -375,7 +375,8 @@ def test_cancel_local_job_releases_reservation(user_client):
 # --------------------------------------------------------------------------- #
 # 负向：鉴权 / CSRF / ownership
 # --------------------------------------------------------------------------- #
-def test_local_requires_login():
+def test_local_requires_login(monkeypatch):
+    monkeypatch.setattr(app_mod, "AUTH_ENABLED", True)
     app_mod.app.config["TESTING"] = True
     client = csrf_client(app_mod.app.test_client())
     r = client.post("/api/ingestions/local", json=dict(
@@ -383,7 +384,8 @@ def test_local_requires_login():
     assert r.status_code == 401
 
 
-def test_local_requires_csrf_token():
+def test_local_requires_csrf_token(monkeypatch):
+    monkeypatch.setattr(app_mod, "AUTH_ENABLED", True)
     app_mod.app.config["TESTING"] = True
     raw = app_mod.app.test_client()
     with raw.session_transaction() as s:

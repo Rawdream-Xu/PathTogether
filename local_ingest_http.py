@@ -199,7 +199,7 @@ def handle_create(ident, body, product_max_bytes):
         closed_exts=_direct_import_closed_formats(),
         legacy_direct_exts=(accepted_formats() - {"zip"}))
     if dc_err is not None:
-        return dc_err
+        return dc_err, int(dc_err.get("status") or 400)
 
     sha_expected = body.get("sha256_expected")
     if sha_expected is not None and (
