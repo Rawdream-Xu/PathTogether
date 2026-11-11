@@ -118,14 +118,18 @@ def _create_local(client, filename="sample.tif", data=None, **extra):
 
 
 def _put_parts(client, job_id, data, plan):
-    by_num = {int(p["part_number"]): p for p in plan}
-    for n in sorted(by_num):
-        p = by_num[n]
-        chunk = data[p["offset"]:p["offset"] + p["length"]]
+    # 计划只含编号+长度；offset 按编号顺序累加推导（cos-uploader.buildPlan
+    # 同法——服务端计划冻结不含 offset 字段）。
+    offset = 0
+    for p in sorted(plan, key=lambda x: int(x["part_number"])):
+        length = int(p["length"])
+        chunk = data[offset:offset + length]
         r = client.post(
-            "/api/ingestions/%s/parts/%d" % (job_id, n),
+            "/api/ingestions/%s/parts/%d" % (job_id, int(p["part_number"])),
             data=chunk, content_type="application/octet-stream")
-        assert r.status_code == 200, (n, r.get_json())
+        assert r.status_code == 200, (p["part_number"], r.get_json())
+        offset += length
+    assert offset == len(data)
 
 
 def _drive_worker(client, job_id, *, rounds=12):
@@ -387,6 +391,7 @@ def test_local_requires_login(monkeypatch):
 def test_local_requires_csrf_token(monkeypatch):
     monkeypatch.setattr(app_mod, "AUTH_ENABLED", True)
     app_mod.app.config["TESTING"] = True
+    _mkuser("owner-1", "owner")
     raw = app_mod.app.test_client()
     with raw.session_transaction() as s:
         s["auth_user"] = "owner-1@x"
