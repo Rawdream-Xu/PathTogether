@@ -94,6 +94,9 @@ def test_schema_migrations_recorded(conn):
     with conn.cursor() as cur:
         cur.execute("SELECT filename FROM schema_migrations ORDER BY filename")
         rows = [r[0] for r in cur.fetchall()]
+    # 登记契约（fail-closed）：migrations/*.sql 的每个文件都必须在本清单
+    # 按编号升序登记——ensure_schema 会把未登记文件应用并写入
+    # schema_migrations，本断言随即失败。新迁移合入时在清单尾部追加条目。
     # 3b-1 只应有 0001；3b-2 追加 0002_roi_payload.sql（ROI 全量负载 + 插入序）；
     # 3c-1 追加 0003_comments.sql（评论线程）；3c-2 追加 0004_audit.sql（审计+归档）；
     # 4-1a 追加 0005_plugin.sql（插件安装凭证 + run grant）；
