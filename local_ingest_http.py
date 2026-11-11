@@ -196,7 +196,8 @@ def handle_create(ident, body, product_max_bytes):
 
     direct_class, dc_err = upload_direct_class.validate_declaration(
         safe, kind, body.get("direct_class"),
-        closed_exts=_direct_import_closed_formats())
+        closed_exts=_direct_import_closed_formats(),
+        legacy_direct_exts=(accepted_formats() - {"zip"}))
     if dc_err is not None:
         return dc_err
 
