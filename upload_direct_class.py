@@ -45,6 +45,9 @@ import struct
 import xml.etree.ElementTree as ET
 import zipfile
 
+from defusedxml import ElementTree as DefusedET
+from defusedxml.common import DefusedXmlException
+
 #: 声明词表（``unconverted-variant:<variant>`` 按前缀匹配，variant 白名单
 #: 见 _VARIANT_CHECKS）
 DIRECT_CLASSES = frozenset({
@@ -369,9 +372,12 @@ def declares_unknown_physical_scale(path):
         return isinstance(fields, dict) and unknown(fields)
     if not body.startswith("<"):
         return False
+    # 上传文件内嵌描述按不可信 XML 解析（P0-W5）：拒绝 DOCTYPE/ENTITY
+    # （defusedxml，不进入实体展开），失败按无标记处理。
     try:
-        root = ET.fromstring(body)
-    except (ET.ParseError, ValueError):
+        root = DefusedET.fromstring(
+            body, forbid_dtd=True, forbid_entities=True)
+    except (ET.ParseError, DefusedXmlException, ValueError):
         return False
     if root.tag.rsplit("}", 1)[-1] != "OME":
         return False
