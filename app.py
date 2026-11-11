@@ -16280,15 +16280,19 @@ def _slide_delete_unified(desc, requested_by, *, legacy_response=False):
     随后同步尝试执行一次（用户感知与 P3 内联版一致）；执行异常返回 503
     （delete_retryable），daemon 按 lease+退避兜底。
 
-    可删态口径：id_bundle 恒 ready（状态机严格）；legacy 布局资产放行
-    ready/legacy/failed（迁移期清理语义——旧行 any-state 可删的能力保留，
-    failed 行的文件多已缺失，结算幂等不受影响）。staging 恒 409。
+    可删态口径：id_bundle 放行 ready/**failed**（P0-W4/审计 P0-3 d：
+    failed 产物包——_fail 撤包失败或历史遗留的孤儿——由删除编排兜底
+    收走；failed 从未结算 → accounted_bytes NULL → refund 0，不减账、
+    不破坏 R-12 幂等）；legacy 布局资产放行 ready/legacy/failed（迁移期
+    清理语义——旧行 any-state 可删的能力保留，failed 行的文件多已缺失，
+    结算幂等不受影响）。staging 恒 409。
     """
     sid = desc.slide_id
     legacy_layout = desc.storage_layout != slide_store.StorageLayout.ID_BUNDLE
     allowed = ((slide_store.SlideState.READY, slide_store.SlideState.LEGACY,
                 slide_store.SlideState.FAILED) if legacy_layout
-               else (slide_store.SlideState.READY,))
+               else (slide_store.SlideState.READY,
+                     slide_store.SlideState.FAILED))
     state = None
     import psycopg.rows
     conn = pg_store.connect()

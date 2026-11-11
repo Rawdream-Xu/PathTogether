@@ -626,8 +626,8 @@ def test_drain_rehearsal(monkeypatch, tmp_path, _c6_dirs):
 
 # --------------------------------------------------------------------------- #
 # 3. 恢复演练：intent 持久化 + FS 发布后、结算前崩溃 → 恰一次结算
-#    （Part A 的 worker 重领重转路径另测：见
-#    test_recovery_worker_reclaim_path_hits_manifest_conflict）
+#    （Part A 的 worker 重领路径另测：见
+#    test_recovery_worker_reclaim_path_recovers_idempotently）
 # --------------------------------------------------------------------------- #
 def test_recovery_rehearsal(monkeypatch, tmp_path, _c6_dirs):
     tool = _drain_tool()
@@ -699,16 +699,16 @@ def test_recovery_rehearsal(monkeypatch, tmp_path, _c6_dirs):
     assert rc == 0, out
 
 
-def test_recovery_worker_reclaim_path_hits_manifest_conflict(
+def test_recovery_worker_reclaim_path_recovers_idempotently(
         monkeypatch, tmp_path, _c6_dirs):
-    """Part A（finding，C6 报告 §5-3）：FS 发布后崩溃 → worker 重领重转 →
-    publish_conflict fail-closed（非 byte 级确定性转换）。
+    """Part A（P0-W4 修复，原 C6 报告 §5-3 finding）：FS 发布后崩溃 →
+    worker 重领 → 幂等收口 ready（原行为：重转产物与已发布包不逐字节
+    相同 → verify_bundle 不吻合 → publish_conflict fail-closed）。
 
-    kfb 产物包成员 ``data.tif.manifest.json`` 内嵌 created_at（kfb/manifest
-    .build_manifest），重转的 manifest 与已发布包不逐字节相同 →
-    verify_bundle 不吻合 → PublishConflict（deterministic）→ 任务 failed、
-    产物资产 failed、源保留。这是现行运行时对该崩溃窗口的真实行为：恢复
-    只能走 test_recovery_rehearsal 的 intent 权威重放（或人工核对后重试）。"""
+    kfb manifest sidecar 已确定性序列化（无 wall-clock created_at，P0-3 a）
+    且重领优先收养上一代完整 work（P0-3 b）——本窗口（包已发布、结算前
+    崩溃，无上一代 work 可收养 → 重转）恢复路径为：重转产物与已发布包
+    逐文件一致 → verify_bundle 幂等放行 → 恰一次结算。"""
     tool = _drain_tool()
     up = _c6_dirs["upload_dir"]
     user = "c6recovA"
@@ -735,32 +735,39 @@ def test_recovery_worker_reclaim_path_hits_manifest_conflict(
     assert row["state"] == "validating" and row["commit_intent_json"]
     sid = row["slide_id"]
     assert slide_storage.bundle_dir(sid, root=str(up)).is_dir()
+    intent = row["commit_intent_json"]
+    if isinstance(intent, str):
+        intent = json.loads(intent)
+    first_files = {f["path"]: f["sha256"]
+                   for f in intent["manifest"]["files"]}
 
     _expire_conversion_lease(j["id"])
     assert conversion_worker.run_once(upload_dir=str(up),
                                       worker_id="cvw_ra2") == j["id"]
     row = conversion_store.get_job(j["id"])
-    assert row["state"] == "failed"
-    assert row["error_code"] == "publish_conflict"
-    assert slide_store.resolve_slide_id(sid).asset_state == "failed"
-    # 证据保留：已发布包仍在盘、源副本保留（failed 任务的决策项口径）
-    assert slide_storage.bundle_dir(sid, root=str(up)).is_dir()
-    assert conversion_worker.source_staging_dir(j["id"], str(up)).is_dir()
-    # 台账：产物从未结算 → used_bytes 零变化
+    assert row["state"] == "ready" and not row["commit_intent_json"]
+    desc = slide_store.resolve_slide_id(sid)
+    assert desc.asset_state == "ready"
+    # 恢复后输出与首代（= 不间断运行）逐文件一致——无 publish_conflict
+    bundle_mf = slide_storage.bundle_dir(sid, root=str(up)) / "manifest.json"
+    after_files = {f["path"]: f["sha256"] for f in
+                   json.loads(bundle_mf.read_text(encoding="utf-8"))["files"]}
+    assert after_files == first_files
+    # 恰一次结算
     used, _r = _quota(user)
-    assert used == 0
-    # drain 裁决：failed 是终态（非阻断）；lingering intent 列为决策项
+    assert used == int(desc.accounted_bytes) > 0
+    # 无孤儿：objects/ 只有本资产独占目录；任务 staging 只剩 source/
+    assert sorted(p.name for p in (up / "objects").iterdir()) == [sid]
+    assert sorted(p.name for p in slide_storage.staging_task_dir(
+        j["id"], root=str(up)).iterdir()) == ["source"]
+    # drain 裁决：ready 收口后无阻断、无 failed 决策项
     doc = _inventory(tool, _c6_dirs, tmp_path / "ra.json")
-    codes = {b["code"] for b in tool.derive_blockers(doc)}
-    assert codes == set()
+    assert tool.derive_blockers(doc) == []
     nonblock = tool.derive_nonblocking(doc)
-    assert ("intent_lingering_failed", j["id"]) in [
-        (d["code"], d["id"]) for d in nonblock["decision_items"]]
-    # 已发布但作废的产物包仍占盘：列为处置项（带字节数）
-    bundle = [d for d in nonblock["decision_items"]
-              if d["code"] == "failed_product_bundle_present"]
-    assert [d["id"] for d in bundle] == [j["id"]]
-    assert bundle[0]["bytes"] > 0
+    decisions = [(d["code"], d["id"]) for d in nonblock["decision_items"]]
+    assert ("intent_lingering_failed", j["id"]) not in decisions
+    assert all(d["code"] != "failed_product_bundle_present"
+               for d in nonblock["decision_items"])
 
 
 # --------------------------------------------------------------------------- #
