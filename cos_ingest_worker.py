@@ -562,6 +562,13 @@ def process_completing(cos=None, state=None):
     job = ist.claim_next_job_for_worker([ist.COMPLETING])
     if job is None:
         return None
+    if (job.get("transport") or "") == ist.TRANSPORT_LOCAL:
+        # P0-W6b2：local_http 任务的 completing 段由 web 侧收口（分片拼接
+        # → local_complete_to_queued），无远端会话（object_key/upload_id 恒
+        # 空）——COS 合同的「计划丢失」终态对它不适用。GB 级产物拼接可达
+        # 数秒，本 duty 空转放行（释放租约保持 completing），绝不 fail。
+        _release_lease(job["job_id"], job["worker_lease_token"], state)
+        return None
     job_id = job["job_id"]
     gen = job["worker_generation"]
     token = job["worker_lease_token"]
