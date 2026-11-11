@@ -194,7 +194,8 @@ def test_patch_mpp_ownership_enforced(user_client, owner_client,
     assert r.status_code == 200
 
 
-def test_patch_mpp_requires_login(ready_slide):
+def test_patch_mpp_requires_login(ready_slide, monkeypatch):
+    monkeypatch.setattr(app_mod, "AUTH_ENABLED", True)
     app_mod.app.config["TESTING"] = True
     client = csrf_client(app_mod.app.test_client())
     r = client.patch("/api/slides/%s" % ready_slide,
@@ -217,7 +218,10 @@ def test_share_server_metadata_honors_manual(user_client, ready_slide):
     path = slide_storage.resolve_descriptor_path(desc,
                                                  root=app_mod.UPLOAD_DIR)
     import slide_io
-    with slide_io.open_slide(path) as osr:
-        meta = share_server._read_metadata(osr, path)
+    osr = slide_io.open_slide(path)
+    try:
+        meta = share_server._read_metadata(osr, path, slide_id=ready_slide)
+    finally:
+        osr.close()
     assert meta["mpp_x"] == pytest.approx(0.4)
     assert meta["mpp_source"] == "manual"
