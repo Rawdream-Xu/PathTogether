@@ -138,6 +138,10 @@ _BUSINESS_TABLES = (
     # 0094 起：W6c mpp 手动补录（slides FK CASCADE 已覆盖，显式列出保证
     # descriptor/缓存相关用例从干净状态开始）
     "slide_mpp_overrides",
+    # 0013/0071 起：上传配额/预约/清理编排（此前不在清单——跨用例残留的
+    # state='reserved' 行会让后续 ingestion 用例的准入被 Inflight/速率
+    # 上限误拒（P0-W6 本地直传多用例连跑暴露）。
+    "upload_cleanup_pending", "upload_reservations", "upload_user_quotas",
     # 0018 起：金额计费（admin-billing §6）。billing_price_books 的迁移
     # 种子会随 TRUNCATE 清掉——需要种子的用例用 tests/_billing_helpers
     # .seed_price_books() 幂等重放 migrations/0018_billing.sql +
