@@ -395,8 +395,10 @@ def test_schema_migrations_recorded(conn):
         # OpenAI 兼容层供应商配置表——api_key Fernet 密文（^enc: CHECK 在
         # 数据库层兜底永不存明文，公共视图只回显 api_key_tail4）、base_url
         # 仅 owner 可配；owner 级共享（无 per-user 行），is_default 全局
-        # 至多一行（部分唯一索引）。
-        "0094_llm_providers.sql",
+        # 至多一行（部分唯一索引）。原登记 0094_llm_providers.sql，因与
+        # P0-W6 的 0094_ingestion_local_channel.sql 重号重编为 0095
+        # （wp/p0-close，2026-11-12；文件全幂等，已记账库重放 no-op）。
+        "0095_llm_providers.sql",
     ]
 
 
