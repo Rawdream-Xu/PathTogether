@@ -10808,15 +10808,9 @@
 
   var LOCAL_UPLOAD_CONFIG = resolveLocalConfig();
 
-  // 当前生效的上传通道配置（local 优先）+ 引擎解析（uploadFileCos 消费）。
+  // 当前生效的上传通道配置（local 优先；引擎选择在 uploadFileCos 内联）。
   function activeUploadConfig() {
     return LOCAL_UPLOAD_CONFIG || COS_UPLOAD_CONFIG;
-  }
-  function uploadEngineFor() {
-    if (LOCAL_UPLOAD_CONFIG && window.HP_LOCAL_UPLOAD) {
-      return { engine: window.HP_LOCAL_UPLOAD, config: LOCAL_UPLOAD_CONFIG };
-    }
-    return { engine: window.HP_COS_UPLOAD, config: COS_UPLOAD_CONFIG };
   }
 
   // U3：手动选路开关退役（统一 COS，无按大小/格式分流）。
