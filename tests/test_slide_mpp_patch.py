@@ -94,7 +94,8 @@ def ready_slide():
     staging.mkdir(parents=True, exist_ok=True)
     (staging / "data.tif").write_bytes(data)
     manifest = slide_publish.build_manifest("data.tif", len(data), sha)
-    slide_storage.publish_bundle_no_clobber(staging, sid, manifest)
+    slide_storage.publish_bundle_no_clobber(staging, sid, manifest,
+                                            root=app_mod.UPLOAD_DIR)
     assert slide_store.mark_ready(sid, accounted_bytes=len(data))
     return sid
 
