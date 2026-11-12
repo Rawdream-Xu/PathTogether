@@ -258,6 +258,95 @@ def provider_status(ident):
     return {"providers": items, "ttl_seconds": _STATUS_TTL_SECONDS}, 200
 
 
+# --------------------------------------------------------------------------- #
+# POST /api/llm/fetch-models（上游 /models 实时拉取，参照 paperpilot 方案）
+# --------------------------------------------------------------------------- #
+
+#: /models 拉取超时（快失败）；返回模型 id 上限（防超长响应滥用）
+_MODELS_TIMEOUT = (8, 20)
+_MODELS_MAX_COUNT = 500
+
+
+def fetch_models(ident, body):
+    """owner 拉取供应商上游模型清单（OpenAI 兼容 ``GET {base}/models``）。
+
+    body: {provider_id} 或草稿 {base_url, api_key}。SSRF 与 test_connection
+    同源（store.validate_base_url：scheme/host 字面量/DNS 解析逐 IP 边界）；
+    失败归一为 {ok:false, code, error}，前端引导手动填模型名。
+    """
+    if not _is_owner(ident):
+        return _err("仅管理员可拉取模型清单", "forbidden", 403)
+    provider_id = body.get("provider_id")
+    if provider_id:
+        provider = store.get_provider_for_call(str(provider_id))
+        if provider is None:
+            return _err("供应商不存在", "not_found", 404)
+        base_url = provider.get("base_url") or ""
+        api_key = provider.get("api_key") or ""
+    else:
+        try:
+            base_url = store.validate_base_url(str(body.get("base_url") or ""))
+        except store.BaseUrlInvalidError as exc:
+            return _err(str(exc), "base_url_invalid", 400)
+        api_key = str(body.get("api_key") or "").strip()
+        if not api_key:
+            return _err("缺少 API Key（草稿拉取需提供）", "invalid_payload", 400)
+
+    # ---- SSRF 校验（出网前；与保存/测试同一防线） ----
+    try:
+        base_url = store.validate_base_url(base_url)
+    except store.BaseUrlInvalidError as exc:
+        return _err(str(exc), "ssrf_blocked", 400)
+
+    endpoint = llm_vision.chat_completions_url(base_url).replace(
+        "/chat/completions", "/models")
+    headers = {"Authorization": "Bearer %s" % api_key} if api_key else {}
+    started = time.time()
+    try:
+        resp = llm_vision.requests.get(
+            endpoint, headers=headers, timeout=_MODELS_TIMEOUT,
+            allow_redirects=False)
+    except llm_vision._REQUESTS_EXC:
+        return _err("上游不可达或超时", "upstream_timeout", 504, retryable=True)
+    duration_ms = int((time.time() - started) * 1000)
+
+    if resp.status_code in (401, 403):
+        return _err("认证失败（HTTP %d）——API Key 无效或该端点不开放 /models"
+                    % resp.status_code, "auth_failed", 200,
+                    details={"ok": False, "models": []})
+    if resp.status_code >= 400:
+        return _err("供应商返回 HTTP %d——该端点可能不支持 /models，请手动填模型名"
+                    % resp.status_code, "upstream_error", 200,
+                    details={"ok": False, "models": []})
+    try:
+        payload = resp.json()
+    except Exception:
+        return _err("响应格式无法解析——请手动填模型名", "bad_payload", 200,
+                    details={"ok": False, "models": []})
+
+    # OpenAI data[].id / 容错裸数组；去重排序 + 数量上限
+    items = None
+    if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+        items = payload["data"]
+    elif isinstance(payload, list):
+        items = payload
+    models, seen = [], set()
+    for it in items or []:
+        mid = it.get("id") if isinstance(it, dict) else it
+        if isinstance(mid, str) and mid.strip() and mid not in seen:
+            seen.add(mid)
+            models.append(mid.strip())
+    models = sorted(models)[:_MODELS_MAX_COUNT]
+    if not models:
+        return _err("端点返回空模型列表——请手动填模型名", "empty_list", 200,
+                    details={"ok": False, "models": []})
+    # 成功 → 呼吸灯转绿
+    if provider_id:
+        record_provider_status(str(provider_id), True, duration_ms)
+    return {"ok": True, "models": models, "count": len(models),
+            "duration_ms": duration_ms}, 200
+
+
 def vision(ident, body):
     if not _logged_in(ident):
         return _err("无权使用 AI 识图", "forbidden", 403)

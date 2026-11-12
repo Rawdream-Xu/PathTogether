@@ -21354,6 +21354,13 @@ def api_llm_status():
     return _jsonify_pair(llm_provider_http.provider_status(current_identity()))
 
 
+@app.route("/api/llm/fetch-models", methods=["POST"])
+def api_llm_fetch_models():
+    import llm_provider_http
+    return _jsonify_pair(llm_provider_http.fetch_models(
+        current_identity(), request.get_json(silent=True) or {}))
+
+
 def _apply_user_max_steps_view(out, own, source):
     """user 视角 GET 回显的 max_steps 字段组（原地补充，docs §9.2/§8.3）。
 

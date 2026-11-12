@@ -53,11 +53,11 @@ _SSRF_BLOCKED_HOSTS = frozenset({
     "kubernetes.default",
     "kubernetes.default.svc",
 })
-_SSRF_BLOCKED_NETWORKS = (
-    ipaddress.ip_network("0.0.0.0/8"),
-    ipaddress.ip_network("100.64.0.0/10"),
-    ipaddress.ip_network("255.255.255.255/32"),
-)
+#: 禁入网段黑名单（CGNAT / 未指定 / 受限广播；环回/私网/链路本地由
+#: ipaddress 标准属性 is_loopback/is_private/is_link_local 覆盖）
+_SSRF_BLOCKED_NETWORKS = tuple(
+    ipaddress.ip_network(n) for n in (
+        "0.0.0.0/8", "100.64.0.0/10", "255.255.255.255/32"))
 
 
 class BaseUrlInvalid(ValueError):

@@ -452,7 +452,38 @@
       "留空 = 保留已配置密钥（" + esc(p.api_key_tail4 || "****") + "）");
     pane.appendChild(field("API KEY", fKey, "加密存储，永不回显（只显尾 4 位）"));
     var fModels = input("text", (p.models || []).join(", "));
-    pane.appendChild(field("模型列表（逗号分隔）", fModels));
+    var modelsWrap = field("模型列表（逗号分隔）", fModels,
+      "可手动填写，或点「拉取模型」从上游 /models 实时获取");
+    var fetchBtn = el("button", "btn secondary small llmp-fetch", "拉取模型");
+    fetchBtn.type = "button";
+    fetchBtn.addEventListener("click", function () {
+      fetchBtn.disabled = true;
+      fetchBtn.textContent = "拉取中…";
+      var msg2 = pane.querySelector(".llmp-msg");
+      if (msg2) msg2.textContent = "从上游拉取模型清单…";
+      api({ method: "POST", url: "/api/llm/fetch-models",
+            body: { provider_id: p.provider_id } }).then(function (r) {
+        fetchBtn.disabled = false;
+        fetchBtn.textContent = "拉取模型";
+        var d = r.json || {};
+        if (d.ok && d.models && d.models.length) {
+          fModels.value = d.models.join(", ");
+          if (!fDefaultModel.value && d.models[0]) {
+            fDefaultModel.value = d.models[0];
+          }
+          if (msg2) msg2.textContent = "✓ 已拉取 " + d.count + " 个模型，请核对后保存";
+        } else {
+          if (msg2) msg2.textContent = "✗ " + (d.error ||
+            (d.details && d.details.error) || "拉取失败，请手动填模型名");
+        }
+      }).catch(function () {
+        fetchBtn.disabled = false;
+        fetchBtn.textContent = "拉取模型";
+        if (msg2) msg2.textContent = "网络错误";
+      });
+    });
+    modelsWrap.appendChild(fetchBtn);
+    pane.appendChild(modelsWrap);
     var fDefaultModel = input("text", p.default_model);
     pane.appendChild(field("默认模型", fDefaultModel));
 
@@ -553,7 +584,42 @@
     pane.appendChild(field("API KEY", fKey,
       "加密存储，永不回显（只显尾 4 位）"));
     var fModels = input("text", c.models);
-    pane.appendChild(field("模型列表（逗号分隔）", fModels));
+    var modelsWrap = field("模型列表（逗号分隔）", fModels,
+      "可手动填写，或填好 Base URL / API KEY 后点「拉取模型」实时获取");
+    var fetchBtn = el("button", "btn secondary small llmp-fetch", "拉取模型");
+    fetchBtn.type = "button";
+    fetchBtn.addEventListener("click", function () {
+      if (!fBaseUrl.value.trim() || !fKey.value.trim()) {
+        var m0 = pane.querySelector(".llmp-msg");
+        if (m0) m0.textContent = "请先填写 Base URL 与 API KEY 再拉取";
+        return;
+      }
+      fetchBtn.disabled = true;
+      fetchBtn.textContent = "拉取中…";
+      var msg2 = pane.querySelector(".llmp-msg");
+      if (msg2) msg2.textContent = "从上游拉取模型清单…";
+      api({ method: "POST", url: "/api/llm/fetch-models",
+            body: { base_url: fBaseUrl.value.trim(), api_key: fKey.value } })
+        .then(function (r) {
+        fetchBtn.disabled = false;
+        fetchBtn.textContent = "拉取模型";
+        var d = r.json || {};
+        if (d.ok && d.models && d.models.length) {
+          fModels.value = d.models.join(", ");
+          if (d.models[0]) fDefaultModel.value = d.models[0];
+          if (msg2) msg2.textContent = "✓ 已拉取 " + d.count + " 个模型，请核对后保存";
+        } else {
+          if (msg2) msg2.textContent = "✗ " + (d.error ||
+            (d.details && d.details.error) || "拉取失败，请手动填模型名");
+        }
+      }).catch(function () {
+        fetchBtn.disabled = false;
+        fetchBtn.textContent = "拉取模型";
+        if (msg2) msg2.textContent = "网络错误";
+      });
+    });
+    modelsWrap.appendChild(fetchBtn);
+    pane.appendChild(modelsWrap);
     var fDefaultModel = input("text", (c.models || "").split(",")[0].trim());
     pane.appendChild(field("默认模型", fDefaultModel));
     var fDef = document.createElement("input");
