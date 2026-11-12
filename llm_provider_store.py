@@ -263,6 +263,13 @@ def update_provider(provider_id: str, *, expected_revision=None, **fields) -> di
                     params.append(_encrypt(plain))
                     sets.append("api_key_tail4=%s")
                     params.append(plain[-4:])
+                if str(fields.get("api_key_action") or "") == "clear":
+                    # 专用清除动作：密文置空占位（CHECK 要求 ^enc: 前缀，
+                    # 置 "enc:cleared" 非法密文 → 解密恒空串=未配置）
+                    sets.append("api_key_encrypted=%s")
+                    params.append(_ENC_PREFIX + "cleared")
+                    sets.append("api_key_tail4=%s")
+                    params.append("")
                 if "default_model" in fields:
                     dm = str(fields["default_model"] or "").strip()
                     models = fields.get("models")

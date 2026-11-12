@@ -14995,20 +14995,32 @@
     if (els.acctSettingsAdmin) {
       els.acctSettingsAdmin.hidden = !!previewState || actorRole !== "owner";
     }
-    // P1-W0c：「AI 供应商」区块——owner 管理面板 / user 只读清单（均不进
-    // 预览态；配置写操作仍仅 owner，服务端 403 兜底）
+    // P1-W0c v2：「AI 供应商」三栏面板——owner 管理 / user 只读（服务端 403 兜底）；
+    // hostBridge 桥接宿主既有入口（安全设置 / 数据共享），页签跨区跳转
     if (els.acctSettingsLlm) {
       var llmReady = !previewState && (actorRole === "owner" || actorRole === "user") &&
         window.HP_LLM_PROVIDERS && els.llmProvidersPanel;
       els.acctSettingsLlm.hidden = !llmReady;
       if (llmReady) {
+        var llmHost = {
+          container: els.llmProvidersPanel,
+          apiFetch: apiFetch,
+          role: actorRole,
+          hostBridge: {
+            openSecurity: function () {
+              acctSettingsClose();
+              if (els.acctSettingsChangePw) els.acctSettingsChangePw.click();
+            },
+            openDatashare: function () {
+              acctSettingsClose();
+              if (els.acctSettingsDatashare) els.acctSettingsDatashare.click();
+            },
+          },
+        };
         if (actorRole === "owner") {
-          HP_LLM_PROVIDERS.mount({
-            container: els.llmProvidersPanel, apiFetch: apiFetch });
-          HP_LLM_PROVIDERS.refresh();
+          HP_LLM_PROVIDERS.mount(llmHost);
         } else {
-          HP_LLM_PROVIDERS.mountUser({
-            container: els.llmProvidersPanel, apiFetch: apiFetch });
+          HP_LLM_PROVIDERS.mountUser(llmHost);
         }
       }
     }

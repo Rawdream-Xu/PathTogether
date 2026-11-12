@@ -130,8 +130,8 @@ def create_provider(ident, body):
 def update_provider(ident, provider_id, body):
     if not _is_owner(ident):
         return _err("仅管理员可配置 AI 供应商", "forbidden", 403)
-    allowed = ("name", "base_url", "api_key", "models", "default_model",
-               "enabled", "is_default")
+    allowed = ("name", "base_url", "api_key", "api_key_action", "models",
+               "default_model", "enabled", "is_default")
     fields = {k: body[k] for k in allowed if k in body}
     if not fields and "expected_revision" not in body:
         return _err("无可更新字段", "invalid_payload", 400)
@@ -200,6 +200,10 @@ def test_connection(ident, body):
         provider, api_key, model=model, prompt="ping",
         image_b64=llm_vision.TEST_IMAGE_PNG_B64, mime=llm_vision.TEST_IMAGE_MIME,
         max_tokens=16)
+    # 回写呼吸灯状态（已存供应商才记；草稿不记）
+    if provider_id:
+        record_provider_status(str(provider_id), bool(result.get("ok")),
+                               result.get("duration_ms") or 0)
     out = {
         "ok": bool(result.get("ok")),
         "model": model,
@@ -217,6 +221,42 @@ def test_connection(ident, body):
 # --------------------------------------------------------------------------- #
 # POST /api/llm/vision（图像+prompt 代理；限流；计量）
 # --------------------------------------------------------------------------- #
+
+# --------------------------------------------------------------------------- #
+# GET /api/llm/status（供应商连通呼吸灯：轻量状态，不外呼）
+# --------------------------------------------------------------------------- #
+
+#: 进程内连通状态缓存：provider_id -> {"ok": bool, "checked_at": epoch, "latency_ms": int}
+_STATUS_CACHE = {}
+_STATUS_TTL_SECONDS = 300   # 5 分钟内的测试结果视为有效（呼吸灯绿色）
+
+
+def record_provider_status(provider_id: str, ok: bool, latency_ms: int = 0):
+    """llm_vision 调用/test 后回写状态（进程内缓存，供呼吸灯读取）。"""
+    _STATUS_CACHE[str(provider_id)] = {
+        "ok": bool(ok), "checked_at": time.time(),
+        "latency_ms": int(latency_ms)}
+
+
+def provider_status(ident):
+    if not _logged_in(ident):
+        return _err("无权访问", "forbidden", 403)
+    now = time.time()
+    items = []
+    for p in store.list_providers(enabled_only=True):
+        st = _STATUS_CACHE.get(p["provider_id"])
+        fresh = bool(st and (now - st["checked_at"] < _STATUS_TTL_SECONDS))
+        items.append({
+            "provider_id": p["provider_id"],
+            "name": p["name"],
+            "is_default": bool(p.get("is_default")),
+            # green=近期连通；gray=未测/过期（前端呼吸灯灰态呼吸）
+            "status": "green" if (fresh and st.get("ok")) else "gray",
+            "latency_ms": st.get("latency_ms") if fresh else None,
+            "checked_at": st.get("checked_at") if fresh else None,
+        })
+    return {"providers": items, "ttl_seconds": _STATUS_TTL_SECONDS}, 200
+
 
 def vision(ident, body):
     if not _logged_in(ident):
@@ -281,6 +321,10 @@ def vision(ident, body):
     if not result.get("ok"):
         return _err("上游返回错误（HTTP %s）" % result.get("status"),
                     "upstream_error", 502, retryable=True)
+
+    # 真实调用成功 → 呼吸灯转绿（进程内状态缓存）
+    record_provider_status(str(provider.get("provider_id")), True,
+                           result.get("duration_ms") or 0)
 
     # 计量（仅成功调用；失败不写——错误已按响应反馈用户）
     try:

@@ -4149,9 +4149,14 @@ button {
 
 /* ---------- 账户设置对话框（docs/owner-parity-plan-20261106.md §D） ---------- */
 /* 所有登录用户共用；骨架复用 changepw-dialog/picker-mask。分区纵向排列，
-   账号/用量右侧对齐；入口按钮与 picker-footer 的 btn 同款。 */
-.acct-settings-dialog { width: min(460px, 92%); }
+   账号/用量右侧对齐；入口按钮与 picker-footer 的 btn 同款。
+   P1-W0c v2：AI 供应商三栏面板需要宽幅——对话框加宽（原 460px）。 */
+.acct-settings-dialog { width: min(980px, 94%); }
 .acct-settings-body { gap: 14px; }
+/* LLM 面板打开时压缩既有区块间距（三栏内容为主视图） */
+.acct-settings-dialog:has(#acct-settings-llm:not([hidden])) .acct-settings-section {
+  padding-top: 8px;
+}
 .acct-settings-section {
   display: flex;
   flex-direction: column;
@@ -5679,3 +5684,61 @@ body.app-mode-official { overflow: clip; }
 /* 切换弹层空态引导 */
 .llmv-pop-empty { max-width: 300px; }
 .llmv-pop-hint { font-size: 12px; color: #666; margin: 8px 12px; line-height: 1.6; }
+/* =========================================================================
+   P1-W0c v2：账户设置宽屏三栏（左页签 / 中列供应商+呼吸灯 / 右列详情）
+   参照桌面端设置布局；对话框宿主在窄屏自动退化为单列纵向。
+   ========================================================================= */
+.llmp3-wrap { display: flex; gap: 0; border: 1px solid var(--line, #e3e6ea);
+  border-radius: 8px; overflow: hidden; min-height: 360px; background: #fff; }
+.llmp3-nav { width: 150px; flex: 0 0 150px; border-right: 1px solid var(--line, #e8eaee);
+  background: #f7f8fa; padding: 10px 0; }
+.llmp3-nav-title { font-size: 11px; color: #98a2ad; padding: 2px 14px 8px;
+  letter-spacing: 1px; }
+.llmp3-tab { padding: 8px 14px; font-size: 13px; cursor: pointer;
+  border-left: 2px solid transparent; color: #333; }
+.llmp3-tab:hover { background: #eef1f4; }
+.llmp3-tab-on { border-left-color: #1a73e8; background: #eaf2fe;
+  color: #1a73e8; font-weight: 600; }
+.llmp3-body { flex: 1 1 auto; display: flex; min-width: 0; }
+.llmp3-list { width: 220px; flex: 0 0 220px; border-right: 1px solid var(--line, #e8eaee);
+  padding: 10px 8px; overflow-y: auto; max-height: 460px; }
+.llmp3-h { font-weight: 700; font-size: 14px; padding: 2px 8px 10px; }
+.llmp3-group { font-size: 11px; color: #98a2ad; padding: 10px 8px 4px;
+  letter-spacing: 0.5px; }
+.llmp3-item { display: flex; align-items: center; gap: 7px; padding: 7px 8px;
+  border-radius: 6px; cursor: pointer; font-size: 13px; }
+.llmp3-item:hover { background: #f0f4ff; }
+.llmp3-item-on { background: #eaf2fe; }
+.llmp3-item-absent { opacity: 0.62; }
+.llmp3-item-label { flex: 0 1 auto; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.llmp3-item-sub { flex: 1 1 auto; text-align: right; font-size: 11px;
+  color: #98a2ad; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.llmp3-lamp { width: 8px; height: 8px; border-radius: 50%;
+  flex: 0 0 8px; display: inline-block; }
+.llmp3-lamp-green { background: #22a565; box-shadow: 0 0 4px rgba(34,165,101,.6);
+  animation: llmp3Glow 2.4s ease-in-out infinite; }
+.llmp3-lamp-gray { background: #c3cad2; animation: llmp3Breathe 3.2s ease-in-out infinite; }
+@keyframes llmp3Glow { 0%,100% { box-shadow: 0 0 3px rgba(34,165,101,.45); }
+  50% { box-shadow: 0 0 8px rgba(34,165,101,.85); } }
+@keyframes llmp3Breathe { 0%,100% { opacity: .55; } 50% { opacity: 1; } }
+.llmp3-pane { flex: 1 1 auto; padding: 12px 16px; overflow-y: auto;
+  max-height: 460px; min-width: 0; }
+.llmp3-kv { display: flex; gap: 10px; font-size: 13px; padding: 3px 0; }
+.llmp3-kv-k { color: #7a848e; flex: 0 0 96px; }
+.llmp3-kv-v { color: #222; word-break: break-all; }
+.llmp3-btns { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+/* 窄屏退化：单列纵排 */
+@media (max-width: 760px) {
+  .llmp3-wrap { flex-direction: column; }
+  .llmp3-nav { width: auto; flex: none; display: flex; overflow-x: auto;
+    border-right: 0; border-bottom: 1px solid var(--line, #e8eaee); padding: 0; }
+  .llmp3-nav-title { display: none; }
+  .llmp3-tab { border-left: 0; border-bottom: 2px solid transparent;
+    white-space: nowrap; }
+  .llmp3-tab-on { border-left: 0; border-bottom-color: #1a73e8; }
+  .llmp3-body { flex-direction: column; }
+  .llmp3-list { width: auto; flex: none; max-height: 220px;
+    border-right: 0; border-bottom: 1px solid var(--line, #e8eaee); }
+  .llmp3-pane { max-height: none; }
+}
