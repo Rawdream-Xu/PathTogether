@@ -405,8 +405,10 @@ def vision(ident, body):
     if result.get("error_code") == "ssrf_blocked":
         return _err("上游地址校验失败，已拒绝出网", "ssrf_blocked", 400)
     if result.get("error_code") == "upstream_timeout":
-        return _err("上游超时或不可达，请稍后重试", "upstream_timeout", 504,
-                    retryable=True)
+        # 覆盖连接失败/超时/响应中断（ChunkedEncoding 归一并入该码）——
+        # 统一给出可重试口径，避免裸 500
+        return _err("上游超时、不可达或连接中断，请稍后重试（也可缩小选区后重试）",
+                    "upstream_timeout", 504, retryable=True)
     if not result.get("ok"):
         return _err("上游返回错误（HTTP %s）" % result.get("status"),
                     "upstream_error", 502, retryable=True)

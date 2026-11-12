@@ -30,7 +30,12 @@ from urllib.parse import urlparse
 import requests
 
 #: 出网异常类（模块级固化：测试替换 llm_vision.requests 后 except 仍匹配真 requests 异常）
-_REQUESTS_EXC = (requests.ConnectionError, requests.Timeout)
+#: 出网异常类（模块级固化：测试替换 llm_vision.requests 后 except 仍匹配真
+#: requests 异常）。ChunkedEncodingError（响应中途断开）继承自 RequestException，
+#: 一并归一为用户可读错误——绝不裸抛 500。
+_REQUESTS_EXC = (requests.ConnectionError, requests.Timeout,
+                 requests.exceptions.ChunkedEncodingError,
+                 requests.RequestException)
 
 #: 连通测试用的 1x1 透明 PNG（确定性常量，70 字节 base64）
 TEST_IMAGE_PNG_B64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"

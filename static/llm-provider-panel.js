@@ -76,6 +76,26 @@
     { group: "domestic", id: "siliconflow", label: "硅基流动 SiliconFlow",
       base_url: "https://api.siliconflow.cn/v1",
       models: "Qwen/Qwen2.5-VL-72B-Instruct" },
+    // —— 订阅套餐 · Plans（订阅制供应商：买套餐送 Key，形态仍是
+    //    base_url + API Key + 模型；与按量 API 直连只是售卖方式不同）——
+    { group: "plans", id: "zai-coding", label: "智谱 Z.ai Coding",
+      base_url: "https://api.z.ai/api/coding/paas/v4",
+      models: "glm-5.3-flash, glm-4.5v" },
+    { group: "plans", id: "kimi-code", label: "月之暗面 Kimi Code",
+      base_url: "https://api.kimi.com/coding/v1",
+      models: "kimi-dev-72b" },
+    { group: "plans", id: "ali-coding", label: "阿里 Coding（国际）",
+      base_url: "https://dashscope-intl.aliyuncs.com/api/v1",
+      models: "qwen3-coder-plus" },
+    { group: "plans", id: "xai-grok-oauth", label: "xAI Grok（订阅）",
+      base_url: "https://api.x.ai/v1",
+      models: "grok-4, grok-2-vision-1212" },
+    { group: "plans", id: "minimax-plan", label: "海螺 MiniMax · 套餐",
+      base_url: "https://api.minimax.chat/v1",
+      models: "MiniMax-VL-01" },
+    { group: "plans", id: "anthropic-oauth", label: "Anthropic（订阅）",
+      base_url: "https://api.anthropic.com/openai/v1",
+      models: "claude-sonnet-4-5" },
     { group: "local", id: "ollama", label: "本地 Ollama",
       base_url: "http://localhost:11434/v1",
       models: "llama3.2-vision, llava",
@@ -376,6 +396,7 @@
     var groups = [
       { key: "flagship", title: "国际旗舰 · Flagship" },
       { key: "domestic", title: "国产大模型 · Domestic" },
+      { key: "plans", title: "订阅套餐 · Plans" },
       { key: "local", title: "聚合 / 本地 · Local" },
     ];
     groups.forEach(function (g) {
@@ -691,6 +712,56 @@
   }
 
   // ------------------------------------------------------------------ //
+  // 呼吸灯轮询：面板打开且在供应商页时，每 30s 轻量刷新 /api/llm/status
+  // （服务端进程内缓存，不外呼；测试/识图转绿后此处即使不重开面板也会更新）
+  // ------------------------------------------------------------------ //
+
+  var _pollTimer = null;
+
+  function pollStatusOnce() {
+    if (!deps() || _tab !== "providers" ||
+        !deps().container || !deps().container.isConnected) {
+      return;  // 面板已关/切页签 → 跳过
+    }
+    api({ url: "/api/llm/status" }).then(function (r) {
+      applyStatus(r);
+      renderLamps();   // 轻量刷灯类名/title，不整体 render（避免打断输入）
+    }).catch(function () { /* 静默 */ });
+  }
+
+  function renderLamps() {
+    // 轻量更新：按中列行序与 _providers 对应关系刷灯类名
+    var rows = document.querySelectorAll(".llmp3-item");
+    rows.forEach(function (row) {
+      var labelEl = row.querySelector(".llmp3-item-label");
+      if (!labelEl) return;
+      var label = labelEl.textContent;
+      var p = _providers.filter(function (x) {
+        var c = catalogMatch(x);
+        return c && c.label === label;
+      })[0];
+      if (!p) return;
+      var lamp = row.querySelector(".llmp3-lamp");
+      if (!lamp) return;
+      var st = _status[p.provider_id];
+      var green = !!(st && st.status === "green");
+      lamp.className = "llmp3-lamp " + (green ? "llmp3-lamp-green"
+                                              : "llmp3-lamp-gray");
+      lamp.title = green
+        ? "已连通 · " + (st.latency_ms || 0) + "ms"
+        : "未测试 / 状态过期";
+    });
+  }
+
+  function startPoll() {
+    stopPoll();
+    _pollTimer = setInterval(pollStatusOnce, 30000);
+  }
+  function stopPoll() {
+    if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+  }
+
+  // ------------------------------------------------------------------ //
   // user 只读清单（服务端已过滤禁用行；无 base_url/尾 4 位）
   // ------------------------------------------------------------------ //
 
@@ -712,9 +783,11 @@
       _deps = deps;
       _tab = "providers";
       if (deps && deps.container) { loadAll(); }
+      startPoll();
     },
     mountUser: function (deps) {
       _deps = deps;
+      startPoll();
       return refreshUser();
     },
     refresh: loadAll,
