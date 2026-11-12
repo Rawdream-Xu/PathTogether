@@ -261,10 +261,17 @@
   }
 
   function catalogMatch(p) {
+    // 宽松匹配：配置 name 与目录 label 的任一空白分隔词（≥3 字符）相等，
+    // 或 label 整体相等（如「DeepSeek」↔「深度求索 DeepSeek」）
+    var name = String(p.name || "").trim().toLowerCase();
+    if (!name) return null;
     return CATALOG.filter(function (c) {
-      return c.label === p.name ||
-             c.label.split("（")[0].split(" · ")[0] === p.name ||
-             p.name === c.label.split(" ")[0];
+      var label = c.label.toLowerCase();
+      if (label === name) return true;
+      if (label.indexOf(name) >= 0 || name.indexOf(label) >= 0) return true;
+      return label.split(/[\s（(·/]+/).some(function (w) {
+        return w.length >= 3 && w.toLowerCase() === name;
+      });
     })[0] || null;
   }
 
