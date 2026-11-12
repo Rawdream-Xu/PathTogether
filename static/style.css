@@ -4150,9 +4150,23 @@ button {
 /* ---------- 账户设置对话框（docs/owner-parity-plan-20261106.md §D） ---------- */
 /* 所有登录用户共用；骨架复用 changepw-dialog/picker-mask。分区纵向排列，
    账号/用量右侧对齐；入口按钮与 picker-footer 的 btn 同款。
-   P1-W0c v2：AI 供应商三栏面板需要宽幅——对话框加宽（原 460px）。 */
-.acct-settings-dialog { width: min(980px, 94%); }
-.acct-settings-body { gap: 14px; }
+   P1-W0c v2：AI 供应商三栏面板需要宽幅——对话框加宽（原 460px）；
+   内容区竖向滚动（视口不足时整页内容可滚，标题/footer 固定）。 */
+.acct-settings-dialog { width: min(980px, 94%); max-height: 88%; }
+.acct-settings-body {
+  gap: 14px;
+  overflow-y: auto;
+  min-height: 0;            /* flex 子项可收缩，滚动条才会出现 */
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;    /* Firefox：细滚动条 */
+  scrollbar-color: #c3cad2 transparent;
+}
+/* WebKit：对话框内容区滚动条可见（窄而浅灰） */
+.acct-settings-body::-webkit-scrollbar { width: 8px; }
+.acct-settings-body::-webkit-scrollbar-thumb {
+  background: #c3cad2; border-radius: 4px; }
+.acct-settings-body::-webkit-scrollbar-thumb:hover { background: #a8b2bc; }
+.acct-settings-body::-webkit-scrollbar-track { background: transparent; }
 /* LLM 面板打开时压缩既有区块间距（三栏内容为主视图） */
 .acct-settings-dialog:has(#acct-settings-llm:not([hidden])) .acct-settings-section {
   padding-top: 8px;
