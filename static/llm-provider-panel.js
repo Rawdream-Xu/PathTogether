@@ -91,6 +91,7 @@
   var _selPid = null;      // 中列选中的 provider_id
   var _draft = null;       // {catalogId} 新建草稿
   var _lastPoll = 0;
+  var _lastMsg = "";       // 操作消息（render 重建后回填，防丢）
 
   function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
@@ -180,6 +181,9 @@
       body.appendChild(renderSimpleTab(_tab));
     }
     wrap.appendChild(body);
+    // render 重建 DOM 后回填最后一条操作消息（测试/保存结果不被刷掉）
+    var msg = wrap.querySelector(".llmp-msg");
+    if (msg && _lastMsg) msg.textContent = _lastMsg;
     root.appendChild(wrap);
   }
 
@@ -382,25 +386,27 @@
       api({ method: "PATCH",
             url: "/api/llm/providers/" + encodeURIComponent(p.provider_id),
             body: body }).then(function (r) {
-        msg.textContent = r.status === 200 ? "✓ 已保存"
+        _lastMsg = r.status === 200 ? "✓ 已保存"
           : ((r.json && r.json.error) || "保存失败");
+        msg.textContent = _lastMsg;
         if (r.status === 200) loadAll();
-      }).catch(function () { msg.textContent = "网络错误"; });
+      }).catch(function () { _lastMsg = msg.textContent = "网络错误"; });
     });
 
     var test = el("button", "btn secondary small", "测试");
     test.type = "button";
     test.addEventListener("click", function () {
-      msg.textContent = "测试中…";
+      _lastMsg = msg.textContent = "测试中…";
       var body = { provider_id: p.provider_id };
       api({ method: "POST", url: "/api/llm/test", body: body })
         .then(function (r) {
           var d = r.json || {};
-          msg.textContent = d.ok
+          _lastMsg = d.ok
             ? "✓ 连接成功 · " + (d.duration_ms || 0) + "ms"
             : "✗ " + (d.error || d.code || "失败");
-          loadAll();  // 刷新呼吸灯
-        }).catch(function () { msg.textContent = "网络错误"; });
+          msg.textContent = _lastMsg;
+          loadAll();  // 刷新呼吸灯（render 后 _lastMsg 回填）
+        }).catch(function () { _lastMsg = msg.textContent = "网络错误"; });
     });
 
     var clear = el("button", "btn secondary small llmp-danger", "清除密钥");
@@ -411,7 +417,8 @@
       api({ method: "PATCH",
             url: "/api/llm/providers/" + encodeURIComponent(p.provider_id),
             body: { api_key_action: "clear" } }).then(function (r) {
-        msg.textContent = r.status === 200 ? "密钥已清除" : "操作失败";
+        _lastMsg = r.status === 200 ? "密钥已清除" : "操作失败";
+        msg.textContent = _lastMsg;
         loadAll();
       });
     });
@@ -483,19 +490,20 @@
       };
       if (!body.name || !body.base_url || !body.models.length ||
           !body.api_key || body.api_key.length < 8) {
-        msg.textContent = "请完整填写名称 / Base URL / 模型列表 / API Key";
+        _lastMsg = msg.textContent =
+          "请完整填写名称 / Base URL / 模型列表 / API Key";
         return;
       }
       api({ method: "POST", url: "/api/llm/providers", body: body })
         .then(function (r) {
           if (r.status !== 200) {
-            msg.textContent = (r.json && r.json.error) || "新增失败";
+            _lastMsg = msg.textContent = (r.json && r.json.error) || "新增失败";
             return;
           }
           _draft = null;
           _selPid = (r.json || {}).provider_id || null;
           loadAll();
-        }).catch(function () { msg.textContent = "网络错误"; });
+        }).catch(function () { _lastMsg = msg.textContent = "网络错误"; });
     });
     var cancel = el("button", "btn secondary small", "返回");
     cancel.type = "button";
