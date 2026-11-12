@@ -145,7 +145,9 @@
       _deps.toast("无法确定取图区域", "info");
       return;
     }
-    var url = buildRegionUrl(slide, rect);
+    // 请求图上限收紧到 1024px 长边（视觉模型常用输入档；中转站对几 MB
+    // 请求体会过早断连——ChunkedEncoding/超时，详见面板错误提示）
+    var url = buildRegionUrl(slide, rect, 1024);
     _deps.apiFetch(url).then(function (res) {
       if (res.status !== 200) throw new Error("region " + res.status);
       return res.json();
@@ -285,6 +287,13 @@
     if (!_capture) { _deps.toast("请先取图", "info"); return; }
     var prompt = (promptEl.value || "").trim();
     if (!prompt) { _deps.toast("请输入识图指令", "info"); return; }
+    // 请求体闸：base64 超 2MB 提示缩小选区（部分中转站对大请求体过早断连）
+    if (_capture.image_base64.length > 2 * 1024 * 1024) {
+      appendCard("error", "图像数据过大（" +
+        Math.round(_capture.image_base64.length / 1024) + " KB），" +
+        "请缩小选区或降低视野倍率后重新取图。");
+      return;
+    }
     var pick = null;
     try { pick = JSON.parse(modelSel.value); } catch (e) { pick = null; }
     var body = {
