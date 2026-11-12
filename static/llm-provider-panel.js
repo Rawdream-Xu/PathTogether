@@ -164,6 +164,7 @@
     { id: "profile", label: "个人信息" },
     { id: "usage", label: "用量" },
     { id: "providers", label: "LLM 供应商" },
+    { id: "plans", label: "订阅套餐" },
     { id: "privacy", label: "隐私" },
   ];
 
@@ -227,6 +228,8 @@
       pane.appendChild(kvRow("存储用量", storage ? storage.textContent : "—"));
       pane.appendChild(el("p", "llmp-hint",
         "AI 识图 token 计量逐次记录在平台 usage-events（管理员可在管理后台查看）。"));
+    } else if (tab === "plans") {
+      renderPlansTab(pane);
     } else if (tab === "privacy") {
       pane.appendChild(el("div", "llmp3-h", "隐私（数据共享）"));
       pane.appendChild(el("p", "llmp-hint",
@@ -239,6 +242,90 @@
         pane.appendChild(b2);
       }
     }
+    return pane;
+  }
+
+  // ------------------------------------------------------------------ //
+  // 订阅套餐 · Plans（展示型目录）
+  //
+  // 平台计费 = Credit 钱包 + 一次性总额度（无订阅扣费实体）；本页是套餐
+  // 权益对比与购买入口：卡片按身份标定「当前」，变更引导到 Credit 充值 /
+  // 管理后台。不虚构订阅扣费流程（诚实口径；接支付后在此扩展）。
+  // ------------------------------------------------------------------ //
+
+  var PLANS = [
+    { id: "free", name: "免费版", price: "¥0",
+      tagline: "个人读片入门",
+      features: ["10 GB 存储空间", "基础标注与协作分享",
+                 "AI 识图（需自配供应商 API Key）", "社区支持"],
+      currentFor: function () { return true; } },   // 本地部署基线人人可用
+    { id: "standard", name: "标准版", price: "¥49 / 月",
+      tagline: "科室小组协作",
+      features: ["100 GB 存储空间", "无限标注与项目文件夹",
+                 "平台托管视觉模型（免自配 Key）", "每月 2,000 Credits 赠送",
+                 "优先邮件支持"],
+      currentFor: function () { return false; } },
+    { id: "pro", name: "专业版", price: "¥199 / 月",
+      tagline: "研究团队 / 高频识图",
+      features: ["1 TB 存储空间", "全部标准版权益",
+                 "每月 10,000 Credits 赠送", "多通道荧光保真渲染",
+                 "插件计量分析全套", "专属支持通道"],
+      currentFor: function () { return false; } },
+    { id: "team", name: "机构版", price: "定制",
+      tagline: "医院 / 院校整体接入",
+      features: ["私有化部署 / 专有存储", "SSO 与组织账号体系",
+                 "不限量平台托管模型调用", "定制插件与计量报表",
+                 "SLA 保障与现场支持"],
+      currentFor: function () { return false; } },
+  ];
+
+  function renderPlansTab(pane) {
+    pane.appendChild(el("div", "llmp3-h", "订阅套餐 · Plans"));
+    var grid = el("div", "llmp3-plans");
+    var owner = isOwner();
+    PLANS.forEach(function (p) {
+      var isCurrent = p.currentFor() && p.id === "free" ? true : false;
+      // 本地部署：免费版基线恒可用；「当前」标记只挂免费版卡（其余为
+      // 商业套餐目录，购买引导到 Credit 充值/管理后台）
+      var card = el("div", "llmp3-plan" + (isCurrent ? " llmp3-plan-on" : ""));
+      var head = el("div", "llmp3-plan-head");
+      head.appendChild(el("div", "llmp3-plan-name", esc(p.name)));
+      head.appendChild(el("div", "llmp3-plan-price", esc(p.price)));
+      card.appendChild(head);
+      card.appendChild(el("div", "llmp3-plan-tag", esc(p.tagline)));
+      var ul = el("ul", "llmp3-plan-feats");
+      p.features.forEach(function (f) {
+        ul.appendChild(el("li", "", "✓ " + esc(f)));
+      });
+      card.appendChild(ul);
+      var foot = el("div", "llmp3-plan-foot");
+      if (isCurrent) {
+        foot.appendChild(el("span", "llmp-badge", "当前方案"));
+      } else if (p.id === "team") {
+        foot.appendChild(el("span", "llmp-plan-contact",
+          "联系管理员定制"));
+      } else {
+        // 购买 = Credit 充值（平台既有支付通道）；owner 直达，user 提示
+        var buy = el("button", "btn primary small", "获取方案");
+        buy.type = "button";
+        buy.addEventListener("click", function () {
+          if (owner) {
+            window.open("/app/credits", "_blank", "noopener");
+          } else {
+            window.alert("请联系管理员（owner）在 Credit 页面充值后按用量使用；" +
+              "套餐权益随 Credit 余额自动生效。");
+          }
+        });
+        foot.appendChild(buy);
+      }
+      card.appendChild(foot);
+      grid.appendChild(card);
+    });
+    pane.appendChild(grid);
+    pane.appendChild(el("p", "llmp-hint",
+      "计费说明：平台采用 Credit 钱包预付费（¥1 = 100 Credits），AI 调用按 " +
+      "token 计量扣费；套餐赠金与存储扩容经 Credit 页购买。本页为权益目录，" +
+      "不包含订阅自动扣费。"));
     return pane;
   }
 

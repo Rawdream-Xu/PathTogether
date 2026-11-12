@@ -5756,3 +5756,21 @@ body.app-mode-official { overflow: clip; }
     border-right: 0; border-bottom: 1px solid var(--line, #e8eaee); }
   .llmp3-pane { max-height: none; }
 }
+/* 订阅套餐 · Plans（账户设置页签内卡片网格） */
+.llmp3-plans { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px; margin: 4px 0 8px; }
+.llmp3-plan { border: 1px solid var(--line, #e3e6ea); border-radius: 8px;
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 4px;
+  background: #fff; }
+.llmp3-plan-on { border-color: #1a73e8; background: #f4f8ff; }
+.llmp3-plan-head { display: flex; justify-content: space-between;
+  align-items: baseline; gap: 6px; }
+.llmp3-plan-name { font-weight: 700; font-size: 13px; }
+.llmp3-plan-price { font-size: 12px; color: #1a73e8; font-weight: 600;
+  white-space: nowrap; }
+.llmp3-plan-tag { font-size: 11px; color: #98a2ad; }
+.llmp3-plan-feats { margin: 4px 0; padding-left: 0; list-style: none;
+  font-size: 12px; color: #444; display: flex; flex-direction: column;
+  gap: 2px; flex: 1 1 auto; }
+.llmp3-plan-foot { display: flex; align-items: center; min-height: 26px; }
+.llmp-plan-contact { font-size: 12px; color: #666; }
