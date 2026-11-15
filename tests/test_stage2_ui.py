@@ -45,6 +45,17 @@ PLUGIN_UI_DIR.mkdir(parents=True, exist_ok=True)
 for _asset in ("bridge-client.js", "api.js", "read-aloud.js", "sse.js", "renderer.js",
                "config-panel.js", "sessions.js", "main.js"):
     (PLUGIN_UI_DIR / _asset).write_text("window.HistoPilot = window.HistoPilot || {};\n", encoding="utf-8")
+# P0-W3（来源策略 fail-closed）：外部 bundle 须有显式 manifest sha256 pin 才被
+# 放行（修复前未 pin 也放行的 fail-open 行为已删除）。为本测试 bundle 写一份
+# 指向它的策略文件；用例内经 PLUGINS_SOURCE_POLICY_FILE 挂载（import 段不设
+# env，避免收集期污染同进程其它测试模块）。
+import hashlib as _hashlib
+
+HISTOPILOT_POLICY_FILE = PLUGIN_ROOT.parent / "source-policy.test.json"
+HISTOPILOT_POLICY_FILE.write_text(json.dumps({
+    "histopilot": _hashlib.sha256(
+        (PLUGIN_ROOT / "manifest.json").read_bytes()).hexdigest(),
+}), encoding="utf-8")
 
 
 import app as app_mod  # noqa: E402
@@ -56,13 +67,18 @@ APP_JS = REPO_ROOT / "static" / "app.js"
 
 @pytest.fixture(autouse=True)
 def _isolation(monkeypatch):
-    """每个用例前：关闭认证，并绑定本模块的隔离外部 bundle 目录。"""
+    """每个用例前：关闭认证，并绑定本模块的隔离外部 bundle 目录与来源策略。"""
     monkeypatch.setattr(app_mod, "AUTH_ENABLED", False)
     # pytest 收集顺序可能让 app 先被其它测试导入；显式夺回模块级目录，避免
     # 依赖 import 顺序。
     monkeypatch.setattr(app_mod, "PLUGIN_BUNDLES_DIR", PLUGIN_ROOT.parent)
     monkeypatch.delenv("HISTOPILOT_UI_ENABLED", raising=False)
+    # P0-W3：histopilot 是未进 repo pin 表的外部 bundle，须挂测试 pin 策略
+    # 文件才被来源策略放行（repo source-policy.json 不含、也不应含它）。
+    monkeypatch.setenv("PLUGINS_SOURCE_POLICY_FILE", str(HISTOPILOT_POLICY_FILE))
+    app_mod._plugin_source_policy.cache_clear()
     yield
+    app_mod._plugin_source_policy.cache_clear()
 
 
 def _client():

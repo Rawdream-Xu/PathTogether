@@ -30,7 +30,12 @@ from urllib.parse import urlparse
 import requests
 
 #: 出网异常类（模块级固化：测试替换 llm_vision.requests 后 except 仍匹配真 requests 异常）
-_REQUESTS_EXC = (requests.ConnectionError, requests.Timeout)
+#: 出网异常类（模块级固化：测试替换 llm_vision.requests 后 except 仍匹配真
+#: requests 异常）。ChunkedEncodingError（响应中途断开）继承自 RequestException，
+#: 一并归一为用户可读错误——绝不裸抛 500。
+_REQUESTS_EXC = (requests.ConnectionError, requests.Timeout,
+                 requests.exceptions.ChunkedEncodingError,
+                 requests.RequestException)
 
 #: 连通测试用的 1x1 透明 PNG（确定性常量，70 字节 base64）
 TEST_IMAGE_PNG_B64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
@@ -53,11 +58,11 @@ _SSRF_BLOCKED_HOSTS = frozenset({
     "kubernetes.default",
     "kubernetes.default.svc",
 })
-_SSRF_BLOCKED_NETWORKS = (
-    ipaddress.ip_network("0.0.0.0/8"),
-    ipaddress.ip_network("100.64.0.0/10"),
-    ipaddress.ip_network("255.255.255.255/32"),
-)
+#: 禁入网段黑名单（CGNAT / 未指定 / 受限广播；环回/私网/链路本地由
+#: ipaddress 标准属性 is_loopback/is_private/is_link_local 覆盖）
+_SSRF_BLOCKED_NETWORKS = tuple(
+    ipaddress.ip_network(n) for n in (
+        "0.0.0.0/8", "100.64.0.0/10", "255.255.255.255/32"))
 
 
 class BaseUrlInvalid(ValueError):

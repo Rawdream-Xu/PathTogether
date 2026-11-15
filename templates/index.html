@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>HistoPilot Beta</title>
   {% include "_site_icons.html" %}
-  <link rel="stylesheet" href="/static/style.css?v=20261106c" />
+  <link rel="stylesheet" href="/static/style.css?v=20261114b" />
   <!-- OpenSeadragon 5.0.1（已本地化） -->
   <script src="/static/openseadragon.min.js"></script>
   <!-- 中英双语切换（必须在 app.js 之前加载，提供 window.HP_I18N） -->
-  <script src="/static/i18n.js?v=20261109a"></script>
+  <script src="/static/i18n.js?v=20261114b"></script>
 </head>
 <body class="app-mode-official" data-app-mode="official">
   <script>
@@ -56,6 +56,9 @@
   <!-- COS 直传共享引擎（C4）：工作台与 /tools/slides 共用；先于 app.js 加载，
        提供 window.HP_COS_UPLOAD（无 DOM/无 i18n，依赖全部注入） -->
   <script src="/static/upload/cos-uploader.js?v=20261015"></script>
+  <!-- P0-W6a 本地直传引擎：分片直接 POST 平台（无 COS 凭证的裸部署通道）；
+       app.js 按 bootstrap.capabilities.local_upload 选择通道（local 优先） -->
+  <script src="/static/upload/local-uploader.js?v=20261111"></script>
   <script src="/static/upload/slide-sniff.js?v=20261106c"></script>
   <!-- MRXS「先选 .mrxs，再选同名数据文件夹」共享协助逻辑：classic script
        （无 DOM/i18n）；面板编排器与工作台接线都读 window.HP_MRXS_COMPANION -->
@@ -72,13 +75,18 @@
   <!-- 标注纯几何 helper（§5.4 polygon / §6.2 旋转投影；主站与分享页共用，
        无 DOM/i18n 依赖；必须在 app.js 之前加载） -->
   <script src="/static/anno-geometry.js?v=20261009a"></script>
+  <!-- P1-W1：标注类别下拉 + 颜色图例（依赖注入；app.js 接线，仅工作台加载——
+       分享页无标注写路径不同步，见 docs/annotation-classes-w1-decisions.md D6） -->
+  <script src="/static/anno-classes.js?v=20261114c"></script>
+  <!-- P1-W1：owner「标注类别」管理面板（依赖注入；app.js 接线，仅工作台加载） -->
+  <script src="/static/label-class-panel.js?v=20261114a"></script>
   <!-- P1-W0c：owner「AI 供应商」设置面板（依赖注入；app.js 接线，仅工作台加载） -->
-  <script src="/static/llm-provider-panel.js?v=20261111"></script>
+  <script src="/static/llm-provider-panel.js?v=20261112e"></script>
   <!-- P1-W0d：查看器「AI 识图」（当前视野/选框 → /api/llm/vision；结果进评论流卡片） -->
-  <script src="/static/llm-vision-ui.js?v=20261111"></script>
+  <script src="/static/llm-vision-ui.js?v=20261112f"></script>
   <!-- AI 面板外框共享模块（拖动/缩放/建议提示条；正式版与 Demo 同源） -->
   <script src="/static/ai-panel-shell.js?v=20261102a"></script>
-  <script src="/static/app.js?v=20261107a"></script>
+  <script src="/static/app.js?v=20261115a"></script>
   {% if histopilot_ui_enabled %}<script src="/static/ai-panel-chrome.js?v=20261009b"></script>{% endif %}
 </body>
 </html>

@@ -125,6 +125,8 @@ _PUBLIC_NAMES = (
     "list_run_grants",
     # —— 描绘按需技能（0082 / viewer-drawing-skill-contract §3.2） ——
     "set_run_grant_skill_delineate",
+    # —— P1-W1 标注类别引用校验注入（resolver 由 app 接线 label_class_store） ——
+    "set_classification_resolver",
     # —— 会话级「允许 AI 描绘」开关镜像（0039/0041 / P1-4+三轮 P1） ——
     "get_ai_session_drawing_flag",
     "upsert_ai_session_drawing_flag",

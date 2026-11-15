@@ -30,3 +30,7 @@ alipay-sdk-python==3.7.1411
 # 数据文件是运维放置的 DB-IP "IP to Country Lite"，CC BY 4.0；不做第三方
 # 网络定位调用，2026-11-08）。
 maxminddb>=3.2,<4
+# 上传 OME-XML 解析防实体扩展（P0-W5）：stdlib ET 不拒绝 DOCTYPE/ENTITY，
+# 恶意嵌套实体可在解析期指数展开（billion-laughs）。defusedxml 在 DTD/实体
+# 声明处直接拒绝（forbid_dtd/forbid_entities），四解析点统一走它。
+defusedxml>=0.7.1,<0.8

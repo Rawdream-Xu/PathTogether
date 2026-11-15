@@ -80,6 +80,48 @@ from share_shared import (
 #: action/target 标识与异常堆栈，绝不落 detail 负载/密钥——同 billing_store 红线）
 _LOG = logging.getLogger(__name__)
 
+# P1-W1 标注类别：类别查询钩子（依赖注入，本模块不 import label_class_store
+# —— share_store re-export 链保持在 app 之前可独立加载/测试）。app 启动与
+# 测试经 set_classification_resolver 注入 ``(name) -> {"name","color"} | None``；
+# 未注入（或查名失败）时携带类别的写入按 unknown_class 拒绝（fail-closed，
+# 规约 #10：不能因缺接线放行未校验引用）。
+_classification_resolver = None
+
+
+def set_classification_resolver(resolver):
+    """app 启动接线：注入 ``def resolver(name: str) -> dict | None``。
+
+    resolver 返回 {"name","color"}（rois 权威 dict 的 classification 值，
+    color 为当前类别展示快照）或 None（不存在/停用）。
+    """
+    global _classification_resolver
+    _classification_resolver = resolver
+
+
+def _norm_classification(classification):
+    """标注写侧 classification 归一（docs/annotation-classes-w1-decisions.md D2）。
+
+    None / 空 dict / 空 name → ``None``（「无类别」，合法态，存量兼容）；
+    有 name → 经 resolver 引用校验，未命中抛 UnknownClass（HTTP 400
+    unknown_class）；resolver 未注入同拒（fail-closed）。
+    返回存储值（{"name","color"} 新 dict）或 None；不修改调用方传入对象。
+    """
+    if classification is None:
+        return None
+    if not isinstance(classification, dict):
+        raise ValueError("classification 需为对象")
+    name = classification.get("name")
+    if not isinstance(name, str) or not name.strip():
+        if classification.get("color"):
+            raise ValueError("classification.name 缺失")
+        return None
+    if _classification_resolver is None:
+        raise ValueError("unknown_class")
+    resolved = _classification_resolver(name)
+    if resolved is None:
+        raise ValueError("unknown_class")
+    return {"name": resolved["name"], "color": list(resolved["color"])}
+
 
 class RevisionConflict(Exception):
     """CAS 失败：expected_revision 与当前 revision 不符（与 json 同语义）。
@@ -1023,7 +1065,7 @@ def list_slide_view_grants():
 def add_roi(token, slide, label, type="rect", size_mm=0.0, shared=False, note="", visitor=None,
             source=None, created_by_session_id=None, _effect_key=None, owner_user_id=None,
             requester_role=None, provenance=None, client_action_id=None,
-            slide_id=None, geometry_locked=False, **geom):
+            slide_id=None, geometry_locked=False, classification=None, **geom):
     """为 token 的 share 添加一条标注；统一入口，支持 rect/arrow/freehand。
 
     语义与 json 完全一致（含 WAL effect_key 幂等、index 语义、source 推断）。
@@ -1035,6 +1077,9 @@ def add_roi(token, slide, label, type="rect", size_mm=0.0, shared=False, note=""
     保持 NULL = unresolved。rois/change_log 双写 slide_id + slide 快照。
     §6.3：``geometry_locked``（可选，缺省 False）——草稿保存时带锁；AI 写
     路径不传该参 → 恒 false。
+    P1-W1：``classification``（可选，{"name"} 或 {"name","color"}）——类别
+    体系引用；name 须命中启用中的类别（resolver 注入，未命中 ValueError
+    "unknown_class"）；落库为权威 dict 的 {"name","color"} 快照（D2）。
     2026-10-08 缺陷修复（R-04）：slide ∈ share 成员判定改 share_slides
     ID 关系（slide_id 已知时；与读通道同源），仅无 ID 的历史名行回退
     shares.slides JSONB 名快照——ID-only 资产（无 legacy 名）此前被名快照
@@ -1049,6 +1094,7 @@ def add_roi(token, slide, label, type="rect", size_mm=0.0, shared=False, note=""
     if not label:
         raise ValueError("请填写用户名或标签")
     note_clean = _clean_note(note)
+    class_snapshot = _norm_classification(classification)
 
     geom_full = dict(geom)
     geom_full["size_mm"] = size_mm
@@ -1168,6 +1214,9 @@ def add_roi(token, slide, label, type="rect", size_mm=0.0, shared=False, note=""
                     # §6.3 几何位置锁（缺省 false；显式带上避免读侧猜键）
                     "geometry_locked": bool(geometry_locked),
                 }
+                # P1-W1：类别引用（None=无类别不落键，存量行形状不变）
+                if class_snapshot is not None:
+                    roi["classification"] = class_snapshot
                 if _effect_key:
                     roi["effect_key"] = _effect_key
                 if client_action_id:
@@ -1570,8 +1619,15 @@ def restore_roi(annotation_id, expected_revision=None):
 
 
 def update_roi_by_annotation_id(annotation_id, geom=None, note=None,
-                                expected_revision=None):
-    """按稳定 annotation_id 更新几何/备注（CAS 同 update_roi）。"""
+                                expected_revision=None,
+                                classification="_UNSET_"):
+    """按稳定 annotation_id 更新几何/备注/类别（CAS 同 update_roi）。
+
+    P1-W1：``classification`` 哨兵语义——``"_UNSET_"``（缺省）不变更；
+    ``None`` 清空类别（落库去键，读侧视为无类别）；dict 走
+    ``_norm_classification`` 引用校验（未命中 ValueError "unknown_class"）。
+    类别变更属于元数据编辑：已锁标注放行（几何锁只锁几何位置，§6.3）。
+    """
     if not annotation_id:
         raise ValueError("缺少 annotation_id")
     if geom is not None and not isinstance(geom, dict):
@@ -1579,6 +1635,10 @@ def update_roi_by_annotation_id(annotation_id, geom=None, note=None,
     note_clean = "_UNSET_"
     if note is not None:
         note_clean = _clean_note(note)
+    class_sentinel = "_UNSET_"
+    class_value = None
+    if classification != class_sentinel:
+        class_value = _norm_classification(classification)
     conn = _connect()
     try:
         with pg_store.transaction(conn) as c:
@@ -1619,6 +1679,12 @@ def update_roi_by_annotation_id(annotation_id, geom=None, note=None,
                         roi.pop("side_px", None)
                 if note_clean != "_UNSET_":
                     roi["note"] = note_clean
+                if classification != "_UNSET_":
+                    # P1-W1：改绑/清空类别（None 去键，保持权威 dict 最小形状）
+                    if class_value is None:
+                        roi.pop("classification", None)
+                    else:
+                        roi["classification"] = class_value
                 roi["revision"] = int(roi.get("revision") or 1) + 1
                 roi["change_seq"] = _bump_change_seq(
                     cur, roi.get("slide"), token, roi.get("annotation_id"),
@@ -3015,19 +3081,53 @@ def update_project(pid, *, name=None, note=None, slides=None, slide_ids=None,
         conn.close()
 
 
-def add_slides_to_project(pid, slides, slide_ids=None):
+def _slide_owner_mismatch(cur, slide_id, name, proj_owner):
+    """P0-W2（审计 P0-2）：项目成员切片归属复核。True = 不一致或不可判定。
+
+    slide_id 优先直查，其次按名（legacy 冻结映射）；无行（历史名行/已删除
+    资产）视为不可判定 → 拒绝（fail-closed；HTTP 层解析失败在先，仅显式传
+    requester_role 的调用走到这里）。双方 owner 归一（'' → NULL）后比较。
+    """
+    if slide_id:
+        cur.execute("SELECT owner_user_id FROM slides WHERE slide_id=%s",
+                    (slide_id,))
+    elif name:
+        cur.execute("SELECT owner_user_id FROM slides WHERE legacy_filename=%s",
+                    (name,))
+    else:
+        return True
+    row = cur.fetchone()
+    if row is None:
+        return True
+    return (row["owner_user_id"] or None) != (proj_owner or None)
+
+
+def add_slides_to_project(pid, slides, slide_ids=None, requester_role=None):
     """向项目追加切片（去重保序）。返回更新后的 dict；不存在返回 None。
 
     P2（合同 §3.2）：slide_ids 优先或名数组；双列写入；同名不同 ID 可并存
     （去重键 = slide_id，NULL-ID 行按名去重保持旧行为）。
+    P0-W2（审计 P0-2）：切片归属校验——成员切片 owner 须与项目 owner 一致
+    （防他人切片被归档项目锁死），不一致 raise PermissionError（路由层映射
+    403）。requester_role="owner"（== user_store.ROLE_OWNER；本模块不
+    import user_store，与 _reject_guest_write 同口径用字面量）豁免——管理
+    语义；requester_role=None = 内部调用（百度/转换/producer 导入链，调用
+    前已自行复核 project.owner == 导入用户）不限制。
     """
     conn = _connect()
     try:
         with pg_store.transaction(conn) as c:
             with c.cursor() as cur:
-                cur.execute("SELECT project_id FROM projects WHERE project_id=%s", (pid,))
-                if cur.fetchone() is None:
+                cur.execute(
+                    "SELECT owner_user_id FROM projects WHERE project_id=%s",
+                    (pid,))
+                prow = cur.fetchone()
+                if prow is None:
                     return None
+                proj_owner = prow["owner_user_id"] or None
+                # None=内部调用（不限制）；"owner"=豁免；其余显式角色复核
+                check_ownership = requester_role is not None \
+                    and requester_role != "owner"
                 cur.execute("SELECT slide, slide_id FROM project_slides "
                             "WHERE project_id=%s ORDER BY position", (pid,))
                 prows = cur.fetchall()
@@ -3036,6 +3136,11 @@ def add_slides_to_project(pid, slides, slide_ids=None):
                 seen = set(existing)
                 pos = len(existing)
                 for s, sid in _project_slide_rows(cur, slides, slide_ids):
+                    if check_ownership and _slide_owner_mismatch(
+                            cur, sid, s, proj_owner):
+                        raise PermissionError(
+                            "切片 %s 归属与项目 owner 不一致，拒绝加入项目"
+                            % (sid or s))
                     if sid is not None:
                         if sid in seen_ids:
                             continue
@@ -3198,6 +3303,10 @@ def annotations_by_slide(subject=None, access_context=None):
                 # §6.3：锁状态顶层布尔（旧行缺省 false）
                 "geometry_locked": bool(r.get("geometry_locked")),
             }
+            # P1-W1：类别快照（有则透传；无类别不落键，存量 item 形状不变）
+            if isinstance(r.get("classification"), dict) \
+                    and r["classification"].get("name"):
+                item["classification"] = r["classification"]
             for k in ("w", "h", "geometry_version", "x1", "y1", "x2", "y2", "points"):
                 if k in r:
                     item[k] = r[k]
@@ -3571,7 +3680,14 @@ def set_project_archived(pid, archived):
 
 
 def archived_slide_names():
-    """返回属于任意 archived 项目的切片名集合（归档只读判定用）。"""
+    """返回属于任意 archived 项目的切片名集合（归档只读判定用）。
+
+    P0-W2（审计 P0-2）：owner 一致性联接——成员切片 owner 与项目 owner
+    双方已知且不一致（毒化成员行：他人把我的切片挂进他的项目再归档）时
+    不计入归档集合（我的切片不被他人项目归档锁死）；任一方 NULL / 名行
+    不可解析（本地单租户与历史行）维持旧行为照旧锁定。slide_id 为权威
+    键，NULL-ID 名行走 legacy_filename 回退解析。
+    """
     conn = _connect()
     try:
         with pg_store.transaction(conn) as c:
@@ -3579,7 +3695,11 @@ def archived_slide_names():
                 cur.execute(
                     "SELECT ps.slide FROM project_slides ps "
                     "JOIN projects p ON p.project_id=ps.project_id "
-                    "WHERE p.archived=TRUE")
+                    "LEFT JOIN slides s ON s.slide_id=ps.slide_id "
+                    "OR (ps.slide_id IS NULL AND s.legacy_filename=ps.slide) "
+                    "WHERE p.archived=TRUE "
+                    "AND (s.owner_user_id IS NULL OR p.owner_user_id IS NULL "
+                    "OR s.owner_user_id=p.owner_user_id)")
                 return {r["slide"] for r in cur.fetchall()}
     finally:
         conn.close()

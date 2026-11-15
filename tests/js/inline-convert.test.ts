@@ -798,7 +798,7 @@ describe("转换 → 上传（一次授权整链）", () => {
 		expect(uploaded).toEqual(["scan.ome.tif"]);
 	});
 
-	it("convert_in_browser（422）→ 自动回队恰一次，第二次终态（§7.2）", async () => {
+		it("convert_in_browser（422）→ 自动回队恰一次，第二次终态（§7.2）", async () => {
 		let n = 0;
 		const h = mkOrch({
 			runner: {
@@ -814,6 +814,119 @@ describe("转换 → 上传（一次授权整链）", () => {
 		expect(h.cos.uploads.length + n).toBeGreaterThan(0);
 		// 无论最终停在哪个终态，回队计数绝不超过 1（防死循环）
 		expect(e.requeueCount).toBeLessThanOrEqual(1);
+	});
+});
+
+// --------------------------------------------------------------------- //
+// P0-W6 后续：转换产物上传走本地直传通道（COS 不可用的裸部署全链路）
+// --------------------------------------------------------------------- //
+describe("P0-W6：产物上传本地通道（local 优先）", () => {
+	// local 通道配置形状（app.js resolveLocalConfig 的产物同构）
+	const LOCAL_CFG = {
+		max_size_bytes: 1_000_000, part_bytes: 100,
+		max_concurrent_parts: 2,
+		formats: ["tif", "tiff", "ome.tif", "kfb"],
+	};
+
+	it("编排器门禁只认「有可用通道配置」：cosConfig 为 local 形状时 KFB 产物链路照常 done", async () => {
+		// COS 不可用的裸部署形态：caps.cosConfig 注入的是 local 通道配置。
+		// inline-convert 的入队/门禁/产物闸不得因为「这不是 COS 配置」而拒。
+		const h = mkOrch({ caps: { cosConfig: LOCAL_CFG } });
+		const kfb = Uint8Array.from([0xF1, 0x01, 0xEE, 0xEE, 0x4B, 0x46, 0x42, 0x00, 0, 0, 0, 0]);
+		const e = h.orch.enqueue(fakeFile("a.kfb", kfb))!;
+		await flush(20);
+		expect(e.state).toBe("done");
+		expect(h.runner.calls.map((c) => c[0])).toContain("startJob");
+	});
+
+	it("app.js 产物上传引擎随通道分派：cfg 为 local 配置 → HP_LOCAL_UPLOAD，零 COS 创建请求", async () => {
+		// 与「独立评审复现」describe 的 loadClassic 同款加载面（那边是
+		// describe 局部函数，这里内联一份）
+		const w: W = {};
+		for (const name of ["inline-convert", "slide-sniff", "cos-uploader"]) {
+			new Function("window",
+				readFileSync(resolve(root, "static/upload/" + name + ".js"), "utf8"))(w);
+		}
+		const localUploads: Record<string, unknown>[] = [];
+		(w as unknown as Record<string, unknown>).HP_LOCAL_UPLOAD = {
+			resolveConfig: (p: unknown) => p,
+			createUpload: (opts: Record<string, unknown>) => {
+				localUploads.push(opts);
+				return {
+					done: Promise.resolve({ ok: true, body: { slide_id: "sld-local" } }),
+					cancel() { }, settled: () => true,
+				};
+			},
+		};
+		const calls: Array<{ url: string; method: string }> = [];
+		const api = async (url: string, init: { method?: string } = {}) => {
+			calls.push({ url, method: init.method || "GET" });
+			return { ok: true, status: 200, json: async () => ({}) };
+		};
+		const artifactBytes = Uint8Array.from([73, 73, 43, 0, 8, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0]);
+		const artifact = fakeFile("patient.ome.tif", artifactBytes);
+		const job: Record<string, unknown> = {
+			id: "job-p2", state: "ready",
+			source: { name: "patient.kfb", size: 100 },
+			intent: { channel: "workbench-inline", state: "pending",
+				account: "user-A", target: { pid: "p1" } },
+			result: { outputBytes: artifact.size, format: "ome-bigtiff-subifd-rgb-jpeg-pyramid" },
+		};
+		const runner = {
+			listJobs: async () => [job],
+			getJob: async () => job,
+			setJobUpload: async () => { },
+			setJobIntent: async () => { },
+			artifactView: async () => artifact,
+		};
+		const stageViewCode = appSrc.slice(
+			appSrc.indexOf("  function cosStageKey("),
+			appSrc.indexOf("  function cosShowStage("));
+		const artifactCode = appSrc.slice(
+			appSrc.indexOf("  function uploadEntryArtifact("),
+			appSrc.indexOf("  /// 完成收口（§3.5）")) + stageViewCode;
+		const actualOnArtifact = new Function(
+			"window", "inlineRunner", "currentUserId", "resolveCosConfig",
+			"LOCAL_UPLOAD_CONFIG",
+			"apiFetch", "apiFetchNoRedirect", "inlineRowSetStage", "t", "humanSize",
+			"authInfoReady", "authInfoEnabled", "tt",
+			artifactCode + ";return uploadEntryArtifact;")(
+			w, runner, "user-A", () => null, LOCAL_CFG, api, api,
+			() => {}, (k: string) => k, (n: number) => String(n),
+			() => Promise.resolve(), false, (k: string) => k) as
+			(e: Entry, a: unknown) => Promise<unknown>;
+		// 直调 app.js 的 uploadEntryArtifact（产物上传的 app 侧实现——编排
+		// 器链路已由上一用例与全量套覆盖；这里聚焦引擎分派本身）。
+		const entry = {
+			id: "e-local", jobId: "job-p2", name: "patient.kfb",
+			cancelled: false, uploadAccount: "user-A",
+		} as unknown as Entry;
+		const out = await actualOnArtifact(entry, artifact);
+		const result = out as { ok?: boolean; slide_id?: string };
+		expect(result && (result.ok !== false)).toBe(true);
+		// 引擎分派：local 引擎恰好一次、config 就是注入的 local 配置
+		expect(localUploads).toHaveLength(1);
+		expect(localUploads[0].config).toBe(LOCAL_CFG);
+		// 假产物字节（16B TIFF 头）嗅探不出声明 → createBody=null（与
+		// 「KFB → done」用例同注释：绝不写死声明）；声明随产物字节变化，
+		// 由 §4.3 既有用例覆盖。
+		expect(localUploads[0].createBody).toBeNull();
+		// COS 通道零建任务（RED 现状：硬编码 HP_COS_UPLOAD → POST /api/ingestions）
+		expect(calls.some((c) => c.url === "/api/ingestions" && c.method === "POST"))
+			.toBe(false);
+	});
+
+	it("源码契约：inlineCaps 的 cosConfig 槽 = 生效通道配置（local 优先，app.js）", () => {
+		const seg = appSrc.slice(
+			appSrc.indexOf("  function inlineCaps("),
+			appSrc.indexOf("  function inlineResolveVars("));
+		expect(seg).toContain("cosConfig: activeUploadConfig()");
+		// createEntryUpload 的引擎分派（cfg 为 LOCAL_UPLOAD_CONFIG → 本地引擎）
+		const entrySeg = appSrc.slice(
+			appSrc.indexOf("  function createEntryUpload("),
+			appSrc.indexOf("  /// 完成收口（§3.5）"));
+		expect(entrySeg).toContain("HP_LOCAL_UPLOAD");
+		expect(entrySeg).toContain("cfg === LOCAL_UPLOAD_CONFIG");
 	});
 });
 

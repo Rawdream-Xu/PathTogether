@@ -455,6 +455,67 @@ button {
 .anno-pop .anno-label-input { width: 180px; }
 .anno-more-btn { font-size: 10px; color: var(--text-3); }
 
+/* P1-W1 标注类别：下拉 + 颜色图例（anno-classes.js 渲染） */
+.anno-pop .anno-class-select { width: 180px; }
+.anno-class-legend { display: flex; flex-wrap: wrap; gap: 4px 10px; padding-top: 2px; }
+.anno-class-legend-item { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-2); }
+.anno-class-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18); }
+
+/* P1-W1+ 标注导出双格式菜单（导出全部 ▾） */
+.anno-export-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  min-width: 180px;
+  background: rgba(255, 255, 255, 0.98);
+  border: 0.5px solid var(--separator);
+  border-radius: var(--r-btn);
+  box-shadow: var(--shadow-float);
+  padding: 4px;
+  z-index: 60;
+}
+.anno-panel-header-actions { position: relative; }
+.anno-export-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  border-radius: 4px;
+  text-align: left;
+}
+.anno-export-item:hover { background: var(--accent-fill); color: var(--accent); }
+.anno-export-item .aem-hint { font-size: 10px; color: var(--text-3); }
+
+/* P1-W1 owner「标注类别」管理面板（label-class-panel.js 渲染） */
+.lc-error { color: #b4232a; font-size: 12px; }
+.lc-empty { font-size: 12px; color: var(--text-2); padding: 4px 0; }
+.lc-list { display: flex; flex-direction: column; gap: 4px; }
+.lc-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.lc-row.lc-create { padding: 4px 0 8px; border-bottom: 0.5px solid var(--separator); }
+.lc-dot { width: 12px; height: 12px; border-radius: 50%; flex: none; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18); }
+.lc-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lc-badge { flex: none; font-size: 10px; padding: 1px 6px; border-radius: 8px; }
+.lc-badge.lc-on { background: rgba(46, 160, 67, 0.15); color: #1a7f37; }
+.lc-badge.lc-off { background: rgba(110, 119, 129, 0.15); color: var(--text-3); }
+.lc-sort { flex: none; color: var(--text-3); font-size: 11px; }
+.lc-actions { flex: none; display: inline-flex; gap: 4px; }
+.lc-btn { border: 0.5px solid var(--separator); background: transparent; border-radius: 4px; font-size: 11px; padding: 2px 8px; cursor: pointer; color: var(--text-2); }
+.lc-btn:hover { background: var(--hover, rgba(0, 0, 0, 0.04)); }
+.lc-btn.lc-del:hover { color: #b4232a; border-color: #b4232a; }
+.lc-input { border: 0.5px solid var(--separator); border-radius: 4px; font-size: 12px; padding: 3px 6px; }
+.lc-new-name, .lc-ed-name { flex: 1 1 160px; min-width: 120px; }
+.lc-new-color, .lc-ed-color { width: 34px; height: 26px; padding: 1px 2px; cursor: pointer; }
+.lc-new-sort, .lc-ed-sort { width: 64px; }
+.lc-enabled { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; color: var(--text-2); flex: none; }
+
 /* 宽度分组档位标记：折叠档隐藏悬空分隔线（组已搬入 ⋯ 菜单） */
 #toolbar.tb-tier-mid .tb-sep,
 #toolbar.tb-tier-narrow .tb-sep { display: none; }
@@ -2054,6 +2115,96 @@ button {
   flex: 1;
   overflow-y: auto;
   padding: 6px;
+}
+
+/* P1-W1+：标注面板伸缩（左缘拖宽手柄 + 折叠钮）与行内分类属性 */
+.anno-panel-resize {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: ew-resize;
+  z-index: 2;
+  touch-action: none;
+}
+.anno-panel-resize:hover,
+.anno-panel-resize.dragging { background: linear-gradient(90deg, transparent, var(--accent-fill)); }
+.anno-panel-collapse {
+  position: absolute;
+  left: -14px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 44px;
+  border: 0.5px solid var(--separator);
+  border-right: none;
+  border-radius: 6px 0 0 6px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 2;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.anno-panel-collapse:hover { color: var(--accent); background: var(--accent-fill); }
+/* 折叠态：收成右缘竖条（宽度 0 视觉，仅折叠钮反向露出） */
+.anno-panel.collapsed { width: 0 !important; }
+.anno-panel.collapsed .anno-panel-header,
+.anno-panel.collapsed .anno-panel-list,
+.anno-panel.collapsed .anno-edit-wrap { display: none; }
+.anno-panel.collapsed .anno-panel-collapse {
+  left: -18px;
+  border-radius: 6px 0 0 6px;
+  background: rgba(255, 255, 255, 0.95);
+}
+.anno-panel.collapsed .anno-panel-collapse::before { content: "‹"; transform: scaleX(-1); }
+.anno-panel.collapsed .anno-panel-resize { display: none; }
+
+/* 标注行内分类属性（QuPath 语义：色条=分类色，徽章=分类名） */
+.anno-item { position: relative; }
+.anno-class-strip {
+  position: absolute;
+  left: 0;
+  top: 4px;
+  bottom: 4px;
+  width: 4px;
+  border-radius: 2px;
+  background: var(--text-3);
+  opacity: 0.85;
+  flex: none;
+}
+.ai-title { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.anno-class-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 130px;
+  font-size: 10px;
+  padding: 0 6px;
+  height: 15px;
+  border-radius: 8px;
+  background: var(--hover, rgba(0, 0, 0, 0.05));
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.anno-class-badge .anno-class-dot { width: 8px; height: 8px; flex: none; }
+.anno-class-select-mini {
+  border: 0.5px solid var(--separator);
+  border-radius: 4px;
+  font-size: 10px;
+  padding: 0 2px;
+  height: 18px;
+  max-width: 120px;
+  color: var(--text-2);
+  background: transparent;
+  cursor: pointer;
 }
 .anno-panel-empty { color: var(--text-3); font-size: 13px; text-align: center; padding: 20px 8px; }
 /* 列表加载失败显式错误态（P3 2026-10-19）：整块替换列表内容 */
@@ -4149,9 +4300,28 @@ button {
 
 /* ---------- 账户设置对话框（docs/owner-parity-plan-20261106.md §D） ---------- */
 /* 所有登录用户共用；骨架复用 changepw-dialog/picker-mask。分区纵向排列，
-   账号/用量右侧对齐；入口按钮与 picker-footer 的 btn 同款。 */
-.acct-settings-dialog { width: min(460px, 92%); }
-.acct-settings-body { gap: 14px; }
+   账号/用量右侧对齐；入口按钮与 picker-footer 的 btn 同款。
+   P1-W0c v2：AI 供应商三栏面板需要宽幅——对话框加宽（原 460px）；
+   内容区竖向滚动（视口不足时整页内容可滚，标题/footer 固定）。 */
+.acct-settings-dialog { width: min(980px, 94%); max-height: 88%; }
+.acct-settings-body {
+  gap: 14px;
+  overflow-y: auto;
+  min-height: 0;            /* flex 子项可收缩，滚动条才会出现 */
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;    /* Firefox：细滚动条 */
+  scrollbar-color: #c3cad2 transparent;
+}
+/* WebKit：对话框内容区滚动条可见（窄而浅灰） */
+.acct-settings-body::-webkit-scrollbar { width: 8px; }
+.acct-settings-body::-webkit-scrollbar-thumb {
+  background: #c3cad2; border-radius: 4px; }
+.acct-settings-body::-webkit-scrollbar-thumb:hover { background: #a8b2bc; }
+.acct-settings-body::-webkit-scrollbar-track { background: transparent; }
+/* LLM 面板打开时压缩既有区块间距（三栏内容为主视图） */
+.acct-settings-dialog:has(#acct-settings-llm:not([hidden])) .acct-settings-section {
+  padding-top: 8px;
+}
 .acct-settings-section {
   display: flex;
   flex-direction: column;
@@ -5662,3 +5832,96 @@ body.app-mode-official { overflow: clip; }
 .llmv-error { color: #b00020; }
 .llmv-card-body { white-space: normal; word-break: break-word; margin-top: 2px; }
 .llmv-card-foot { margin-top: 4px; font-size: 11px; color: #888; }
+/* 供应商/模型切换弹层（工具栏 ▾；挂 body 防 #toolbar overflow 裁剪） */
+.llmv-caret, .llm-vision-caret { padding: 0 6px; }
+.llmv-pop { position: fixed; z-index: 1300; min-width: 240px; max-height: 60vh;
+  overflow: auto; background: #fff; border: 1px solid var(--line, #ccc);
+  border-radius: 8px; box-shadow: 0 8px 30px rgba(0,0,0,.18); padding: 6px 0; }
+.llmv-pop-title { font-weight: 700; font-size: 13px; padding: 4px 12px 6px;
+  border-bottom: 1px solid var(--line, #eee); margin-bottom: 4px; }
+.llmv-pop-group { font-size: 12px; font-weight: 600; color: #555;
+  padding: 6px 12px 2px; }
+.llmv-pop-item { padding: 5px 12px 5px 24px; font-size: 13px; cursor: pointer; }
+.llmv-pop-item:hover { background: #f0f4ff; }
+.llmv-pop-on { color: #1a73e8; font-weight: 600; }
+.llmv-pop-reset { border-top: 1px solid var(--line, #eee); margin-top: 4px;
+  color: #666; padding-left: 12px; }
+/* 切换弹层空态引导 */
+.llmv-pop-empty { max-width: 300px; }
+.llmv-pop-hint { font-size: 12px; color: #666; margin: 8px 12px; line-height: 1.6; }
+/* =========================================================================
+   P1-W0c v2：账户设置宽屏三栏（左页签 / 中列供应商+呼吸灯 / 右列详情）
+   参照桌面端设置布局；对话框宿主在窄屏自动退化为单列纵向。
+   ========================================================================= */
+.llmp3-wrap { display: flex; gap: 0; border: 1px solid var(--line, #e3e6ea);
+  border-radius: 8px; overflow: hidden; min-height: 360px; background: #fff; }
+.llmp3-nav { width: 150px; flex: 0 0 150px; border-right: 1px solid var(--line, #e8eaee);
+  background: #f7f8fa; padding: 10px 0; }
+.llmp3-nav-title { font-size: 11px; color: #98a2ad; padding: 2px 14px 8px;
+  letter-spacing: 1px; }
+.llmp3-tab { padding: 8px 14px; font-size: 13px; cursor: pointer;
+  border-left: 2px solid transparent; color: #333; }
+.llmp3-tab:hover { background: #eef1f4; }
+.llmp3-tab-on { border-left-color: #1a73e8; background: #eaf2fe;
+  color: #1a73e8; font-weight: 600; }
+.llmp3-body { flex: 1 1 auto; display: flex; min-width: 0; }
+.llmp3-list { width: 220px; flex: 0 0 220px; border-right: 1px solid var(--line, #e8eaee);
+  padding: 10px 8px; overflow-y: auto; max-height: 460px; }
+.llmp3-h { font-weight: 700; font-size: 14px; padding: 2px 8px 10px; }
+.llmp3-group { font-size: 11px; color: #98a2ad; padding: 10px 8px 4px;
+  letter-spacing: 0.5px; }
+.llmp3-item { display: flex; align-items: center; gap: 7px; padding: 7px 8px;
+  border-radius: 6px; cursor: pointer; font-size: 13px; }
+.llmp3-item:hover { background: #f0f4ff; }
+.llmp3-item-on { background: #eaf2fe; }
+.llmp3-item-absent { opacity: 0.62; }
+.llmp3-item-label { flex: 0 1 auto; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.llmp3-item-sub { flex: 1 1 auto; text-align: right; font-size: 11px;
+  color: #98a2ad; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.llmp3-lamp { width: 8px; height: 8px; border-radius: 50%;
+  flex: 0 0 8px; display: inline-block; }
+.llmp3-lamp-green { background: #22a565; box-shadow: 0 0 4px rgba(34,165,101,.6);
+  animation: llmp3Glow 2.4s ease-in-out infinite; }
+.llmp3-lamp-gray { background: #c3cad2; animation: llmp3Breathe 3.2s ease-in-out infinite; }
+@keyframes llmp3Glow { 0%,100% { box-shadow: 0 0 3px rgba(34,165,101,.45); }
+  50% { box-shadow: 0 0 8px rgba(34,165,101,.85); } }
+@keyframes llmp3Breathe { 0%,100% { opacity: .55; } 50% { opacity: 1; } }
+.llmp3-pane { flex: 1 1 auto; padding: 12px 16px; overflow-y: auto;
+  max-height: 460px; min-width: 0; }
+.llmp3-kv { display: flex; gap: 10px; font-size: 13px; padding: 3px 0; }
+.llmp3-kv-k { color: #7a848e; flex: 0 0 96px; }
+.llmp3-kv-v { color: #222; word-break: break-all; }
+.llmp3-btns { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+/* 窄屏退化：单列纵排 */
+@media (max-width: 760px) {
+  .llmp3-wrap { flex-direction: column; }
+  .llmp3-nav { width: auto; flex: none; display: flex; overflow-x: auto;
+    border-right: 0; border-bottom: 1px solid var(--line, #e8eaee); padding: 0; }
+  .llmp3-nav-title { display: none; }
+  .llmp3-tab { border-left: 0; border-bottom: 2px solid transparent;
+    white-space: nowrap; }
+  .llmp3-tab-on { border-left: 0; border-bottom-color: #1a73e8; }
+  .llmp3-body { flex-direction: column; }
+  .llmp3-list { width: auto; flex: none; max-height: 220px;
+    border-right: 0; border-bottom: 1px solid var(--line, #e8eaee); }
+  .llmp3-pane { max-height: none; }
+}
+/* 订阅套餐 · Plans（账户设置页签内卡片网格） */
+.llmp3-plans { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px; margin: 4px 0 8px; }
+.llmp3-plan { border: 1px solid var(--line, #e3e6ea); border-radius: 8px;
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 4px;
+  background: #fff; }
+.llmp3-plan-on { border-color: #1a73e8; background: #f4f8ff; }
+.llmp3-plan-head { display: flex; justify-content: space-between;
+  align-items: baseline; gap: 6px; }
+.llmp3-plan-name { font-weight: 700; font-size: 13px; }
+.llmp3-plan-price { font-size: 12px; color: #1a73e8; font-weight: 600;
+  white-space: nowrap; }
+.llmp3-plan-tag { font-size: 11px; color: #98a2ad; }
+.llmp3-plan-feats { margin: 4px 0; padding-left: 0; list-style: none;
+  font-size: 12px; color: #444; display: flex; flex-direction: column;
+  gap: 2px; flex: 1 1 auto; }
+.llmp3-plan-foot { display: flex; align-items: center; min-height: 26px; }
+.llmp-plan-contact { font-size: 12px; color: #666; }

@@ -617,9 +617,112 @@ def test_read_region_legacy_cyx_first_channel_unchanged():
         arr = np.asarray(img)
         yy, xx = np.indices((64, 96))
         plane0 = ((xx + 3 * yy) % 65536).astype(np.uint16)
-        expect = np.repeat((plane0 >> 8).astype(np.uint8)[..., None], 3, 2)
+        # 2026-11-15：uint16 归一化改 12 位约定（>>4 + clamp）——荧光相机
+        # 12-14 位有效数据按 >>8 高字节会整幅近黑（morphology_2d 实测）
+        expect = np.repeat(
+            np.clip(plane0 >> 4, 0, 255).astype(np.uint8)[..., None], 3, 2)
         assert np.array_equal(arr[..., :3], expect)
         assert (arr[..., 3] == 255).all()
+    finally:
+        slide.close()
+
+
+def test_read_region_uint16_twelve_bit_stretch():
+    """uint16 荧光数据按 >>4 拉伸：12 位有效值可见（>>8 旧口径近黑回归钉）。"""
+    import numpy as np
+
+    from _tiff_fixtures import make_ome_cyx_bytes
+    slide = slide_io.TiffFileSlide(io.BytesIO(
+        make_ome_cyx_bytes(c=2, h=32, w=48)))
+    try:
+        img = slide.read_region((0, 0), 0, (48, 32))
+        arr = np.asarray(img)
+        yy, xx = np.indices((32, 48))
+        plane0 = (xx + 3 * yy).astype(np.uint16)  # ch0 = x + 3y（0..140）
+        expect = np.repeat(
+            np.clip(plane0 >> 4, 0, 255).astype(np.uint8)[..., None], 3, 2)
+        assert np.array_equal(arr[..., :3], expect)
+        # 量程语义：raw 140 → 8（>>8 旧口径为 0，整幅近黑）
+        assert arr[0, 16, 0] == 1 and arr[31, 47, 0] == 8
+    finally:
+        slide.close()
+
+
+def test_read_region_legacy_rgb_baseline_pixels():
+    """RGB OME：read_region 像素与旧基线（直接解码的渐变图）一致。"""
+    import numpy as np
+    from PIL import Image as PILImage
+
+    slide = slide_io.TiffFileSlide(io.BytesIO(make_ome_tiff_bytes()))
+    try:
+        img = slide.read_region((0, 0), 0, (96, 64)).convert("RGB")
+        yy, xx = np.indices((64, 96))
+        g = ((xx + yy) % 256).astype(np.uint8)
+        expect = np.stack([g, g[::-1], g[:, ::-1]], axis=-1)
+        assert np.array_equal(np.asarray(img), expect)
+        del PILImage
+    finally:
+        slide.close()
+
+
+def test_read_region_single_named_channel_pseudocolor():
+    """有名字的单通道荧光按染料名伪彩（DAPI→蓝）；无名通道灰度不回归。
+
+    2026-11-15 morphology_2d：孤通道归一化后每切片 1 通道，灰度合成
+    让荧光显色不可辨（用户反馈「只显示灰度图像」）。
+    """
+    import numpy as np
+
+    from _tiff_fixtures import make_ome_cyx_bytes
+
+    # DAPI 命名通道 → 蓝色伪彩：r=g=0，b=灰度值
+    slide = slide_io.TiffFileSlide(io.BytesIO(
+        make_ome_cyx_bytes(c=1, h=32, w=48, names=["DAPI"])))
+    try:
+        img = slide.read_region((0, 0), 0, (48, 32))
+        arr = np.asarray(img)
+        gray = ((np.indices((32, 48))[1] + 3 * np.indices((32, 48))[0])
+                .astype(np.uint16) >> 4).clip(0, 255).astype(np.uint8)
+        assert (arr[..., 0] == 0).all() and (arr[..., 1] == 0).all()
+        assert np.array_equal(arr[..., 2], gray)
+    finally:
+        slide.close()
+
+    # 无名通道 → legacy 灰度（三带相同）
+    slide = slide_io.TiffFileSlide(io.BytesIO(
+        make_ome_cyx_bytes(c=1, h=32, w=48)))
+    try:
+        arr = np.asarray(slide.read_region((0, 0), 0, (48, 32)))
+        assert np.array_equal(arr[..., 0], arr[..., 1])
+        assert np.array_equal(arr[..., 1], arr[..., 2])
+    finally:
+        slide.close()
+
+
+def test_read_region_single_named_channel_fallback_palette():
+    """非染料关键词的名字 → 按名稳定散列取色（异名异色，非灰度）。"""
+    import numpy as np
+
+    import slide_render
+    from _tiff_fixtures import make_ome_cyx_bytes
+    name = "ATP1A1/CD45/E-Cadherin"
+    slide = slide_io.TiffFileSlide(io.BytesIO(make_ome_cyx_bytes(
+        c=1, h=32, w=48, names=[name])))
+    try:
+        arr = np.asarray(slide.read_region((0, 0), 0, (48, 32)))
+        expected_hex = slide_render.stable_channel_color(name)
+        er, eg, eb, _ = slide_render.parse_ome_channel_color(expected_hex)
+        gray = ((np.indices((32, 48))[1] + 3 * np.indices((32, 48))[0])
+                .astype(np.uint16) >> 4).clip(0, 255).astype(np.uint8)
+        expect_r = (gray * er + 127) // 255
+        expect_g = (gray * eg + 127) // 255
+        expect_b = (gray * eb + 127) // 255
+        assert np.array_equal(arr[..., 0], expect_r)
+        assert np.array_equal(arr[..., 1], expect_g)
+        assert np.array_equal(arr[..., 2], expect_b)
+        # 非灰度：至少两带不等（否则荧光显色不可辨）
+        assert not (np.array_equal(arr[..., 0], arr[..., 1])
+                    and np.array_equal(arr[..., 1], arr[..., 2]))
     finally:
         slide.close()
 

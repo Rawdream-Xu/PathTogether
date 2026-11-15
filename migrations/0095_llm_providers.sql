@@ -1,5 +1,13 @@
 -- =========================================================================== --
--- 0094_llm_providers.sql：P1-W0 LLM 视觉大模型供应商配置表。
+-- 0095_llm_providers.sql：P1-W0 LLM 视觉大模型供应商配置表。
+--
+-- 原 0094，因重号重编：与 P0-W6 的 0094_ingestion_local_channel.sql 撞号
+-- （P0/P1 并行施工各取 0094 所致）。ensure_schema 按文件名字典序应用且
+-- schema_migrations 以文件名为主键，重号破坏迁移序的唯一表达，故重编。
+-- 重放安全（旧库已按 0094 记账）：本文件全幂等——CREATE TABLE IF NOT
+-- EXISTS / 约束按名判存 / audit 固定 event_id ON CONFLICT DO NOTHING，
+-- 重放整体 no-op；audit event_id 保留 aud_migration_0094_llm_providers
+-- 不改（改名会在已记账库重放时插入重复 audit 行）。
 --
 -- 设计决策见 docs/llm-vision-w0-decisions.md：
 --   D1  纯 OpenAI 兼容层（adapter 词表预留原生适配器扩展位）；
@@ -40,7 +48,7 @@ CREATE TABLE IF NOT EXISTS llm_providers (
     CONSTRAINT llm_providers_name_key UNIQUE (name)
 );
 COMMENT ON TABLE llm_providers IS
-    'LLM 视觉供应商（0094）：owner 配置、平台共享；api_key 仅存 Fernet 密文（enc: 前缀，密钥=ai_secret.key），明文永不落库/回显；is_default 全局唯一（部分唯一索引）';
+    'LLM 视觉供应商（0095，原 0094 重编）：owner 配置、平台共享；api_key 仅存 Fernet 密文（enc: 前缀，密钥=ai_secret.key），明文永不落库/回显；is_default 全局唯一（部分唯一索引）';
 COMMENT ON COLUMN llm_providers.api_key_tail4 IS
     'api_key 明文尾 4 位（写入时计算，供 UI 回显「已配置 ****abcd」）；不是密钥材料';
 

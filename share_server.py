@@ -192,33 +192,11 @@ def _to_float(v):
 
 
 def _mpp_from_tiff_resolution(path: Path):
-    """从 TIFF 分辨率标签读取 mpp（与主应用逻辑相同）。"""
-    try:
-        from PIL import Image
-        from PIL.TiffTags import TAGS_V2  # noqa: F401
-
-        with Image.open(str(path)) as img:
-            tags = getattr(img, "tag_v2", None)
-            if not tags:
-                return None, None
-            x_res = _to_float(tags.get(282))
-            y_res = _to_float(tags.get(283))
-            unit = tags.get(296, 2)
-            if not x_res or x_res <= 0:
-                return None, None
-            factor = 25400.0 if unit == 2 else (10000.0 if unit == 3 else None)
-            if factor is None:
-                return None, None
-            mpp_x = factor / x_res
-            mpp_y = factor / y_res if y_res and y_res > 0 else mpp_x
-            if 0.05 <= mpp_x <= 3.0:
-                return mpp_x, mpp_y
-    except Exception:
-        pass
-    return None, None
+    """从 TIFF 分辨率标签读取 mpp（P0-W6 起共享实现：slide_io）。"""
+    return slide_io.mpp_from_tiff_resolution(path)
 
 
-def _read_metadata(osr, path: Path) -> dict:
+def _read_metadata(osr, path: Path, slide_id: str = None) -> dict:
     """读取尺寸与 mpp 元数据（与主应用逻辑相同）。
 
     普通图片（BMP/JPEG，raster-image-compatibility §4.4）短路：无物理标尺，
@@ -229,14 +207,16 @@ def _read_metadata(osr, path: Path) -> dict:
     width, height = osr.dimensions
     if getattr(osr, "is_raster_image", False) \
             or slide_io.is_raster_ext(str(path)):
-        return {
+        # P0-W6c：手补覆盖层对光栅短路分支同样生效（jpg 补录 mpp 后分享
+        # 站读出 manual 值——W6b 上传 warning 引导补录的闭环终点）。
+        return slide_store.apply_mpp_override({
             "width": width,
             "height": height,
             "mpp_x": None,
             "mpp_y": None,
             "objective": None,
             "mpp_source": "missing",
-        }
+        }, slide_id)
     props = osr.properties
     objective_f = _to_float(props.get("openslide.objective-power"))
 
@@ -273,14 +253,14 @@ def _read_metadata(osr, path: Path) -> dict:
             mpp_y_f = None
             mpp_source = "missing"
 
-    return {
+    return slide_store.apply_mpp_override({
         "width": width,
         "height": height,
         "mpp_x": mpp_x_f,
         "mpp_y": mpp_y_f,
         "objective": objective_f,
         "mpp_source": mpp_source,
-    }
+    }, slide_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -1133,6 +1113,9 @@ def _reject_archived_slide(share, name, slide_id=None):
 
     P2（缺口②）：id_bundle 成员无 legacy 名——name 为 None 时按 slide_id
     查 project_slides 双写列（与 app.py `_slide_id_archived` 同语义）。
+    P0-W2（审计 P0-2）：ID 分支与 archived_slide_names 同口径的 owner 一致性
+    联接——项目 owner 与切片 owner 双方已知且不一致（毒化成员行：他人把
+    我的切片挂进他的项目再归档）时不判归档；任一方 NULL 维持旧行为。
     """
     if name is not None:
         return name in _archived_slide_names()
@@ -1147,7 +1130,10 @@ def _reject_archived_slide(share, name, slide_id=None):
             cur.execute(
                 "SELECT 1 FROM project_slides ps JOIN projects p "
                 "ON p.project_id = ps.project_id "
-                "WHERE ps.slide_id=%s AND p.archived LIMIT 1", (slide_id,))
+                "LEFT JOIN slides s ON s.slide_id = ps.slide_id "
+                "WHERE ps.slide_id=%s AND p.archived "
+                "AND (s.owner_user_id IS NULL OR p.owner_user_id IS NULL "
+                "OR s.owner_user_id=p.owner_user_id) LIMIT 1", (slide_id,))
             return cur.fetchone() is not None
     except Exception:  # noqa: BLE001
         return False
@@ -1272,7 +1258,8 @@ def share_slides(token):
             def _read_meta():
                 entry = _get_slide(cache_key, path)
                 with slide_cache.borrow_pair(entry) as pair:
-                    return _read_metadata(pair["osr"], path)
+                    return _read_metadata(pair["osr"], path,
+                                          slide_id=slide_id)
             try:
                 meta = slide_cache.cached_read_metadata(cache_key, path, _read_meta)
                 info.update(meta)
@@ -1414,7 +1401,8 @@ def _share_info_impl(desc):
     try:
         entry = _get_slide(safe, path)
         with slide_cache.borrow_pair(entry) as pair:
-            info.update(_read_metadata(pair["osr"], path))
+            info.update(_read_metadata(pair["osr"], path,
+                                       slide_id=desc.slide_id))
     except Exception as e:  # noqa: BLE001  与列表端点同形
         info.update({
             "width": None, "height": None,

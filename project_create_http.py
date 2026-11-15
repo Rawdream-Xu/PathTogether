@@ -1,21 +1,21 @@
 # -*- coding: utf-8 -*-
 """项目创建 HTTP 装配助手（W3）。
 
-app.py 的 ``/api/project/create`` 由协调者接线（本模块不改 app.py）。接线
-方式（与既有路由语义对齐）::
+app.py 的 ``/api/project/create`` 由协调者接线（本模块不改 app.py）。当前
+接线方式（P0-W2 起；旧示例中的 ``_validate_slide_names`` 已删除——全仓零
+调用的 dead code，且其按平铺文件检查的存在性语义对 id_bundle 资产恒失败）::
 
     ident = current_identity()
     body = request.get_json(silent=True) or {}
     key = request.headers.get("Idempotency-Key")
-    clean, err = _validate_slide_names(
-        body.get("slides") if isinstance(body.get("slides"), list) else None)
-    if err:
-        return jsonify(error=err), 400
-    payload, status = handle_create(ident, body, key, slides_override=clean)
+    # 成员解析（ready 资产）+ 归属校验（P0-2）在 app.py 侧先行：
+    # _project_member_entries → _resolve_slide_refs_for_project
+    payload, status = handle_create(ident, body, key, slides_override=legacy_names)
     return jsonify(payload), status
 
-分工：所有权/可写性校验（``_validate_slide_names``）留在 HTTP 层——本助手
-只做形状校验（400）、guest 拒绝（403）与幂等写入（409）。
+分工：成员切片的解析与归属校验（``_resolve_slide_refs_for_project``：
+user 仅自己的切片、owner 角色豁免）留在 HTTP 层——本助手只做形状校验
+（400）、guest 拒绝（403）与幂等写入（409）。
 """
 
 import project_idempotency_store as _store
@@ -29,8 +29,9 @@ def handle_create(ident, body, idempotency_key, slides_override=None,
     - ``ident``：``current_identity()`` dict（至少含 user_id / role）；
     - ``body``：JSON dict（{name, note?, slides?, parent_project_id?}）；
     - ``idempotency_key``：请求头 ``Idempotency-Key``（可 None=旧行为）；
-    - ``slides_override``：HTTP 层经 ``_validate_slide_names`` 清洗后的
-      slide 名列表；给出时**替换** body.slides（body 只作形状来源）；
+    - ``slides_override``：HTTP 层经 ``_resolve_slide_refs_for_project``
+      解析校验后的 slide 名列表；给出时**替换** body.slides（body 只作
+      形状来源）；
     - ``parent_project_id``：可选父文件夹（2026-10-08 §5.3；层级/同
       owner/归档校验在存储事务内，非法 → ``ProjectParentError`` 映射
       400/403/409 带可读原因）。

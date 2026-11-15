@@ -39,6 +39,9 @@ import os
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from defusedxml import ElementTree as DefusedET
+from defusedxml.common import DefusedXmlException
+
 import numpy as np
 from PIL import Image
 
@@ -301,6 +304,24 @@ def open_slide(path, *, format_hint=None):
 # --------------------------------------------------------------------------- #
 # OME-TIFF 元数据解析
 # --------------------------------------------------------------------------- #
+def _safe_ome_xml_root(text):
+    """解析上传文件内嵌 OME-XML 的唯一安全入口（P0-W5）。
+
+    stdlib ET 不拒绝 DOCTYPE/ENTITY，恶意嵌套实体可在解析期指数展开
+    （billion-laughs；expat 2.4+ 的内建兜底只拦超过激活阈值的指数放大，
+    低放大/链式实体照常展开）。defusedxml 在 DTD/实体声明处直接拒绝
+    （forbid_dtd/forbid_entities），不进入展开，也不解析外部实体。
+
+    解析失败（含任何 DOCTYPE/ENTITY、非良构 XML）返回 None；调用方按
+    「元数据缺失」语义处理。
+    """
+    try:
+        return DefusedET.fromstring(
+            text, forbid_dtd=True, forbid_entities=True)
+    except (ET.ParseError, DefusedXmlException, ValueError):
+        return None
+
+
 def _parse_ome_mpp(ome_xml: str):
     """解析 OME-XML，返回 (mpp_x, mpp_y, objective_power)。
 
@@ -310,9 +331,8 @@ def _parse_ome_mpp(ome_xml: str):
     """
     if not ome_xml:
         return None, None, None
-    try:
-        root = ET.fromstring(ome_xml)
-    except ET.ParseError:
+    root = _safe_ome_xml_root(ome_xml)
+    if root is None:
         return None, None, None
 
     # OME-XML 命名空间
@@ -369,6 +389,43 @@ def _to_float(v):
         return None
 
 
+def mpp_from_tiff_resolution(path):
+    """从 TIFF 标准分辨率标签（真实坐标尺）读取 mpp → (mpp_x, mpp_y)。
+
+    P0-W6 起为共享实现（此前 app.py 与 share_server.py 各持一份副本；本
+    函数与那两份逐行同构）：
+
+    - ResolutionUnit=2（英寸）：mpp(µm/px) = 25400 / XResolution；
+    - ResolutionUnit=3（厘米）：mpp(µm/px) = 10000 / XResolution；
+    - 合理性窗口 0.05–3.0 µm/px：默认未标定的 72/96 dpi 占位（≈353/265
+      µm/px）落在窗外被丢弃（实测样本 zhouzhiping-48.tif 正是此情况——
+      正确行为，交给 W6c 手动补录）。
+    读取失败/数值不合理返回 (None, None)。
+    """
+    try:
+        from PIL.TiffTags import TAGS_V2  # noqa: F401  确保标签表初始化
+
+        with Image.open(str(path)) as img:
+            tags = getattr(img, "tag_v2", None)
+            if not tags:
+                return None, None
+            x_res = _to_float(tags.get(282))   # XResolution
+            y_res = _to_float(tags.get(283))   # YResolution
+            unit = tags.get(296, 2)            # ResolutionUnit，默认英寸
+            if not x_res or x_res <= 0:
+                return None, None
+            factor = 25400.0 if unit == 2 else (10000.0 if unit == 3 else None)
+            if factor is None:
+                return None, None
+            mpp_x = factor / x_res
+            mpp_y = factor / y_res if y_res and y_res > 0 else mpp_x
+            if 0.05 <= mpp_x <= 3.0:
+                return mpp_x, mpp_y
+    except Exception:  # noqa: BLE001 - 非法标签/非 TIFF 一律 (None, None)
+        pass
+    return None, None
+
+
 # --------------------------------------------------------------------------- #
 # Batch 2：多通道 OME 元数据与 level 一致性（供 slide_render 复用）
 # --------------------------------------------------------------------------- #
@@ -382,9 +439,8 @@ def _parse_ome_channels(ome_xml, series_index):
     """
     if not ome_xml:
         return None
-    try:
-        root = ET.fromstring(ome_xml)
-    except ET.ParseError:
+    root = _safe_ome_xml_root(ome_xml)
+    if root is None:
         return None
     ns = ""
     if root.tag.startswith("{"):
@@ -611,6 +667,11 @@ class TiffFileSlide:
         self._ome_channels = (
             _parse_ome_channels(ome_xml, self._series_index)
             if ome_xml else None)
+        # 单通道荧光伪彩（2026-11-15 morphology_2d）：孤通道归一化后每张
+        # 切片只剩 1 个逻辑通道，灰度合成让荧光显色不可辨。**有名字**的
+        # 单通道（非原生 RGB）按 OME Color 属性 → 染料名关键词 → 平台
+        # 色卡[0] 解析显示色；无名通道保持灰度（legacy 行为不回归）。
+        self._display_rgb = self._resolve_single_channel_display_rgb()
 
         # 尺寸与降采样
         self._level_dims = []
@@ -667,6 +728,34 @@ class TiffFileSlide:
         except Exception:  # noqa: BLE001
             return 0, 0
 
+    # ---------- 单通道荧光伪彩（2026-11-15） ----------
+    def _resolve_single_channel_display_rgb(self):
+        """有名字的单通道（非原生 RGB）→ 显示色 (r,g,b) | None（灰度）。
+
+        优先级：OME Channel@Color 属性（slide_render 既有解析）→ 染料/
+        颜色名关键词（slide_render.FLUOROPHORE_KEYWORDS 共享表，防两条
+        渲染路径分叉）→ 平台确定性色卡[0]（青）。
+        无 OME 通道元数据 / 无名字 → None（legacy 灰度，不回归）。
+        """
+        import slide_render  # 延迟导入避免模块级环（同 channel_manifest）
+
+        if self._is_native_rgb or self._channel_count != 1:
+            return None
+        chans = self._ome_channels or []
+        if not chans:
+            return None
+        ch0 = chans[0] or {}
+        name = (ch0.get("name") or "").strip()
+        if not name:
+            return None  # 无名通道：灰度（make_ome_cyx_bytes 无名夹具回归）
+        rgb = slide_render.parse_ome_channel_color(ch0.get("color"))
+        if rgb:
+            return rgb[:3]
+        # 稳定取色（关键词→名散列色卡；与 manifest 同源防分叉）
+        hex_color = slide_render.stable_channel_color(name)
+        rgb2 = slide_render.parse_ome_channel_color(hex_color)
+        return rgb2[:3] if rgb2 else (0, 255, 255)
+
     def _check_multifile_ome(self):
         """检测 multi-file OME（外部 UUID FileName 引用）并稳定拒绝。
 
@@ -686,9 +775,8 @@ class TiffFileSlide:
             ome_xml = None
         if not ome_xml:
             return
-        try:
-            root = ET.fromstring(ome_xml)
-        except ET.ParseError:
+        root = _safe_ome_xml_root(ome_xml)
+        if root is None:
             return
         files = set()
         for elem in root.iter():
@@ -711,11 +799,19 @@ class TiffFileSlide:
         if not external:
             return
         kind = (getattr(self._series, "kind", "") or "").lower()
-        if len(external) > 1 or kind != "ome":
+        if kind != "ome":
             raise SlideRenderError(
                 "unsupported_multifile_ome",
                 "检测到 multi-file OME-TIFF（外部文件引用：%s）；本版本仅"
                 "支持单文件 OME-TIFF" % ", ".join(sorted(external)[:4]))
+        # kind == "ome"：tifffile 已从**本文件**物理建出完整 OME series →
+        # 物理自足，放行（外部引用数不限）。覆盖两类（2026-11-14
+        # morphology_2d 4 通道合并产物实测）：① 改名后的单文件 master
+        # （旧口径，单外部引用）；② 合并产物 TiffData/UUID 元数据未改写
+        # （3 外部引用，但 series CYX 4 plane 全在本文件内）。此前
+        # "len(external) > 1 即拒"误杀 ②。真正 multi-file（plane 缺失）
+        # tifffile 建不出 ome series（kind 非 ome，实测 generic），仍走
+        # 上方拒绝——不悄悄显示不完整数据。
 
     # ---------- 结构化只读属性（§7.2） ----------
     @property
@@ -1042,7 +1138,11 @@ class TiffFileSlide:
         if a.dtype == np.uint8:
             data = a
         elif a.dtype == np.uint16:
-            data = (a >> 8).astype(np.uint8)
+            # 2026-11-15：>>8（高字节）对荧光相机 12-14 位有效数据会把画面
+            # 压到近黑（morphology_2d 实测 DAPI mean=556 → 2）。改按 12 位
+            # 约定 >>4 + clamp（4095→255），高亮度饱和可接受——对比度正确
+            # 性优先于绝对保真；后续可挂 OME Suggested-LUT / 显示范围 UI。
+            data = np.clip(a >> 4, 0, 255).astype(np.uint8)
         else:
             mn = float(a.min()) if a.size else 0.0
             mx = float(a.max()) if a.size else 0.0
@@ -1055,7 +1155,18 @@ class TiffFileSlide:
         if channels >= 3:
             data = data[..., :3]
         elif channels == 1:
-            data = np.repeat(data[..., np.newaxis], 3, axis=2)
+            # P1-W1+（2026-11-15）：有名字的单通道荧光按解析出的显示色伪彩
+            # （DAPI→蓝 / 染料关键词 / 平台色卡），无名通道保持灰度（legacy）
+            disp = getattr(self, "_display_rgb", None)
+            if disp:
+                gray = (data if data.ndim == 2 else data[..., 0]) \
+                    .astype(np.uint16)
+                r = ((gray * disp[0] + 127) // 255).astype(np.uint8)
+                g = ((gray * disp[1] + 127) // 255).astype(np.uint8)
+                b = ((gray * disp[2] + 127) // 255).astype(np.uint8)
+                data = np.stack([r, g, b], axis=2)
+            else:
+                data = np.repeat(data[..., np.newaxis], 3, axis=2)
         else:  # channels == 2：补到 3
             pad = np.zeros(data.shape[:-1] + (3 - channels,), dtype=data.dtype)
             data = np.concatenate([data, pad], axis=2)

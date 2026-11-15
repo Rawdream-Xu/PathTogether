@@ -70,8 +70,10 @@ _RATE_LIMITER = _TokenBucket()
 _MAX_IMAGE_B64_BYTES = 8 * 1024 * 1024
 #: prompt 长度上限（字符）
 _MAX_PROMPT_CHARS = 4000
-#: vision 回复 max_tokens（成本护栏；上游可自行 clamp）
-_VISION_MAX_TOKENS = 2048
+#: vision 回复 max_tokens（成本护栏；上游可自行 clamp）。2026-11-14 上调：
+#: glm-5.3-flash 等推理模型的 reasoning tokens 计入 max_tokens——2048 会被
+#: 思考链吃尽导致正文为空/上游提前断连，4096 给 reasoning+正文留足余量。
+_VISION_MAX_TOKENS = 4096
 
 
 def _err(message, code, status, *, retryable=None, details=None):
@@ -130,8 +132,8 @@ def create_provider(ident, body):
 def update_provider(ident, provider_id, body):
     if not _is_owner(ident):
         return _err("仅管理员可配置 AI 供应商", "forbidden", 403)
-    allowed = ("name", "base_url", "api_key", "models", "default_model",
-               "enabled", "is_default")
+    allowed = ("name", "base_url", "api_key", "api_key_action", "models",
+               "default_model", "enabled", "is_default")
     fields = {k: body[k] for k in allowed if k in body}
     if not fields and "expected_revision" not in body:
         return _err("无可更新字段", "invalid_payload", 400)
@@ -200,6 +202,10 @@ def test_connection(ident, body):
         provider, api_key, model=model, prompt="ping",
         image_b64=llm_vision.TEST_IMAGE_PNG_B64, mime=llm_vision.TEST_IMAGE_MIME,
         max_tokens=16)
+    # 回写呼吸灯状态（已存供应商才记；草稿不记）
+    if provider_id:
+        record_provider_status(str(provider_id), bool(result.get("ok")),
+                               result.get("duration_ms") or 0)
     out = {
         "ok": bool(result.get("ok")),
         "model": model,
@@ -217,6 +223,131 @@ def test_connection(ident, body):
 # --------------------------------------------------------------------------- #
 # POST /api/llm/vision（图像+prompt 代理；限流；计量）
 # --------------------------------------------------------------------------- #
+
+# --------------------------------------------------------------------------- #
+# GET /api/llm/status（供应商连通呼吸灯：轻量状态，不外呼）
+# --------------------------------------------------------------------------- #
+
+#: 进程内连通状态缓存：provider_id -> {"ok": bool, "checked_at": epoch, "latency_ms": int}
+_STATUS_CACHE = {}
+_STATUS_TTL_SECONDS = 300   # 5 分钟内的测试结果视为有效（呼吸灯绿色）
+
+
+def record_provider_status(provider_id: str, ok: bool, latency_ms: int = 0):
+    """llm_vision 调用/test 后回写状态（进程内缓存，供呼吸灯读取）。"""
+    _STATUS_CACHE[str(provider_id)] = {
+        "ok": bool(ok), "checked_at": time.time(),
+        "latency_ms": int(latency_ms)}
+
+
+def provider_status(ident):
+    if not _logged_in(ident):
+        return _err("无权访问", "forbidden", 403)
+    now = time.time()
+    items = []
+    for p in store.list_providers(enabled_only=True):
+        st = _STATUS_CACHE.get(p["provider_id"])
+        fresh = bool(st and (now - st["checked_at"] < _STATUS_TTL_SECONDS))
+        items.append({
+            "provider_id": p["provider_id"],
+            "name": p["name"],
+            "is_default": bool(p.get("is_default")),
+            # green=近期连通；gray=未测/过期（前端呼吸灯灰态呼吸）
+            "status": "green" if (fresh and st.get("ok")) else "gray",
+            "latency_ms": st.get("latency_ms") if fresh else None,
+            "checked_at": st.get("checked_at") if fresh else None,
+        })
+    return {"providers": items, "ttl_seconds": _STATUS_TTL_SECONDS}, 200
+
+
+# --------------------------------------------------------------------------- #
+# POST /api/llm/fetch-models（上游 /models 实时拉取，参照 paperpilot 方案）
+# --------------------------------------------------------------------------- #
+
+#: /models 拉取超时（快失败）；返回模型 id 上限（防超长响应滥用）
+_MODELS_TIMEOUT = (8, 20)
+_MODELS_MAX_COUNT = 500
+
+
+def fetch_models(ident, body):
+    """owner 拉取供应商上游模型清单（OpenAI 兼容 ``GET {base}/models``）。
+
+    body: {provider_id} 或草稿 {base_url, api_key}。SSRF 与 test_connection
+    同源（store.validate_base_url：scheme/host 字面量/DNS 解析逐 IP 边界）；
+    失败归一为 {ok:false, code, error}，前端引导手动填模型名。
+    """
+    if not _is_owner(ident):
+        return _err("仅管理员可拉取模型清单", "forbidden", 403)
+    provider_id = body.get("provider_id")
+    if provider_id:
+        provider = store.get_provider_for_call(str(provider_id))
+        if provider is None:
+            return _err("供应商不存在", "not_found", 404)
+        base_url = provider.get("base_url") or ""
+        api_key = provider.get("api_key") or ""
+    else:
+        try:
+            base_url = store.validate_base_url(str(body.get("base_url") or ""))
+        except store.BaseUrlInvalidError as exc:
+            return _err(str(exc), "base_url_invalid", 400)
+        api_key = str(body.get("api_key") or "").strip()
+        if not api_key:
+            return _err("缺少 API Key（草稿拉取需提供）", "invalid_payload", 400)
+
+    # ---- SSRF 校验（出网前；与保存/测试同一防线） ----
+    try:
+        base_url = store.validate_base_url(base_url)
+    except store.BaseUrlInvalidError as exc:
+        return _err(str(exc), "ssrf_blocked", 400)
+
+    endpoint = llm_vision.chat_completions_url(base_url).replace(
+        "/chat/completions", "/models")
+    headers = {"Authorization": "Bearer %s" % api_key} if api_key else {}
+    started = time.time()
+    try:
+        resp = llm_vision.requests.get(
+            endpoint, headers=headers, timeout=_MODELS_TIMEOUT,
+            allow_redirects=False)
+    except llm_vision._REQUESTS_EXC:
+        return _err("上游不可达或超时", "upstream_timeout", 504, retryable=True)
+    duration_ms = int((time.time() - started) * 1000)
+
+    if resp.status_code in (401, 403):
+        return _err("认证失败（HTTP %d）——API Key 无效或该端点不开放 /models"
+                    % resp.status_code, "auth_failed", 200,
+                    details={"ok": False, "models": []})
+    if resp.status_code >= 400:
+        return _err("供应商返回 HTTP %d——该端点可能不支持 /models，请手动填模型名"
+                    % resp.status_code, "upstream_error", 200,
+                    details={"ok": False, "models": []})
+    try:
+        payload = resp.json()
+    except Exception:
+        return _err("响应格式无法解析——请手动填模型名", "bad_payload", 200,
+                    details={"ok": False, "models": []})
+
+    # OpenAI data[].id / 容错裸数组；去重排序 + 数量上限
+    items = None
+    if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+        items = payload["data"]
+    elif isinstance(payload, list):
+        items = payload
+    models, seen = [], set()
+    for it in items or []:
+        mid = it.get("id") if isinstance(it, dict) else it
+        if isinstance(mid, str) and mid.strip() and mid not in seen:
+            seen.add(mid)
+            models.append(mid.strip())
+    models = sorted(models)[:_MODELS_MAX_COUNT]
+    if not models:
+        return _err("端点返回空模型列表——请手动填模型名", "empty_list", 200,
+                    details={"ok": False, "models": []})
+    # 成功 → 呼吸灯转绿
+    if provider_id:
+        record_provider_status(str(provider_id), True, duration_ms)
+    return {"ok": True, "models": models, "count": len(models),
+            "duration_ms": duration_ms}, 200
+
 
 def vision(ident, body):
     if not _logged_in(ident):
@@ -276,11 +407,17 @@ def vision(ident, body):
     if result.get("error_code") == "ssrf_blocked":
         return _err("上游地址校验失败，已拒绝出网", "ssrf_blocked", 400)
     if result.get("error_code") == "upstream_timeout":
-        return _err("上游超时或不可达，请稍后重试", "upstream_timeout", 504,
-                    retryable=True)
+        # 覆盖连接失败/超时/响应中断（ChunkedEncoding 归一并入该码）——
+        # 统一给出可重试口径，避免裸 500
+        return _err("上游超时、不可达或连接中断，请稍后重试（也可缩小选区后重试）",
+                    "upstream_timeout", 504, retryable=True)
     if not result.get("ok"):
         return _err("上游返回错误（HTTP %s）" % result.get("status"),
                     "upstream_error", 502, retryable=True)
+
+    # 真实调用成功 → 呼吸灯转绿（进程内状态缓存）
+    record_provider_status(str(provider.get("provider_id")), True,
+                           result.get("duration_ms") or 0)
 
     # 计量（仅成功调用；失败不写——错误已按响应反馈用户）
     try:

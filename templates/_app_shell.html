@@ -119,6 +119,13 @@
                  class="anno-label-input" data-i18n-ph="tb.anno.label.ph" data-i18n-title="tb.anno.label.title"
                  placeholder="默认 管理员" autocomplete="off" />
         </label>
+        {# P1-W1 标注类别：下拉 + 颜色图例（anno-classes.js 填充；未配置类别时仅显示「无类别」） #}
+        <label class="anno-pop-field">
+          <span class="anno-pop-label" data-i18n="anno.class.label">标注类别</span>
+          <select id="anno-class-select" class="anno-class-select"
+                  aria-label="标注类别" data-i18n-aria="anno.class.label"></select>
+        </label>
+        <div id="anno-class-legend" class="anno-class-legend" hidden></div>
       </div>
       {% endif %}
 
@@ -129,6 +136,10 @@
       {# P1-W0d：AI 识图（默认隐藏；llm-vision-ui.js 探测到可用供应商后显示）#}
       <button id="llm-vision-btn" class="tool-btn llm-vision-btn" type="button"
               title="AI 识图（当前视野/选框 → 视觉大模型描述）" hidden>🔍 识图</button>
+      {# 供应商/模型切换窗口入口（与识图按钮同显隐）#}
+      <button id="llm-vision-caret" class="tool-btn llm-vision-caret" type="button"
+              title="切换 AI 供应商 / 模型" aria-haspopup="true" aria-expanded="false"
+              hidden>▾</button>
 
       {# 多通道通道着色（Batch 4）：默认隐藏，info 带 multichannel 能力才由
          channel-controls.js 显示；RGB 切片最多显示灰色「原始 RGB」小标识 #}
@@ -197,6 +208,9 @@
         {% if mode == 'demo' or histopilot_ui_enabled %}
         <button id="tbb-more-ai" class="tool-btn" data-i18n-title="tb.ai.title" data-i18n="tb.ai.more">✨ AI 读片</button>
         {% endif %}
+        {# P1-W0d：识图入口被溢出收纳折入 ⋯ 时的菜单项（llm-vision-ui.js 显隐与主按钮同步） #}
+        <button id="tbb-more-llm-vision" class="tool-btn" role="menuitem"
+                title="AI 识图（当前视野/选框 → 视觉大模型描述）" hidden>🔍 AI 识图</button>
         {% if C.annotate %}
         <button id="anno-all-btn" class="tool-btn" role="menuitem" data-i18n="tb.anno.show.all" disabled>显示全部标记</button>
         {% endif %}
@@ -642,6 +656,12 @@
               <p class="acct-settings-section-title">AI 供应商</p>
               <div id="llm-providers-panel"></div>
             </div>
+            {# P1-W1：owner 专属「标注类别」管理面板（label-class-panel.js 渲染；
+               非 owner 由 app.js 保持 hidden；API 403 兜底）#}
+            <div class="acct-settings-section" id="acct-settings-label-classes" hidden>
+              <p class="acct-settings-section-title">标注类别</p>
+              <div id="label-classes-panel"></div>
+            </div>
             <div class="acct-settings-actions acct-settings-owner-actions">
               <a id="acct-settings-admin" class="btn secondary small"
                  href="/admin" target="_blank" rel="noopener"
@@ -655,10 +675,25 @@
       </div>
 
       <div id="anno-panel" class="anno-panel" style="display:none;">
+        {# P1-W1+：左缘拖宽手柄（280-560px clamp，localStorage 记忆）#}
+        <div id="anno-panel-resize" class="anno-panel-resize" title="拖动调整面板宽度"></div>
+        <button id="anno-panel-collapse" class="anno-panel-collapse" type="button"
+                title="折叠/展开面板" aria-label="折叠/展开面板"
+                aria-expanded="true">‹</button>
         <div class="anno-panel-header">
           <span id="anno-panel-title" class="anno-panel-title" data-i18n="anno.panel.title">标注</span>
           <div class="anno-panel-header-actions">
-            <button id="anno-export-btn" class="panel-eye-btn panel-text-btn" data-i18n-title="anno.export.title" title="导出标注（QuPath GeoJSON）" aria-label="导出标注（QuPath GeoJSON）" data-i18n-aria="anno.export.title" disabled><svg class="panel-btn-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 4v11"/><path d="m7.5 10.5 4.5 4.5 4.5-4.5"/><path d="M5 19h14"/></svg><span class="panel-btn-tx" data-i18n="anno.export.all">导出全部</span></button>
+            <button id="anno-export-btn" class="panel-eye-btn panel-text-btn" data-i18n-title="anno.export.title" title="导出标注（QuPath GeoJSON / ImageScope XML）" aria-label="导出标注（QuPath GeoJSON / ImageScope XML）" data-i18n-aria="anno.export.title" disabled><svg class="panel-btn-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 4v11"/><path d="m7.5 10.5 4.5 4.5 4.5-4.5"/><path d="M5 19h14"/></svg><span class="panel-btn-tx" data-i18n="anno.export.all">导出全部</span></button>
+            <div id="anno-export-menu" class="anno-export-menu" role="menu" hidden>
+              <button type="button" id="anno-export-geojson" role="menuitem" class="anno-export-item">
+                <span class="aem-name" data-i18n="anno.export.geojson">QuPath GeoJSON</span>
+                <span class="aem-hint">.geojson</span>
+              </button>
+              <button type="button" id="anno-export-xml" role="menuitem" class="anno-export-item">
+                <span class="aem-name" data-i18n="anno.export.xml">ImageScope XML</span>
+                <span class="aem-hint">.xml</span>
+              </button>
+            </div>
             <button id="anno-all-toggle" class="panel-eye-btn" data-i18n-title="anno.panel.toggle.title" title="显示/隐藏全部标记" aria-label="显示/隐藏全部标记" aria-pressed="false">👁</button>
             <button id="anno-panel-close" class="icon-btn close" aria-label="关闭" data-i18n-aria="picker.close">×</button>
           </div>

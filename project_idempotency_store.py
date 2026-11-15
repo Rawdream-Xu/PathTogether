@@ -19,8 +19,9 @@
 
 与 app.py 的分工（W3）：
   - 本模块只做**类型/形状**校验（:func:`validate_create_payload`，400 语义）
-    与幂等写入；切片**所有权/可写性**校验（``_validate_slide_names``）仍在
-    HTTP 层，HTTP 层把已清洗的 slide 名传给本存储。
+    与幂等写入；切片**归属/存在性**校验（app.py
+    ``_resolve_slide_refs_for_project``，P0-W2 起）仍在 HTTP 层，HTTP 层把
+    已解析校验的 slide 名传给本存储。
 """
 
 import hashlib
@@ -81,8 +82,8 @@ def sanitize_slide_names(slides):
     """存储级 slide 名清洗：必须 list[str]；逐个 strip，拒绝空名/NUL/路径分隔符。
 
     与 app.py ``_sanitize_name`` 的越权部分对齐（NUL、``/``、``\\``、裸
-    ``.``/``..``）；**不做**扩展名/存在性检查——那是 HTTP 层
-    ``_validate_slide_names`` 的职责（本函数接受已过所有权校验的名）。
+    ``.``/``..``）；**不做**归属/存在性检查——那是 HTTP 层
+    ``_resolve_slide_refs_for_project`` 的职责（本函数接受已过归属校验的名）。
     返回清洗后的新列表（保序）；非法即抛 :class:`PayloadInvalid`。
     """
     if slides is None:

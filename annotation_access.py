@@ -345,6 +345,8 @@ _PUBLIC_ROI_KEYS = (
     "deleted", "deleted_at", "created_by_session_id",
     # §6.3 几何位置锁状态（旧行缺省 false，见 public_roi_view 归一）
     "geometry_locked",
+    # P1-W1 类别快照（{"name","color"}；无类别行不落键）
+    "classification",
 )
 
 

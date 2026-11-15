@@ -378,6 +378,25 @@ def evict(name):
         _info_cache.pop(name, None)
 
 
+def evict_meta_by_slide(slide_id):
+    """按 slide_id 逐出全部元数据缓存行（P0-W6c）。
+
+    缓存键是 ``"<slide_id>::<展示名>"``（app._slide_cache_key_for），值以
+    FileSignature（mtime/inode）判定新鲜度——**手补 mpp（slide_mpp_
+    overrides）不改变文件签名**，不逐出的话 info 端点会一直回旧 mpp。
+    补录/清除补录后由 slide_meta_http 调用；键形态以外（legacy 名键）
+    不受影响。展示名可变（R-02），所以按 ``<sid>::`` 前缀整段逐出。
+    """
+    sid = str(slide_id or "")
+    if not sid:
+        return
+    prefix = sid + "::"
+    with _info_cache_lock:
+        for key in [k for k in _info_cache if isinstance(k, str)
+                    and k.startswith(prefix)]:
+            _info_cache.pop(key, None)
+
+
 def read_stable(entry, fn: Callable[[dict], object]) -> Tuple[object, Optional[int]]:
     """在当前代句柄上执行 fn(pair)，返回 (result, generation)。
 

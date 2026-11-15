@@ -22,6 +22,8 @@ COPY agreement_store.py research_consent_store.py research_store.py research_del
 COPY feedback_store.py ./
 COPY cos_config.py cos_client.py cos_fast_relay.py cos_pool_store.py ingestion_store.py cos_ingest_worker.py upload_direct_class.py ./
 COPY producer_import_store.py ./
+# P0 W6 本地直传 + LLM provider 管理：app.py 函数内延迟 import 的 HTTP/仓储模块
+COPY llm_provider_http.py llm_provider_store.py llm_vision.py local_ingest_http.py slide_meta_http.py ./
 # 0087 支付宝赞助订单：app.py 函数内延迟 import 的仓储/SDK 模块
 COPY support_payments.py ./
 COPY legal_docs/ legal_docs/

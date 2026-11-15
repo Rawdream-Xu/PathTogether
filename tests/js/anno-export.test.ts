@@ -20,7 +20,7 @@ const start = src.indexOf("  // ---------- 导出标注（QuPath GeoJSON） ----
 const end = src.indexOf("  // ---------- 保存图片（裁剪） ----------");
 const code = src.slice(start, end);
 
-expect(code).toContain("function exportAnnotations()");
+expect(code).toContain("function exportAnnotations(fmt)");
 expect(code).toContain("function annoExportFilename(disposition)");
 
 interface Harness {

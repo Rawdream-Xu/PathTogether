@@ -265,6 +265,13 @@
       // 标注选项 popover（§3.3：标注名称移出主行）
       "tb.anno.more": "标注选项",
       "tb.anno.label.name": "标注名称（可选）",
+      // P1-W1 标注类别（anno-classes.js：下拉 + 颜色图例）
+      "anno.class.label": "标注类别",
+      "anno.class.none": "无类别",
+      // P1-W1+ 标注面板行内分类属性（色条/徽章/改绑下拉）
+      "anno.class.rebind.tip": "改绑分类",
+      "anno.class.conflict": "该标注已被他人修改，列表已刷新，请重试",
+      "anno.class.saved": "分类已更新",
       "roi.rect.tip": "矩形工具：在视野中拖出矩形，或输入宽高后点击中心放置；拖内部平移、边/角调整大小；Escape 取消",
       "roi.cancelled": "已取消未保存的选区",
       "roi.input.invalid": "矩形尺寸非法或超出图像范围，已保留上次的合法框",
@@ -718,6 +725,9 @@
       // 标注导出（QuPath GeoJSON）
       "anno.export.title": "导出标注（QuPath GeoJSON）",
       "anno.export.all": "导出全部",
+      "anno.export.geojson": "QuPath GeoJSON",
+      "anno.export.xml": "ImageScope XML",
+      "anno.export.xml.done": "已导出 XML（ImageScope 格式）",
       "anno.export.one": "导出",
       "anno.export.one.title": "导出这条标注（QuPath GeoJSON）",
       "anno.export.one.done": "已导出「{name}」",
@@ -1288,6 +1298,7 @@
       "anno.lock.locked": "位置已锁定",
       "anno.lock.unlocked": "位置已解锁",
       "anno.lock.locked.short": "已锁定",
+      "anno.lock.unlock.short": "解锁",
       "anno.lock.badge.tip": "位置已锁定（可在工具条解锁）",
       "anno.lock.readonly": "只读",
       "anno.lock.readonly.tip": "当前身份对本标记只读：可选择、定位、查看，但不能移动或解锁",
@@ -2338,6 +2349,13 @@
       // Annotation options popover (§3.3: label input moved out of the main row)
       "tb.anno.more": "Annotation options",
       "tb.anno.label.name": "Annotation name (optional)",
+      // P1-W1 label classes (anno-classes.js: select + color legend)
+      "anno.class.label": "Annotation class",
+      "anno.class.none": "No class",
+      // P1-W1+ annotation panel inline class attributes (strip/badge/rebind)
+      "anno.class.rebind.tip": "Rebind class",
+      "anno.class.conflict": "This annotation was modified by someone else; list refreshed, please retry",
+      "anno.class.saved": "Class updated",
       "roi.rect.tip": "Rectangle tool: drag in the view, or enter width/height then click to place; drag inside to move, edges/corners to resize; Escape cancels",
       "roi.cancelled": "Unsaved selection cancelled",
       "roi.input.invalid": "Invalid rectangle size or out of image bounds; kept the last valid box",
@@ -2790,6 +2808,9 @@
       // Annotation export (QuPath GeoJSON)
       "anno.export.title": "Export annotations (QuPath GeoJSON)",
       "anno.export.all": "Export all",
+      "anno.export.geojson": "QuPath GeoJSON",
+      "anno.export.xml": "ImageScope XML",
+      "anno.export.xml.done": "XML exported (ImageScope format)",
       "anno.export.one": "Export",
       "anno.export.one.title": "Export this annotation (QuPath GeoJSON)",
       "anno.export.one.done": "Exported “{name}”",
@@ -3364,6 +3385,7 @@
       "anno.lock.locked": "Position locked",
       "anno.lock.unlocked": "Position unlocked",
       "anno.lock.locked.short": "Locked",
+      "anno.lock.unlock.short": "Unlock",
       "anno.lock.badge.tip": "Position locked (unlock from the toolbar)",
       "anno.lock.readonly": "Read-only",
       "anno.lock.readonly.tip": "Your identity has read-only access to this mark: select, locate and view only — no moving or unlocking",

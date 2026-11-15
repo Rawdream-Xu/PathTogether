@@ -70,6 +70,7 @@ import slide_io
 import slide_publish
 import slide_store
 import slide_storage
+import slide_meta_http
 import task_storage_lock
 # 先转换后上传阶段 1：direct_class 声明词表与头级核验（worker/百度共用
 # 实现；本文件只在创建时做词表/扩展名匹配，不做文件头读取）。
@@ -153,6 +154,7 @@ import cos_client
 import cos_config
 import cos_pool_store
 import ingestion_store
+import local_ingest_http
 import producer_import_store
 # SER-8 测试申请：通道已于 2026-10-09 §2 整体退役——test_application_store
 # 删除，/api/account/test-application 与 /api/admin/v1/test-applications*
@@ -2165,44 +2167,17 @@ def _to_float(v):
 
 
 def _mpp_from_tiff_resolution(path: Path):
-    """从 TIFF 分辨率标签（真实坐标尺）读取 mpp。
-
-    许多扫描仪/转换软件生成的 TIFF 类切片没有厂商 mpp 元数据，
-    但写入了标准的 XResolution/YResolution + ResolutionUnit 标签：
-    - ResolutionUnit=2（英寸）：mpp(µm/px) = 25400 / XResolution
-    - ResolutionUnit=3（厘米）：mpp(µm/px) = 10000 / XResolution
-    读取失败或数值不合理时返回 (None, None)。
-    """
-    try:
-        from PIL import Image
-        from PIL.TiffTags import TAGS_V2  # noqa: F401  确保标签表初始化
-
-        with Image.open(str(path)) as img:
-            tags = getattr(img, "tag_v2", None)
-            if not tags:
-                return None, None
-            x_res = _to_float(tags.get(282))  # XResolution
-            y_res = _to_float(tags.get(283))  # YResolution
-            unit = tags.get(296, 2)           # ResolutionUnit，默认英寸
-            if not x_res or x_res <= 0:
-                return None, None
-            factor = 25400.0 if unit == 2 else (10000.0 if unit == 3 else None)
-            if factor is None:
-                return None, None
-            mpp_x = factor / x_res
-            mpp_y = factor / y_res if y_res and y_res > 0 else mpp_x
-            # 合理性检查：病理切片 mpp 一般在 0.1 ~ 2.0 µm/px 之间
-            if 0.05 <= mpp_x <= 3.0:
-                return mpp_x, mpp_y
-    except Exception:
-        pass
-    return None, None
+    """从 TIFF 分辨率标签（真实坐标尺）读取 mpp（P0-W6 起共享实现）。"""
+    return slide_io.mpp_from_tiff_resolution(path)
 
 
-def _read_metadata(osr: OpenSlide, path: Path) -> dict:
+def _read_metadata(osr: OpenSlide, path: Path, slide_id: str = None) -> dict:
     """读取尺寸与 mpp 等元数据。
 
-    mpp 取值优先级（均为真实坐标尺，最后一个才是估算）：
+    mpp 取值优先级（均为真实坐标尺，最后一个才是估算；P0-W6c 起顶层为
+    手补覆盖）：
+    0. slide_mpp_overrides 手补行（来源 manual——W6c PATCH 补录，只覆盖
+       已补录的轴；``slide_id`` 为 None 时不查）
     1. 厂商元数据 openslide.mpp-x/y（Aperio/滨松等，最可靠）
     2. TIFF 标准分辨率标签 XResolution + ResolutionUnit
     3. 按扫描倍率估算 mpp = 10 / objective-power（标记为 estimated）
@@ -2218,6 +2193,12 @@ def _read_metadata(osr: OpenSlide, path: Path) -> dict:
     null``、``mpp_source = "missing"``，不落入下面的 TIFF 分辨率/倍率估算
     路径；``width/height`` 为 EXIF 方向校正后的像素尺寸。
     """
+    return slide_store.apply_mpp_override(
+        _read_file_metadata(osr, path), slide_id)
+
+
+def _read_file_metadata(osr: OpenSlide, path: Path) -> dict:
+    """文件级元数据（不含手补覆盖层——_read_metadata 的内层实现）。"""
     width, height = osr.dimensions
     props = osr.properties
     if getattr(osr, "is_raster_image", False):
@@ -2306,7 +2287,8 @@ def _slide_info_dict_desc(desc, path=None):
     def _read_meta():
         entry = _get_slide(desc)
         with slide_cache.borrow_pair(entry) as pair:
-            return _read_metadata(pair["osr"], path)
+            return _read_metadata(pair["osr"], path,
+                                  slide_id=desc.slide_id)
 
     if desc.storage_layout == slide_store.StorageLayout.ID_BUNDLE:
         # id_bundle：元数据以资产行为权威（R-02：alias 出参从 display_name
@@ -3210,6 +3192,15 @@ def _app_capabilities(mode):
         # 结论（COS→服务器不稳且不快于平台路径）→ 首期只允许用户手动选路，
         # 不做按大小自动导流（分流文档校准规则 3）。
         "cos_upload": _cos_upload_capability_payload(demo),
+        # P0-W6a：本地直传通道（无 COS 凭证的裸部署上传；静态派生、零 DB
+        # 查询、无秘密——available 只由 LOCAL_UPLOAD_CHANNEL 决定，demo 同
+        # cos 通道口径恒 False）。
+        "local_upload": local_ingest_http.capability_payload(
+            int(UPLOAD_PRODUCT_MAX_BYTES)) if not demo else {
+                "available": False,
+                "formats": sorted(local_ingest_http.accepted_formats()),
+                "max_size_bytes": int(UPLOAD_PRODUCT_MAX_BYTES),
+                "part_bytes": 0, "max_concurrent_parts": 0},
     }
 
 
@@ -3275,25 +3266,15 @@ def _cos_accepted_formats():
     不在直传集（需打包 zip）。后端权威下发（capability payload），前端不再
     维护第二份词表。
 
-    2026-11-05：普通图片（.bmp/.jpg/.jpeg）不再受理原始字节——必须先在本机
-    浏览器转换为 OME-TIFF，上调上传的是 .tif 产物。"""
+    P0-W6b（2026-11-11 解禁）：普通图片（.bmp/.jpg/.jpeg）恢复受理直传
+    ——RasterSlide 直读，伪装/截断/超限由 worker open_slide 终审。"""
     exts = set(slide_format_registry.capability_exts(
         slide_format_registry.CAP_NATIVE_SINGLE_FILE))
     if SERVER_CONVERSION_CREATION:
         exts |= _browser_convert_formats()
     exts.add("zip")
     exts.discard("mrxs")
-    exts -= {e.lstrip(".") for e in slide_format_registry.RASTER_IMAGE_EXTS}
     return exts
-
-
-def _raster_requires_conversion():
-    """普通图片的原图直传拒绝形态（2026-11-05 产品裁决）。"""
-    return (jsonify(
-        error="普通图片需先在本机浏览器转换为 OME-TIFF 后上传："
-              "原始 .bmp / .jpg / .jpeg 不能直接导入",
-        code="raster_requires_conversion",
-        tools_url=BROWSER_CONVERT_URL), 422)
 
 
 def _cos_ingestion_kind_for(safe):
@@ -3301,13 +3282,12 @@ def _cos_ingestion_kind_for(safe):
 
     native=原生单文件；zip=归档包；conversion=convert-required（KFB 族）。
     裸 bundle（.mrxs）与未登记格式拒绝并说明原因——不推荐另一后端
-    （U2 §4：删除 fallback 语义）。普通图片（.bmp/.jpg/.jpeg）一律 422
-    raster_requires_conversion：只接收浏览器转换后的 OME-TIFF。"""
+    （U2 §4：删除 fallback 语义）。P0-W6b：普通图片（.bmp/.jpg/.jpeg）
+    恢复 native 直传（2026-11-05 的 422 raster_requires_conversion 闸
+    退役；RasterSlide 校验流水全量生效）。"""
     ext = safe.rsplit(".", 1)[-1].lower() if "." in safe else ""
     if ext == "zip":
         return "zip", None
-    if slide_format_registry.is_raster_image_ext(safe):
-        return None, _raster_requires_conversion()
     cap = slide_format_registry.lookup(safe)["capability"]
     if cap == slide_format_registry.CAP_NATIVE_SINGLE_FILE:
         return "native", None
@@ -3322,61 +3302,26 @@ def _cos_ingestion_kind_for(safe):
 
 
 def _validate_direct_class(safe, kind, value):
-    """创建时的 direct_class 校验 + 直传关闭闸（阶段 1）。
+    """创建时的 direct_class 校验 + 直传关闭闸（阶段 1；P0-W6 起薄包装）。
 
-    返回 (规范化声明|None, None) 或 (None, 422 响应)。规则：
-
-    - 词表：ome-tiff / converter-bigtiff / legacy-direct /
-      ``unconverted-variant:<variant>``（白名单变体）；非法 → 422
-      invalid_direct_class；
-    - 声明须与扩展名匹配（ome-tiff/converter-bigtiff 只对 .tif/.tiff、
-      svs-jp2k 只对 .svs、legacy-direct 只对直传开放格式），否则 422
-      invalid_direct_class；
-    - 直传关闭格式（.svs）：没有合法 unconverted-variant:svs-jp2k 声明 →
-      422 convert_in_browser + tools_url（与 conversion_moved_to_browser
-      同形；zip 中的 MRXS 由 worker 在解包前拒绝同一错误码）；
-    - conversion 形态（kfb/kfbf）维持关闭 → convert_in_browser。
+    规则实现下沉到 ``upload_direct_class.validate_declaration``（COS 通道
+    与本地直传通道 local_ingest_http 共用同一实现与词表）；这里只做
+    Flask 响应转换。规则正文见被调函数 docstring：词表/扩展名匹配/
+    .svs 关闭闸（无 svs-jp2k 声明 → 422 convert_in_browser + tools_url）。
     """
-    ext = safe.rsplit(".", 1)[-1].lower() if "." in safe else ""
-    declared = None
-    if value is not None:
-        if not isinstance(value, str) or not value.strip():
-            return None, (jsonify(error="direct_class 需为非空字符串"),
-                          400)
-        declared = value.strip().lower()
-        if not upload_direct_class.is_direct_class(declared):
-            return None, (jsonify(error="未知的 direct_class 声明",
-                                  code="invalid_direct_class"), 422)
-    # 词表 ↔ 扩展名匹配
-    if declared == "ome-tiff" and ext not in ("tif", "tiff"):
-        return None, (jsonify(
-            error="ome-tiff 声明只适用于 .tif/.tiff 文件",
-            code="invalid_direct_class"), 422)
-    if declared == "converter-bigtiff" and ext not in ("tif", "tiff"):
-        return None, (jsonify(
-            error="converter-bigtiff 声明只适用于 .tif/.tiff 文件",
-            code="invalid_direct_class"), 422)
-    variant = upload_direct_class.variant_of(declared) if declared else None
-    if variant is not None and variant != "svs-jp2k":
-        return None, (jsonify(error="未知的 unconverted-variant 变体",
-                              code="invalid_direct_class"), 422)
-    if variant is not None and ext != "svs":
-        return None, (jsonify(
-            error="unconverted-variant:svs-jp2k 声明只适用于 .svs 文件",
-            code="invalid_direct_class"), 422)
-    # 直传关闭闸（阶段 1：.svs；kfb/kfbf 走 conversion 分支）——先于
-    # legacy-direct 的扩展名匹配裁定（关闭格式上的 legacy-direct 声明给
-    # 可行动的 convert_in_browser，不是词表错误）
-    if kind == "native" and ext in _direct_import_closed_formats() \
-            and variant != "svs-jp2k":
-        return None, (_convert_in_browser_closed(
-            "该格式已关闭直传：请在本机转换为 OME-TIFF 后上传"
-            "（切片转换工具 /tools/slides）"), 422)
-    if declared == "legacy-direct" and \
-            ext not in _direct_upload_formats():
-        return None, (jsonify(
-            error="legacy-direct 声明不适用于该扩展名",
-            code="invalid_direct_class"), 422)
+    declared, err = upload_direct_class.validate_declaration(
+        safe, kind, value,
+        closed_exts=_direct_import_closed_formats(),
+        legacy_direct_exts=_direct_upload_formats())
+    if err is not None:
+        status = int(err.get("status") or 400)
+        payload = {"error": err.get("error")}
+        if err.get("code"):
+            payload["code"] = err["code"]
+        if err.get("tools_url"):
+            payload["tools_url"] = err["tools_url"]
+            return None, (jsonify(**payload), 422)
+        return None, (jsonify(**payload), status)
     return declared, None
 
 
@@ -3487,16 +3432,22 @@ def _plugin_dir(plugin_id):
 # --------------------------------------------------------------------------- #
 # 产品约束：不做 SaaS 级 PKI/插件商店。策略随代码/镜像版本化（repo 内
 # ``plugins/source-policy.json``，随 ``COPY plugins/`` 进镜像），owner 通过改这个文件
-# 批准某插件目录的 manifest 内容；**不写数据库**，重启生效。文件缺失 = dev 模式全放行。
+# 批准某插件目录的 manifest 内容；**不写数据库**，重启生效。
+# P0-W3（审计 P0-4a，2026-11-11）：语义由 fail-open 改为 **fail-closed**——未 pin
+# 插件默认拒绝，仅当策略显式配 ``"default": "allow"`` 时放行；策略文件缺失 /
+# 不可解析的空表情同未配置（不再 dev 模式全放行）。
 @functools.lru_cache(maxsize=1)
 def _plugin_source_policy():
     """模块级懒加载 + 缓存读取来源策略（manifest sha256 pin 表）。
 
     - env ``PLUGINS_SOURCE_POLICY_FILE`` 指定策略文件路径；缺省
       ``plugins/source-policy.json``（随镜像分发）。
-    - 文件缺失 / 不可解析 → 返回空 dict（**dev 模式全放行**），启动日志一行 warning。
+    - 文件缺失 / 不可解析 → 返回空 dict（**fail-closed**：空表下未 pin 插件
+      一律拒绝，见 plugin_source_allowed），启动日志一行 warning。
     - 返回 ``{ "<plugin_key>": "<sha256 hex>" | null, ... }``——key 是 ``plugins/`` 下
-      目录名，value 为期望的 manifest sha256（null = 显式放行）。
+      目录名，value 为期望的 manifest sha256（null = 显式放行）；保留键
+      ``"default"``：值为精确字符串 ``"allow"`` 时放行全部未 pin 插件（其余值
+      一律按拒绝），不与插件目录名冲突。
 
     缓存为模块级（``lru_cache(maxsize=1)``）：进程生命周期内策略固定，重启重新读取。
     测试可用 ``_plugin_source_policy.cache_clear()`` 在改 env 后强制重读。
@@ -3520,38 +3471,48 @@ def _plugin_source_policy():
     return data
 
 
-def plugin_source_allowed(plugin_id):
-    """检查插件来源策略是否放行（manifest sha256 pin，Stage 5-3）。
+def plugin_source_allowed(plugin_id, manifest_bytes=None):
+    """检查插件来源策略是否放行（manifest sha256 pin；P0-W3 起 fail-closed）。
 
-    返回 ``(allowed: bool, reason: str)``：
+    ``manifest_bytes``：调用方**已读取**的 manifest raw bytes（单次消费）。安装路径
+    （install_plugin_bundle）解析 manifest 与来源校验此前各读一次磁盘，竞速窗口内
+    两读内容可漂移（TOCTOU，审计 P0-4 附带项）；现在同一次读取的 bytes 同时供
+    JSON 解析与本函数哈希。``None`` 时本函数自读磁盘（UI 资产路由 / 首页注入等
+    单读者场景，无二次消费问题）。
 
-    - 策略未配置（dev 模式空表）→ ``(True, "source policy not configured (dev mode)")``；
-    - 插件不在策略表内（未 pin）→ ``(True, "source not pinned")``；
+    返回 ``(allowed: bool, reason: str)``（P0-W3 语义，默认拒绝）：
+
+    - 插件不在策略表内（未 pin；含策略文件缺失/不可解析的空表）→ 仅当策略
+      显式 ``"default": "allow"`` 时 ``(True, "source not pinned (default allow)")``，
+      否则 ``(False, "source not pinned")``——修复前对未 pin 插件放行的
+      fail-open 破绽（审计 P0-4a）；
     - 策略值为 ``null``（显式放行）→ ``(True, "explicitly allowed")``；
-    - manifest 缺失 → ``(False, "manifest missing")``；
-    - 策略期望 sha256 与磁盘 manifest 实际 sha256 不等 →
-      ``(False, "source policy mismatch")``；
+    - manifest 缺失（自读磁盘失败 / 目录不存在）→ ``(False, "manifest missing")``；
+    - 期望 sha256 与 manifest 实际 sha256 不等 → ``(False, "source policy mismatch")``；
     - 相等 → ``(True, "ok")``。
 
-    比较 hmac.compare_digest 常数时间（虽非密钥比较，零成本稳健）。manifest 读取用
-    raw bytes（``read_bytes``）与 ``shasum -a 256`` 结果一致，避免编码/换行归一漂移。
+    比较 hmac.compare_digest 常数时间（虽非密钥比较，零成本稳健）。哈希一律对
+    raw bytes 计算（``shasum -a 256`` 口径），避免编码/换行归一漂移；行尾契约由
+    ``.gitattributes``（``plugins/** text eol=lf``）保证检出即 LF（审计 P-3b）。
     """
     policy = _plugin_source_policy()
-    if not policy:
-        return (True, "source policy not configured (dev mode)")
     if plugin_id not in policy:
-        return (True, "source not pinned")
+        if policy.get("default") == "allow":
+            return (True, "source not pinned (default allow)")
+        return (False, "source not pinned")
     expected = policy[plugin_id]
     if expected is None:
         return (True, "explicitly allowed")
-    plugin_dir = _plugin_dir(plugin_id)
-    mf = plugin_dir / "manifest.json" if plugin_dir is not None else None
-    try:
-        digest = hashlib.sha256(mf.read_bytes()).hexdigest() if mf is not None else ""
-    except OSError:
-        return (False, "manifest missing")
-    if not digest:
-        return (False, "manifest missing")
+    if manifest_bytes is None:
+        plugin_dir = _plugin_dir(plugin_id)
+        mf = plugin_dir / "manifest.json" if plugin_dir is not None else None
+        try:
+            manifest_bytes = mf.read_bytes() if mf is not None else b""
+        except OSError:
+            return (False, "manifest missing")
+        if not manifest_bytes:
+            return (False, "manifest missing")
+    digest = hashlib.sha256(manifest_bytes).hexdigest()
     if hmac.compare_digest(digest, str(expected)):
         return (True, "ok")
     return (False, "source policy mismatch")
@@ -5379,7 +5340,9 @@ def plugin_ui_asset(plugin_id, filename):
 #      ui.slots 含 admin.workspace；
 #   ④ 存在该 plugin_id 且 enabled 的 installation 行。
 # 任何一步缺失/异常 → 不可信（_admin_plugin_trusted 内整体 try/except 兜底）。
-# 普通插件（viewer）沿用 plugin_source_allowed 的既有 fail-open 语义，不受影响。
+# 普通插件（viewer）走 plugin_source_allowed 的 P0-W3 fail-closed 语义：未 pin
+# 默认拒绝，仅策略显式 "default": "allow" 时放行（与 admin 的显式 pin 要求
+# 方向一致，宽松度不同——admin 永不接受 default 放行）。
 # --------------------------------------------------------------------------- #
 #: 代码级特权 admin 插件白名单（§8.2）：不随 manifest/策略文件/数据库变化，
 #: 新增 admin 插件必须改代码发版。
@@ -10053,7 +10016,12 @@ def _subject_can_annotate_slide(role, uid, name):
 
 
 def _slide_id_archived(slide_id):
-    """slide_id 是否在归档项目内（P2：project_slides 双写后的归档只读判定）。"""
+    """slide_id 是否在归档项目内（P2：project_slides 双写后的归档只读判定）。
+
+    P0-W2（审计 P0-2）：与 archived_slide_names 同口径的 owner 一致性联接
+    ——项目 owner 与切片 owner 双方已知且不一致（毒化成员行）时不判归档
+    （他人项目归档不得锁死我的切片/run grant）；任一方 NULL 维持旧行为。
+    """
     if not slide_id:
         return False
     try:
@@ -10065,7 +10033,10 @@ def _slide_id_archived(slide_id):
             cur.execute(
                 "SELECT 1 FROM project_slides ps JOIN projects p "
                 "ON p.project_id = ps.project_id "
-                "WHERE ps.slide_id=%s AND p.archived LIMIT 1", (slide_id,))
+                "LEFT JOIN slides s ON s.slide_id = ps.slide_id "
+                "WHERE ps.slide_id=%s AND p.archived "
+                "AND (s.owner_user_id IS NULL OR p.owner_user_id IS NULL "
+                "OR s.owner_user_id=p.owner_user_id) LIMIT 1", (slide_id,))
             return cur.fetchone() is not None
     except Exception:  # noqa: BLE001
         return False
@@ -15776,6 +15747,13 @@ def _ingestion_state_body(job, *, queue_position=None):
         body["parts"] = [{"part_number": int(p["part_number"]),
                           "length": int(p["length"])}
                          for p in job["part_plan_json"]]
+        if (job.get("transport") or "") == ingestion_store.TRANSPORT_LOCAL:
+            # P0-W6a：本地直传的浏览器据此直接切片 POST（无签名步骤）。
+            body["part_bytes"] = max(
+                1, int(cos_config.LOCAL_INGEST_PART_BYTES))
+    # P0-W6a/W6b：通道字段——transport 全通道透出；local 任务附断点续传
+    # 权威清单（received_parts）与上传期警告（mpp_missing 等，不阻断）。
+    body.update(local_ingest_http.state_extras(job))
     # P4-b（合同 §5.6）：slide 引用从任务绑定读（job_slide_ref——job.slide_id
     # 创建即分配，结算前后都在）；不再按 slide_canonical_name 名字解析（新
     # 资产无 legacy_filename，按名 resolve 对 id_bundle 产物恒 None）。
@@ -16002,16 +15980,53 @@ def api_ingestion_upload_complete(job_id):
     """幂等记录「浏览器侧完成」（§4）：worker 随后核验远端对象。
 
     owner 触点先行刷新 client_seen_at（0084 liveness；终态冲突时同样算
-    在场证据）。"""
+    在场证据）。local_http 任务（P0-W6a）由 local_ingest_http 就地收口
+    （核对齐全 → 拼接 → queued），不走 COS Complete 核验。"""
     job, err = _ingestion_fetch(job_id)
     if err is not None:
         return err
     _touch_ingestion_client_seen(job)
+    if (job.get("transport") or "") == ingestion_store.TRANSPORT_LOCAL:
+        payload, status = local_ingest_http.handle_upload_complete(
+            current_identity(), job)
+        return jsonify(payload), status
     try:
         job = ingestion_store.request_upload_complete(job_id)
     except ingestion_store.IngestionStateError as e:
         return jsonify(error=str(e), code="ingestion_state_conflict"), 409
     return jsonify(_ingestion_state_body(job)), 202
+
+
+@app.route("/api/ingestions/local", methods=["POST"])
+def api_ingestions_local_create():
+    """P0-W6a：创建本地直传任务（local_http transport，无 COS 凭证可用）。
+
+    会话鉴权/CSRF 由全局闸覆盖；配额/水位/活跃上限在准入事务内裁定
+    （upload_guard 预约绑定）。逻辑全部在 local_ingest_http（薄接线）。"""
+    payload, status = local_ingest_http.handle_create(
+        current_identity(), request.get_json(silent=True) or {},
+        UPLOAD_PRODUCT_MAX_BYTES)
+    return jsonify(payload), status
+
+
+@app.route("/api/ingestions/<job_id>/parts/<int:part_number>",
+           methods=["POST"])
+def api_ingestion_part_upload_local(job_id, part_number):
+    """P0-W6a：本地直传分片上传（application/octet-stream 原始字节）。
+
+    ownership 与 client_seen 触点同 parts/sign；分片原子落 staging 后记
+    账（断点续传权威清单 local_parts_json）。"""
+    job, err = _ingestion_fetch(job_id)
+    if err is not None:
+        return err
+    _touch_ingestion_client_seen(job)
+    payload, status = local_ingest_http.handle_part_upload(
+        current_identity(), job, request.get_data(cache=False), part_number)
+    if status == 200:
+        resp = jsonify(payload)
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    return jsonify(payload), status
 
 
 @app.route("/api/ingestions/<job_id>/cancel", methods=["POST"])
@@ -16254,15 +16269,19 @@ def _slide_delete_unified(desc, requested_by, *, legacy_response=False):
     随后同步尝试执行一次（用户感知与 P3 内联版一致）；执行异常返回 503
     （delete_retryable），daemon 按 lease+退避兜底。
 
-    可删态口径：id_bundle 恒 ready（状态机严格）；legacy 布局资产放行
-    ready/legacy/failed（迁移期清理语义——旧行 any-state 可删的能力保留，
-    failed 行的文件多已缺失，结算幂等不受影响）。staging 恒 409。
+    可删态口径：id_bundle 放行 ready/**failed**（P0-W4/审计 P0-3 d：
+    failed 产物包——_fail 撤包失败或历史遗留的孤儿——由删除编排兜底
+    收走；failed 从未结算 → accounted_bytes NULL → refund 0，不减账、
+    不破坏 R-12 幂等）；legacy 布局资产放行 ready/legacy/failed（迁移期
+    清理语义——旧行 any-state 可删的能力保留，failed 行的文件多已缺失，
+    结算幂等不受影响）。staging 恒 409。
     """
     sid = desc.slide_id
     legacy_layout = desc.storage_layout != slide_store.StorageLayout.ID_BUNDLE
     allowed = ((slide_store.SlideState.READY, slide_store.SlideState.LEGACY,
                 slide_store.SlideState.FAILED) if legacy_layout
-               else (slide_store.SlideState.READY,))
+               else (slide_store.SlideState.READY,
+                     slide_store.SlideState.FAILED))
     state = None
     import psycopg.rows
     conn = pg_store.connect()
@@ -18304,33 +18323,42 @@ def _parse_provides_registry(manifest):
     return out
 
 
-def _read_plugin_bundle_manifest(plugin_key):
-    """读取插件 bundle 的 manifest.json（plugin_key 是 plugins/ 下目录名）。
+def _read_plugin_bundle_manifest_raw(plugin_key):
+    """读取插件 bundle 的 manifest.json：**单次读取** raw bytes 并解析。
 
-    返回 (manifest_dict, None) 或 (None, (resp, status))：
+    返回 (raw_bytes, manifest_dict, None) 或 (None, None, (resp, status))：
     目录不存在/manifest 缺失/不可解析 → 400 invalid_request。
+
+    raw bytes 与 JSON 解析同源同读：安装路径把同一份 bytes 交给
+    plugin_source_allowed 做 sha256 pin 校验，消除「读两次、验第二次」的
+    TOCTOU 竞速（P0-W3；此前 _read_plugin_bundle_manifest 与
+    plugin_source_allowed 各自读盘，窗口内磁盘内容可变）。
     """
     plugin_dir = _plugin_dir(plugin_key)
     mf = plugin_dir / "manifest.json" if plugin_dir is not None else None
     if mf is None or not mf.is_file():
-        return None, (jsonify(error="插件目录或 manifest.json 不存在",
+        return None, None, (jsonify(error="插件目录或 manifest.json 不存在",
                               plugin=plugin_key), 400)
     try:
-        manifest = json.loads(mf.read_text(encoding="utf-8"))
+        raw = mf.read_bytes()
+        manifest = json.loads(raw.decode("utf-8"))
     except (OSError, ValueError) as e:
-        return None, (jsonify(error="manifest.json 解析失败：%s" % e,
+        return None, None, (jsonify(error="manifest.json 解析失败：%s" % e,
                               plugin=plugin_key), 400)
     if not isinstance(manifest, dict):
-        return None, (jsonify(error="manifest 顶层需为对象", plugin=plugin_key), 400)
-    return manifest, None
+        return None, None, (jsonify(error="manifest 顶层需为对象",
+                              plugin=plugin_key), 400)
+    return raw, manifest, None
 
 
 def install_plugin_bundle(plugin_key, approved_permissions=None):
     """安装/更新插件 bundle：解析 manifest → 来源策略 → 登记能力注册表。
 
     返回 (installation_dict, None) 或 (None, (resp, status))。流程（docs §4.1）：
-      1. manifest 读取（结构错误 400）；
-      2. 来源策略校验（sha256 pin 不符 403，沿用 plugin_source_allowed）；
+      1. manifest 读取（结构错误 400）——raw bytes 单次读取，解析与第 2 步
+         哈希校验消费同一份内容（TOCTOU 收敛，P0-W3）；
+      2. 来源策略校验（sha256 pin 不符 / 未 pin 且无 default:allow → 403，
+         plugin_source_allowed P0-W3 起 fail-closed）；
       3. provides 解析（任何校验错误 400——登记失败 = 安装失败，fail-closed）；
       4. 扩展权限审批（C5 合同 §2.1）：manifest.permissions 申请
          MANIFEST_APPROVAL_REQUIRED_PERMISSIONS（当前仅 slide:import）而
@@ -18339,10 +18367,10 @@ def install_plugin_bundle(plugin_key, approved_permissions=None):
       5. 同 plugin_id 已有安装行 → 整体替换 capabilities（版本随之刷新）；
          否则创建新安装行（secret 平台生成，明文不落盘不返回）。
     """
-    manifest, mf_err = _read_plugin_bundle_manifest(plugin_key)
+    raw_manifest, manifest, mf_err = _read_plugin_bundle_manifest_raw(plugin_key)
     if mf_err is not None:
         return None, mf_err
-    allowed, reason = plugin_source_allowed(plugin_key)
+    allowed, reason = plugin_source_allowed(plugin_key, manifest_bytes=raw_manifest)
     if not allowed:
         return None, (jsonify(error="来源策略拒绝：%s" % reason,
                               plugin=plugin_key), 403)
@@ -21038,7 +21066,7 @@ def _slide_region_impl(desc):
             region = region.resize((ow, oh), Image.LANCZOS)
 
         # 读取 mpp 算放大倍率（供前端展示）
-        meta = _read_metadata(osr, path)
+        meta = _read_metadata(osr, path, slide_id=desc.slide_id)
         mpp = meta.get("mpp_x")
         mag = None
         if mpp and mpp > 0:
@@ -21318,6 +21346,62 @@ def api_llm_vision():
     import llm_provider_http
     return _jsonify_pair(llm_provider_http.vision(
         current_identity(), request.get_json(silent=True) or {}))
+
+
+@app.route("/api/llm/status", methods=["GET"])
+def api_llm_status():
+    import llm_provider_http
+    return _jsonify_pair(llm_provider_http.provider_status(current_identity()))
+
+
+@app.route("/api/llm/fetch-models", methods=["POST"])
+def api_llm_fetch_models():
+    import llm_provider_http
+    return _jsonify_pair(llm_provider_http.fetch_models(
+        current_identity(), request.get_json(silent=True) or {}))
+
+
+# =========================================================================== #
+# P1-W1：标注类别体系薄接线（实现全部在 label_class_http / label_class_store；
+# 决策见 docs/annotation-classes-w1-decisions.md）。CRUD 仅 owner（全局治理，
+# D3）；普通用户读启用类别。错误信封 {error, code, retryable?, details?}；
+# CSRF 由全局 before_request 覆盖。
+# 类别引用校验（share_store_pg.set_classification_resolver）与导出取色
+# （annotation_export.set_class_color_lookup）同处注入一次，实现侧不 import app。
+# =========================================================================== #
+import label_class_store as _label_class_store
+
+share_store.set_classification_resolver(_label_class_store.resolve_class)
+annotation_export.set_class_color_lookup(_label_class_store.class_color_by_name)
+
+
+@app.route("/api/label-classes", methods=["GET"])
+def api_label_classes():
+    import label_class_http
+    enabled_only = (request.args.get("enabled") or "") in ("1", "true")
+    return _jsonify_pair(label_class_http.list_classes(
+        current_identity(), enabled_only=enabled_only))
+
+
+@app.route("/api/label-classes", methods=["POST"])
+def api_label_class_create():
+    import label_class_http
+    return _jsonify_pair(label_class_http.create_class(
+        current_identity(), request.get_json(silent=True) or {}))
+
+
+@app.route("/api/label-classes/<class_id>", methods=["PATCH"])
+def api_label_class_update(class_id):
+    import label_class_http
+    return _jsonify_pair(label_class_http.update_class(
+        current_identity(), class_id, request.get_json(silent=True) or {}))
+
+
+@app.route("/api/label-classes/<class_id>", methods=["DELETE"])
+def api_label_class_delete(class_id):
+    import label_class_http
+    return _jsonify_pair(label_class_http.delete_class(
+        current_identity(), class_id, request.get_json(silent=True) or {}))
 
 
 def _apply_user_max_steps_view(out, own, source):
@@ -22292,7 +22376,7 @@ def internal_ai_region():
     entry = _get_slide(_region_target)
     with slide_cache.borrow_pair(entry) as pair:
         osr = pair["osr"]
-        meta = _read_metadata(osr, _region_path)
+        meta = _read_metadata(osr, _region_path, slide_id=_sid or None)
         mpp = meta.get("mpp_x")
     # 默认输出尺寸（max_long_edge 未给时用旧默认 1568×1568）
     if not out_w or out_w <= 0:
@@ -22659,7 +22743,9 @@ def _ai_slide_info_payload(pair, safe: str, *, path=None, scope_key=None,
     # P1-B2：path 为 resolver 解析后的绝对路径（读通道主路径）；缺省按
     # legacy 名拼（内容语义 mtime:size 不变）
     info_path = path if path is not None else (UPLOAD_DIR / safe)
-    meta = _read_metadata(osr, info_path)
+    meta = _read_metadata(osr, info_path, slide_id=(
+        scope_key if isinstance(scope_key, str)
+        and scope_key.startswith("sld_") else None))
     mpp = meta.get("mpp_x")
     # P2（R-15）：机器通道 info 的统计 scope / token 绑定键 = slide_id
     # （scope_key 由调用方传 descriptor 的 slide_id；缺省沿用名——无行兼容分支）
@@ -23478,7 +23564,7 @@ def _plugin_region_body(claims, safe, gate, sid, _region_path, body):
         entry = _get_slide(gate if gate is not None else safe)
         with slide_cache.borrow_pair(entry) as pair:
             osr = pair["osr"]
-            meta = _read_metadata(osr, _region_path)
+            meta = _read_metadata(osr, _region_path, slide_id=sid or None)
             mpp = meta.get("mpp_x")
         if not out_w or out_w <= 0:
             out_w = 1568
@@ -27671,35 +27757,21 @@ def api_share_claim(token):
 # --------------------------------------------------------------------------- #
 # 项目管理 API（管理员，内网）
 # --------------------------------------------------------------------------- #
-def _validate_slide_names(names):
-    """校验切片名列表：均需合法、扩展名受支持、文件存在。
-
-    返回 (clean_list, error_str)；成功时 error_str 为 None。
-    """
-    if not isinstance(names, list):
-        return None, "slides 需为数组"
-    clean = []
-    for name in names:
-        if not isinstance(name, str):
-            return None, "slides 含非法文件名"
-        safe = _sanitize_name(name)
-        if not safe or safe != name:
-            return None, "非法文件名: " + name
-        if safe.split(".")[-1].lower() not in SUPPORTED_EXTS:
-            return None, "不支持的文件类型: " + name
-        if not (UPLOAD_DIR / safe).is_file():
-            return None, "切片不存在: " + name
-        clean.append(safe)
-    return clean, None
-
-
 def _resolve_slide_refs_for_project(entries, *, field):
     """项目成员双字段解析（P2，合同 §3.2）。
 
     ``entries`` 是 [(name|None, slide_id|None), ...]；每个成员解析到已存在
     ready 资产（名走冻结别名；ID 直查），否则 400 指明哪一个。返回
     (names, slide_ids, error_response)。
+
+    P0-W2（审计 P0-2）：成员切片归属校验——user 仅可把自己的切片纳入项目
+    （public 可见 ≠ 可纳入，防他人切片被归档项目锁死）；owner 角色豁免
+    （管理语义，与 _can_access_project「owner 任意」/ _authorize_id_read 的
+    owner 分支同口径）。归属不一致 → 403 ``slide_not_owned``（fail-closed）。
     """
+    ident = current_identity()
+    owner_exempt = ident.get("role") == user_store.ROLE_OWNER
+    uid = ident.get("user_id") or None
     names, sids = [], []
     for name, sid in entries:
         desc, ref_err = _resolve_slide_ref_pair(sid, name)
@@ -27714,6 +27786,10 @@ def _resolve_slide_refs_for_project(entries, *, field):
         if desc.asset_state != slide_store.SlideState.READY:
             return None, None, (jsonify(
                 error="切片未发布，无法加入项目: %s" % (sid or name)), 400)
+        if not owner_exempt and (desc.owner_user_id or None) != uid:
+            return None, None, (jsonify(
+                error="切片不归属当前用户，无法加入项目: %s" % (sid or name),
+                code="slide_not_owned"), 403)
         names.append(desc.legacy_filename or desc.original_filename or "")
         sids.append(desc.slide_id)
     return names, sids, None
@@ -27798,7 +27874,8 @@ def api_project_create():
                                                slide_ids=legacy_sids)
                 if id_bundle_ids:
                     share_store.add_slides_to_project(
-                        pid, [], slide_ids=id_bundle_ids)
+                        pid, [], slide_ids=id_bundle_ids,
+                        requester_role=ident["role"])
             except Exception:
                 app.logger.warning("项目创建的 slide_id 双写补齐失败：%s",
                                    pid, exc_info=True)
@@ -27932,6 +28009,9 @@ def api_project_add_slides(pid):
 
     Stage 3a-2a：owner 任意；user 仅自己。P2（合同 §3.2）：slide_ids 优先；
     成员须解析到已存在 ready 资产；双列写入；同名不同 ID 可并存。
+    P0-W2（审计 P0-2）：成员切片归属校验（user 仅自己的切片，owner 角色
+    豁免）——HTTP 层 _resolve_slide_refs_for_project 先行，store 层复核
+    （PermissionError → 403，fail-closed）。
     """
     if not _can_access_project(pid):
         return _denied()
@@ -27943,7 +28023,12 @@ def api_project_add_slides(pid):
     names, sids, err = _resolve_slide_refs_for_project(entries, field="add")
     if err is not None:
         return err
-    proj = share_store.add_slides_to_project(pid, names, slide_ids=sids)
+    try:
+        proj = share_store.add_slides_to_project(
+            pid, names, slide_ids=sids,
+            requester_role=current_identity()["role"])
+    except PermissionError as e:
+        return jsonify(error=str(e), code="slide_not_owned"), 403
     if proj is None:
         return jsonify(error="项目不存在"), 404
     return jsonify(proj)
@@ -28288,8 +28373,8 @@ def api_slide_annotations_export(slide_id):
     if err is not None:
         return err
     fmt = (request.args.get("format") or "geojson").strip().lower()
-    if fmt != "geojson":
-        return jsonify(error="format 仅支持 geojson",
+    if fmt not in ("geojson", "xml"):
+        return jsonify(error="format 仅支持 geojson / xml",
                        code="unsupported_format"), 400
     raw_aid = request.args.get("annotation_id")
     aid_err = _annotation_export_id_error(raw_aid)
@@ -28318,9 +28403,31 @@ def api_slide_annotations_export(slide_id):
         items = [single]
     else:
         raw_by_id = _annotation_export_raw_rois(items)
+    exported_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if fmt == "xml":
+        # P1-W1+：ImageScope Annotation XML（annotation_xml_export 纯函数；
+        # 生成侧 ET 只序列化不解析，无实体面；文件名/头字段与 GeoJSON 同构）
+        import annotation_xml_export
+        result = annotation_xml_export.build_annotation_xml_result(
+            items, raw_by_id, slide_info, exported_at)
+        filename_item = None
+        if single is not None:
+            filename_item = dict(single, label=result["first_name"])
+        buf = io.BytesIO(result["xml"].encode("utf-8"))
+        buf.seek(0)
+        resp = send_file(
+            buf,
+            mimetype="application/xml",
+            as_attachment=True,
+            download_name=annotation_xml_export.export_xml_filename(
+                slide_info, filename_item),
+        )
+        resp.headers["Cache-Control"] = "no-store"
+        resp.headers["X-Annotation-Count"] = str(result["count"])
+        resp.headers["X-Skipped-Count"] = str(result["skipped"])
+        return resp
     collection = annotation_export.build_feature_collection(
-        items, raw_by_id, slide_info,
-        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        items, raw_by_id, slide_info, exported_at,
         annotation_id=raw_aid if raw_aid is not None else None)
     filename_item = None
     if single is not None:
@@ -28405,13 +28512,15 @@ def api_slide_meta(name):
 
 @app.route("/api/slides/<slide_id>", methods=["PATCH"])
 def api_slide_patch_by_id(slide_id):
-    """按 slide_id 编辑切片元数据（P2 新端点，合同 §7）。
+    """按 slide_id 编辑切片元数据（P2 端点，合同 §7；P0-W6 起薄接线）。
 
-    JSON: {display_name?, note?, public?}（None 不改，空串清除 display_name/
-    note）。display_name 是唯一可编辑展示名（R-02：改名不动文件、不动
-    legacy_filename、不动授权、不触发内容 revision 变化）。权限矩阵与
-    POST /api/slide/<name>/meta 一致：public 仅 owner；user 仅自己的切片。
-    未知 ID → 404 slide_not_found；走 slide_store 元数据原语（不触文件）。
+    JSON: {display_name?, note?, public?, mpp_x?, mpp_y?}（None 不改，空串
+    清除 display_name/note）。display_name 是唯一可编辑展示名（R-02：改名
+    不动文件、不动 legacy_filename、不动授权、不触发内容 revision 变化）。
+    P0-W6c：mpp_x/mpp_y（µm/px，正数）手补物物理尺度——来源恒 manual、
+    bump asset_revision（元信息级，不换内容）、两轴显式 null 清除；权限
+    矩阵与 POST /api/slide/<name>/meta 一致：public 仅 owner；user 仅自己
+    的切片。未知 ID → 404 slide_not_found。逻辑在 slide_meta_http。
     """
     ident = current_identity()
     desc = None
@@ -28422,46 +28531,14 @@ def api_slide_patch_by_id(slide_id):
                            exc_info=True)
     if desc is None:
         return jsonify(error="切片不存在", code="slide_not_found"), 404
-    body = request.get_json(silent=True) or {}
-    display_name = body.get("display_name", None)
-    note = body.get("note", None)
-    public = body.get("public", None)
-    if display_name is not None and not isinstance(display_name, str):
-        return jsonify(error="display_name 需为字符串"), 400
-    if note is not None and not isinstance(note, str):
-        return jsonify(error="note 需为字符串"), 400
-    if public is not None and not isinstance(public, bool):
-        return jsonify(error="public 需为布尔值"), 400
-    if public is not None and ident["role"] != user_store.ROLE_OWNER:
-        return jsonify(error="仅 owner 可设置公开状态"), 403
-    if ident["role"] != user_store.ROLE_OWNER:
-        if (desc.owner_user_id or None) != ident["user_id"]:
-            return jsonify(error="只能编辑自己切片的元数据"), 403
-    changed = []
-    try:
-        if display_name is not None:
-            if not slide_store.update_display_name(desc.slide_id, display_name):
-                return jsonify(error="切片不存在"), 404
-            changed.append("display_name")
-        if note is not None:
-            if not slide_store.update_note(desc.slide_id, note):
-                return jsonify(error="切片不存在"), 404
-            changed.append("note")
-        if public is not None:
-            if not slide_store.set_public(desc.slide_id, public):
-                return jsonify(error="切片不存在"), 404
-            changed.append("public")
-    except ValueError as e:
-        return jsonify(error=str(e)), 400
-    _audit("slide.meta.patch", target_type="slide",
-           target_id=desc.slide_id, slide=desc.legacy_filename,
-           slide_id=desc.slide_id, detail={"fields": changed})
-    fresh = slide_store.resolve_slide_id(desc.slide_id)
-    return jsonify(ok=True,
-                   slide_id=desc.slide_id,
-                   display_name=(fresh.display_name if fresh else None),
-                   note=(fresh.note if fresh else ""),
-                   public=bool(fresh.public) if fresh else None)
+    payload, status = slide_meta_http.handle_patch(
+        ident, desc, request.get_json(silent=True) or {})
+    if status == 200:
+        _audit("slide.meta.patch", target_type="slide",
+               target_id=desc.slide_id, slide=desc.legacy_filename,
+               slide_id=desc.slide_id,
+               detail={"fields": payload.get("changed") or []})
+    return jsonify(payload), status
 
 
 # --------------------------------------------------------------------------- #
@@ -28561,9 +28638,14 @@ def api_annotation_add():
             client_action_id=body.get("client_action_id"),
             slide_id=desc.slide_id,
             geometry_locked=bool(geometry_locked) if geometry_locked else False,
+            classification=body.get("classification"),
             **geom
         )
     except (ValueError, PermissionError) as e:
+        # P1-W1：类别引用未命中（resolver 拒绝）走稳定错误码 unknown_class
+        if "unknown_class" in str(e):
+            return jsonify(error="标注类别不存在或已停用",
+                           code="unknown_class"), 400
         return jsonify(error=str(e)), 400
     _audit("annotation.add", target_type="annotation", target_id=roi.get("annotation_id"),
            slide=safe, slide_id=desc.slide_id,
@@ -28793,10 +28875,13 @@ def api_annotation_patch_by_id(annotation_id):
         _audit("annotation.lock" if lock_value else "annotation.unlock",
                target_type="annotation", target_id=annotation_id,
                slide=updated.get("slide"))
-    if "geom" in body or "note" in body:
+    if "geom" in body or "note" in body or "classification" in body:
         try:
             updated = share_store.update_roi_by_annotation_id(
                 annotation_id, geom=body.get("geom"), note=body.get("note"),
+                # P1-W1：分类改绑/清空（哨兵 "_UNSET_"=不动；None=清空）
+                classification=(body.get("classification")
+                                if "classification" in body else "_UNSET_"),
                 # 锁切换先行 bump revision → 链式 CAS 用新 revision
                 expected_revision=(updated.get("revision")
                                    if updated is not None else expected))
@@ -28805,6 +28890,9 @@ def api_annotation_patch_by_id(annotation_id):
         except share_store.RevisionConflict as e:
             return _revision_conflict_response(annotation_id, e)
         except ValueError as e:
+            if "unknown_class" in str(e):
+                return jsonify(error="标注类别不存在或已停用",
+                               code="unknown_class"), 400
             return jsonify(error=str(e)), 400
         if updated is False:
             return jsonify(error="标注不存在"), 404
@@ -28813,6 +28901,8 @@ def api_annotation_patch_by_id(annotation_id):
         out["revision"] = updated.get("revision")
         out["note"] = updated.get("note", "")
         out["geometry_locked"] = bool(updated.get("geometry_locked"))
+        if "classification" in body:
+            out["classification"] = updated.get("classification")
     if grants_after is not None:
         out["grants"] = grants_after
     return jsonify(out)
@@ -29071,8 +29161,8 @@ def api_annotation_set_shared(token, index):
         _audit("annotation.lock" if lock_value else "annotation.unlock",
                target_type="annotation", target_id=lock_aid, slide=None)
 
-    # geom / note 部分
-    if "geom" in body or "note" in body:
+    # geom / note / classification 部分
+    if "geom" in body or "note" in body or "classification" in body:
         geom = body.get("geom")
         note = body.get("note")
         # 升级 C（§6.3-4）：rect 几何更新入口先做生效几何合并与真实切片
@@ -29095,6 +29185,9 @@ def api_annotation_set_shared(token, index):
             # by-id 行锁写入（绑定已解析行），绝不按 index 二次定位
             updated = share_store.update_roi_by_annotation_id(
                 aid, geom=geom, note=note,
+                # P1-W1：分类改绑/清空（哨兵 "_UNSET_"=不动；None=清空）
+                classification=(body.get("classification")
+                                if "classification" in body else "_UNSET_"),
                 expected_revision=chained_expected)
         except share_store.AnnotationLocked as e:
             return _annotation_locked_response(e)
@@ -29102,10 +29195,14 @@ def api_annotation_set_shared(token, index):
             return jsonify(error="revision_conflict",
                            current_revision=e.current_revision), 409
         except ValueError as e:
+            if "unknown_class" in str(e):
+                return jsonify(error="标注类别不存在或已停用",
+                               code="unknown_class"), 400
             return jsonify(error=str(e)), 400
         if updated is False:
             return jsonify(error="标注不存在"), 404
         note_after = updated.get("note", "")
+        class_after = updated.get("classification")
         if locked_state is None:
             locked_state = bool(updated.get("geometry_locked"))
         # 若同时没传 shared，回填当前 shared 值便于前端同步
@@ -29125,6 +29222,9 @@ def api_annotation_set_shared(token, index):
            detail={"shared_after": shared_after})
     out = {"ok": True, "shared": shared_after, "note": note_after,
            "geometry_locked": locked_state}
+    # P1-W1：仅当本请求改过分类时回显（避免旧客户端读响应猜键）
+    if "class_after" in locals():
+        out["classification"] = class_after
     if grants_after is not None:
         out["grants"] = grants_after
     if "updated" in locals() and isinstance(updated, dict) and updated.get("revision") is not None:

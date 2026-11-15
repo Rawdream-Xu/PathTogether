@@ -75,6 +75,14 @@ CANCELLED = "cancelled"
 FAILED = "failed"
 EXPIRED = "expired"
 
+#: 存储形态（transport，0066/0094）：presign_parts=COS 预签名分片直传；
+#: local_http=平台本地分片直传（P0-W6a——无 COS 凭证的裸部署通道，分片
+#: 经 /api/ingestions/<job>/parts/<n> 写 staging，downloading 段就地转
+#: validating，无远端对象）。
+TRANSPORT_PRESIGN = "presign_parts"
+TRANSPORT_LOCAL = "local_http"
+TRANSPORTS = frozenset({TRANSPORT_PRESIGN, TRANSPORT_LOCAL})
+
 TERMINAL_STATES = frozenset({COMPLETED, CANCELLED, FAILED, EXPIRED})
 #: 准入后、本地提交前：持有上传授权 + 本地预约 + COS 池预约的状态集。
 ACTIVE_UPLOAD_STATES = frozenset(
@@ -85,7 +93,9 @@ POOL_HOLDING_STATES = ACTIVE_UPLOAD_STATES | {READY}
 
 #: 合法转移表（非法跳转一律 IngestionStateError，fail-closed 不猜）。
 LEGAL_TRANSITIONS = {
-    WAITING: frozenset({PREPARING, CANCELLED, EXPIRED}),
+    #: local_http（0094）：准入即 uploading——无远端准备段（无 COS
+    #: multipart Initiate），分片计划在准入事务内冻结（LOCAL_INGEST_PART_BYTES）。
+    WAITING: frozenset({PREPARING, UPLOADING, CANCELLED, EXPIRED}),
     PREPARING: frozenset({UPLOADING, CANCELLED, FAILED}),
     #: completing→uploading：worker ListParts 核验发现缺块，回浏览器续传。
     UPLOADING: frozenset({COMPLETING, CANCELLED, FAILED}),
@@ -196,6 +206,8 @@ _JOB_FIELDS = (
     "kind", "sha256_expected", "conversion_job_id",
     # 0084 列：客户端在场证据（liveness 闸）+ 终态失败安全细节。
     "client_seen_at", "fail_detail",
+    # 0094 列（P0-W6）：local_http 分片接收账本 + 上传期警告（W6b mpp_missing）。
+    "local_parts_json", "warnings_json",
 )
 
 _INT_FIELDS = frozenset({
@@ -212,6 +224,7 @@ _TS_FIELDS = frozenset({
 })
 _JSON_FIELDS = frozenset({
     "part_plan_json", "download_checkpoint_json", "commit_intent_json",
+    "local_parts_json", "warnings_json",
 })
 
 
@@ -334,7 +347,7 @@ def create_waiting_job(owner_user_id, owner_role, filename, safe_name,
                        format_ext, declared_size, *, idempotency_key=None,
                        policy_version=None, route_reason=None,
                        kind=KIND_NATIVE, sha256_expected=None,
-                       direct_class=None):
+                       direct_class=None, transport=TRANSPORT_PRESIGN):
     """创建 waiting_capacity 任务（尚不预约任何容量/凭证，§4/§6.1）。
 
     P4-b（合同 §5.2）：native 形态**创建即预分配 slide_id**——同一事务内
@@ -359,10 +372,15 @@ def create_waiting_job(owner_user_id, owner_role, filename, safe_name,
     索引兜底）——冲突时返回 (既有行, False)，**复用既有行的 slide_id**
     （已分配则绝不重新分配；升级窗口在途旧行无绑定时就地补绑——同事务，
     仍是一行一 ID）。返回 (job_dict, created)。
+
+    transport（0094，P0-W6a）：``local_http`` 为本地直传通道任务（分片
+    POST 平台写 staging；其余合同不变）。
     """
     declared_size = int(declared_size)
     if kind not in KINDS:
         raise IngestionStateError("未知 ingestion 任务形态：%r" % (kind,))
+    if transport not in TRANSPORTS:
+        raise IngestionStateError("未知 ingestion 存储形态：%r" % (transport,))
     asset_owner = asset_owner_for_job({"owner_user_id": owner_user_id})
     if not asset_owner:
         raise IngestionStateError(
@@ -396,12 +414,12 @@ def create_waiting_job(owner_user_id, owner_role, filename, safe_name,
                             "policy_version, route_reason, slide_id, kind, "
                             "sha256_expected, direct_class, client_seen_at, "
                             "waiting_expires_at) "
-                            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'presign_parts',"
+                            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
                             "%s,%s,%s,%s,%s,%s, now(), "
                             "now() + make_interval(secs => %s))",
                             (job_id, owner_user_id, owner_role, idempotency_key,
                              filename, safe_name, format_ext, declared_size,
-                             WAITING, policy_version, route_reason,
+                             WAITING, transport, policy_version, route_reason,
                              slide_id, kind, sha256_expected, direct_class,
                              cos_config.COS_WAITING_MAX_AGE_SECONDS))
                 except psycopg.errors.UniqueViolation as exc:
@@ -597,6 +615,11 @@ def _try_admit_txn(cur, job_id, *, disk_watermark_ok=True):
             raise _AdmissionDeferred("local_reservation_transient")
 
     # 池行最后锁；失败整体回滚（本地预占同时撤销——同一事务）
+    if job["transport"] == TRANSPORT_LOCAL:
+        # local_http（0094）：无 COS 池——磁盘水位（调用方）与本地配额
+        #（上面）就是全部容量责任，不占池预约；直达 uploading 并冻结分片
+        # 计划。活跃上限守卫与 COS 路径同一语义。
+        return _admit_local_txn(cur, job, reservation_id)
     pool = cos_pool_store.lock_pool(cur)
     if cos_pool_store.admission_paused(pool):
         raise _AdmissionDeferred("cos_capacity_reconcile_required")
@@ -630,6 +653,56 @@ def _try_admit_txn(cur, job_id, *, disk_watermark_ok=True):
         "pool_reserved_bytes": job["declared_size"],
         "local_quota_reserved": quota_applies})
     cur.execute("SELECT * FROM ingestion_jobs WHERE job_id=%s", (job_id,))
+    return {"outcome": "admitted", "reason": None,
+            "job": _norm_row(cur.fetchone())}
+
+
+def _admit_local_txn(cur, job, reservation_id):
+    """local_http 准入收口（0094，P0-W6a）：waiting → uploading。
+
+    与 COS 路径的差别：无远端准备段（无 multipart Initiate），分片计划在
+    准入事务内冻结（``LOCAL_INGEST_PART_BYTES``；与 cos_ingest_worker.
+    compute_part_plan 同构——编号从 1 起、末块收尾、总长恒等于 declared），
+    浏览器随后逐片 POST 平台（分片账本 local_parts_json 由
+    ``local_record_part`` 记账）。全局活跃上限守卫与 one_active_per_owner
+    唯一索引的语义和 COS 路径一致。
+    """
+    part_bytes = max(1, int(cos_config.LOCAL_INGEST_PART_BYTES))
+    declared = int(job["declared_size"])
+    plan = []
+    offset = 0
+    number = 1
+    while offset < declared:
+        length = min(part_bytes, declared - offset)
+        plan.append({"part_number": number, "offset": offset, "length": length})
+        offset += length
+        number += 1
+    try:
+        cur.execute(
+            "UPDATE ingestion_jobs SET state=%s, part_plan_json=%s, "
+            "capacity_admitted_at=now(), job_deadline_at=now() + "
+            "make_interval(secs => %s), local_reservation_id=%s, "
+            "updated_at=now() "
+            "WHERE job_id=%s AND state=%s "
+            "AND (SELECT COUNT(*) FROM ingestion_jobs WHERE state = ANY(%s)) "
+            "< %s",
+            (UPLOADING, json.dumps(plan),
+             cos_config.COS_JOB_MAX_AGE_SECONDS, reservation_id,
+             job["job_id"], WAITING, list(ACTIVE_UPLOAD_STATES),
+             cos_config.COS_MAX_ACTIVE_UPLOADS_GLOBAL))
+    except psycopg.errors.UniqueViolation as exc:
+        if (getattr(exc.diag, "constraint_name", "") or "") == \
+                "ingestion_jobs_one_active_per_owner":
+            raise _AdmissionDeferred("identity_active_limit")
+        raise
+    if cur.rowcount != 1:
+        # 守卫未过：全局活跃名额已被并发准入占用 → 整体回滚保持等待
+        raise _AdmissionDeferred("global_active_limit")
+    _append_event(cur, job["job_id"], "admitted", {
+        "transport": TRANSPORT_LOCAL, "parts": len(plan),
+        "local_quota_reserved": reservation_id is not None})
+    cur.execute("SELECT * FROM ingestion_jobs WHERE job_id=%s",
+                (job["job_id"],))
     return {"outcome": "admitted", "reason": None,
             "job": _norm_row(cur.fetchone())}
 
@@ -1283,6 +1356,112 @@ def request_resume(job_id):
                 cur.execute("SELECT * FROM ingestion_jobs WHERE job_id=%s",
                             (job_id,))
                 return _norm_row(cur.fetchone())
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------------------- #
+# local_http 分片账本与收口（0094，P0-W6a）
+# --------------------------------------------------------------------------- #
+def local_record_part(job_id, part_number, length, *, etag_sha256=None):
+    """分片落账：UPDATE local_parts_json（幂等——同号覆盖）+ 在场触点。
+
+    调用方（local_ingest_http）保证：state=uploading、编号在冻结计划内、
+    length 与计划一致、分片字节已写入 staging（文件成功后账本才记账——
+    文件失败不落账）。行锁串行化并发分片请求；重传同号 = 覆盖（断点续传
+    语义：服务端账本是权威已收清单）。
+
+    返回更新后的 job dict；状态/形态/计划不符抛 IngestionStateError。
+    """
+    conn = _connect()
+    try:
+        with pg_store.transaction(conn) as c:
+            with c.cursor() as cur:
+                job = get_job_locked(cur, job_id)
+                if job is None:
+                    raise IngestionStateError("ingestion job 不存在：%r" % job_id)
+                if job["transport"] != TRANSPORT_LOCAL:
+                    raise IngestionStateError(
+                        "分片上传仅适用 local_http 任务（当前 %s）"
+                        % job["transport"])
+                if job["state"] != UPLOADING:
+                    raise IngestionStateError(
+                        "分片上传要求 uploading（当前 %s）" % job["state"])
+                plan = {int(p["part_number"]): int(p["length"])
+                        for p in (job.get("part_plan_json") or [])}
+                if int(part_number) not in plan:
+                    raise IngestionStateError("计划外分片编号：%s" % part_number)
+                if int(length) != plan[int(part_number)]:
+                    raise IngestionStateError(
+                        "分片长度与冻结计划不符（part %s：got %s want %s）"
+                        % (part_number, length, plan[int(part_number)]))
+                ledger = (job.get("local_parts_json") or {}).get("parts") or {}
+                ledger[str(int(part_number))] = {
+                    "length": int(length),
+                    "etag_sha256": etag_sha256 or None}
+                cur.execute(
+                    "UPDATE ingestion_jobs SET local_parts_json=%s, "
+                    "client_seen_at=now(), updated_at=now() WHERE job_id=%s",
+                    (json.dumps({"parts": ledger}), job_id))
+                cur.execute("SELECT * FROM ingestion_jobs WHERE job_id=%s",
+                            (job_id,))
+                return _norm_row(cur.fetchone())
+    finally:
+        conn.close()
+
+
+def local_complete_to_queued(job_id):
+    """本地分片齐备后的收口：completing → queued（服务端 CAS，无 worker）。
+
+    调用方（local_ingest_http）保证：分片账本与冻结计划完全一致、拼接件
+    已落 ``.staging/<job_id>/0/data.<ext>``（fsync 完成）。幂等：已进入
+    queued 及其后继阶段直接返回现状。worker 的 queued→downloading 与
+    downloading→validating（就地把 staging 件转校验）照常推进。
+    """
+    conn = _connect()
+    try:
+        with pg_store.transaction(conn) as c:
+            with c.cursor() as cur:
+                job = get_job_locked(cur, job_id)
+                if job is None:
+                    raise IngestionStateError("ingestion job 不存在：%r" % job_id)
+                if job["state"] in (QUEUED, DOWNLOADING, VALIDATING, READY,
+                                    COMPLETED):
+                    return _norm_row(job)  # 幂等：已收口
+                if job["state"] != COMPLETING:
+                    raise IngestionStateError(
+                        "本地收口要求 completing（当前 %s）" % job["state"])
+                _require_transition(job, QUEUED)
+                cur.execute(
+                    "UPDATE ingestion_jobs SET state=%s, updated_at=now() "
+                    "WHERE job_id=%s", (QUEUED, job_id))
+                _append_event(cur, job_id, "local_complete_accepted", None)
+                cur.execute("SELECT * FROM ingestion_jobs WHERE job_id=%s",
+                            (job_id,))
+                return _norm_row(cur.fetchone())
+    finally:
+        conn.close()
+
+
+def note_warnings(job_id, warnings):
+    """上传期警告落账（W6b：mpp_missing 等——不阻断，随状态体透出）。
+
+    非状态转移；白名单词表外的值静默丢弃（不透出内部细节）。幂等：重复
+    note 同值覆盖。
+    """
+    allowed = {"mpp_missing"}
+    clean = [str(w) for w in (warnings or []) if w in allowed]
+    if not clean:
+        return
+    conn = _connect()
+    try:
+        with pg_store.transaction(conn) as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "UPDATE ingestion_jobs SET warnings_json=%s, "
+                    "updated_at=now() WHERE job_id=%s AND state = ANY(%s)",
+                    (json.dumps(sorted(set(clean))), job_id,
+                     list(ACTIVE_UPLOAD_STATES | {READY, COMPLETED})))
     finally:
         conn.close()
 

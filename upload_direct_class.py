@@ -41,9 +41,14 @@ worker/百度路径的 OOM 面）。ZIP 检查只扫中央目录文件名。
 from __future__ import annotations
 
 import json
+import os
+import re
 import struct
 import xml.etree.ElementTree as ET
 import zipfile
+
+from defusedxml import ElementTree as DefusedET
+from defusedxml.common import DefusedXmlException
 
 #: 声明词表（``unconverted-variant:<variant>`` 按前缀匹配，variant 白名单
 #: 见 _VARIANT_CHECKS）
@@ -128,6 +133,66 @@ def variant_of(value):
     if s.startswith(VARIANT_PREFIX):
         return s[len(VARIANT_PREFIX):]
     return None
+
+
+#: 整对象 sha256 声明的形态（64 位十六进制；创建端校验共用）。
+SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def validate_declaration(safe, kind, value, *, closed_exts,
+                         legacy_direct_exts):
+    """创建时的 direct_class 声明校验 + 直传关闭闸（P0-W6 起双通道共用）。
+
+    从 app._validate_direct_class 移植为纯 dict 契约（不依赖 Flask）：
+    返回 ``(declared|None, None)`` 或 ``(None, error_dict)``，error_dict 含
+    ``error/code/status``（+ 可选 ``tools_url``）——COS 通道（app.py 薄
+    wrapper 转 jsonify）与本地直传通道（local_ingest_http 直接消费）同一
+    语义同一实现。
+
+    - 词表：ome-tiff / converter-bigtiff / legacy-direct /
+      ``unconverted-variant:<variant>``（白名单变体）；非法 → 422
+      invalid_direct_class；
+    - 声明须与扩展名匹配（ome-tiff/converter-bigtiff 只对 .tif/.tiff、
+      svs-jp2k 只对 .svs、legacy-direct 只对 legacy_direct_exts 内扩展名）；
+    - 直传关闭闸：``kind=="native"`` 且扩展名在 ``closed_exts``（目录行
+      direct_import=closed 派生，如 .svs）且无合法 svs-jp2k 变体声明 →
+      422 convert_in_browser + tools_url（可行动指引，不是词表错误）。
+    """
+    ext = safe.rsplit(".", 1)[-1].lower() if "." in safe else ""
+    declared = None
+    if value is not None:
+        if not isinstance(value, str) or not value.strip():
+            return None, {"error": "direct_class 需为非空字符串",
+                          "code": None, "status": 400}
+        declared = value.strip().lower()
+        if not is_direct_class(declared):
+            return None, {"error": "未知的 direct_class 声明",
+                          "code": "invalid_direct_class", "status": 422}
+    if declared == "ome-tiff" and ext not in ("tif", "tiff"):
+        return None, {"error": "ome-tiff 声明只适用于 .tif/.tiff 文件",
+                      "code": "invalid_direct_class", "status": 422}
+    if declared == "converter-bigtiff" and ext not in ("tif", "tiff"):
+        return None, {"error": "converter-bigtiff 声明只适用于 .tif/.tiff 文件",
+                      "code": "invalid_direct_class", "status": 422}
+    variant = variant_of(declared) if declared else None
+    if variant is not None and variant != "svs-jp2k":
+        return None, {"error": "未知的 unconverted-variant 变体",
+                      "code": "invalid_direct_class", "status": 422}
+    if variant is not None and ext != "svs":
+        return None, {
+            "error": "unconverted-variant:svs-jp2k 声明只适用于 .svs 文件",
+            "code": "invalid_direct_class", "status": 422}
+    if kind == "native" and ext in set(closed_exts or ()) \
+            and variant != "svs-jp2k":
+        return None, {
+            "error": "该格式已关闭直传：请在本机转换为 OME-TIFF 后上传"
+                     "（切片转换工具 /tools/slides）",
+            "code": "convert_in_browser", "status": 422,
+            "tools_url": "/tools/slides"}
+    if declared == "legacy-direct" and ext not in set(legacy_direct_exts or ()):
+        return None, {"error": "legacy-direct 声明不适用于该扩展名",
+                      "code": "invalid_direct_class", "status": 422}
+    return declared, None
 
 
 # --------------------------------------------------------------------------- #
@@ -265,11 +330,22 @@ def _converter_marked(desc_text):
 
 def _looks_like_ome_xml(text):
     """有界 OME-XML 判定：XML 声明开头 + OME 标记在头部窗口内
-    （OME-XML 的根元素紧跟 XML 声明，1 MiB 窗口覆盖任何真实文件）。"""
+    （OME-XML 的根元素紧跟 XML 声明，1 MiB 窗口覆盖任何真实文件）。
+
+    2026-11-14 扩展：OME 规范允许省略 XML 声明——morphology_2d 管线产物
+    （4 通道合并 OME-TIFF）description 直接以 ``<OME xmlns=...`` 根元素开头，
+    此前硬性要求 ``<?xml`` 前缀导致被误判 tiff-other 拒收。声明开头与根
+    元素开头两态等价判定，窗口边界不变。
+    """
     if not text:
         return False
     head = text.lstrip()[:4096]
-    return head.startswith("<?xml") and "OME" in head[:2048]
+    if head.startswith("<?xml"):
+        return "OME" in head[:2048]
+    # 无声明形态：必须以 OME 根元素直起（<OME> 或 <OME + 空白）
+    return (head.startswith("<OME>")
+            or (head.startswith("<OME")
+                and len(head) > 4 and head[4] in " \t\r\n"))
 
 
 def _is_aperio_svs(desc_text, compression):
@@ -369,9 +445,12 @@ def declares_unknown_physical_scale(path):
         return isinstance(fields, dict) and unknown(fields)
     if not body.startswith("<"):
         return False
+    # 上传文件内嵌描述按不可信 XML 解析（P0-W5）：拒绝 DOCTYPE/ENTITY
+    # （defusedxml，不进入实体展开），失败按无标记处理。
     try:
-        root = ET.fromstring(body)
-    except (ET.ParseError, ValueError):
+        root = DefusedET.fromstring(
+            body, forbid_dtd=True, forbid_entities=True)
+    except (ET.ParseError, DefusedXmlException, ValueError):
         return False
     if root.tag.rsplit("}", 1)[-1] != "OME":
         return False
@@ -501,3 +580,206 @@ def zip_contains_bundle_entry(path):
     """兼容别名：zip 内是否含 MRXS 主入口（阶段 1 起请用
     :func:`zip_closed_format_entries`，它同时覆盖 .svs 成员）。"""
     return bool(zip_closed_format_entries(path))
+
+
+# --------------------------------------------------------------------------- #
+# 多文件 OME 组合的"孤通道"归一化（2026-11-15 morphology_2d 实测链）
+# --------------------------------------------------------------------------- #
+_TIFF_DESC_TAG = 270
+
+
+def _tiff_desc_span(path):
+    """描述（tag 270）值的 (绝对偏移, 字节数)；非 TIFF/无描述返回 None。
+
+    复用 :func:`_parse_tiff_head` 的有界头解析（classic/BigTIFF 双态），
+    并重扫 IFD 定位 value 字段的绝对偏移（堆形态）。
+    """
+    import struct
+
+    with open(path, "rb") as fh:
+        head = _parse_tiff_head(fh)
+        if head is None:
+            return None
+        entry = head["entries"].get(_TIFF_DESC_TAG)
+        if entry is None or entry[2] is None:  # 需堆形态（内联说明文字太小）
+            return None
+        bo, bigtiff = head["bo"], head["bigtiff"]
+        fh.seek(0)
+        h = fh.read(16)
+        if bigtiff:
+            ifd_off = struct.unpack(bo + "Q", h[8:16])[0]
+        else:
+            ifd_off = struct.unpack(bo + "I", h[4:8])[0]
+        ifd_cnt_size = 8 if bigtiff else 2
+        entry_size = 20 if bigtiff else 12
+        val_field_base = 4 + ifd_cnt_size if bigtiff else 8
+        fh.seek(ifd_off)
+        (n,) = struct.unpack(bo + ("Q" if bigtiff else "H"),
+                             fh.read(ifd_cnt_size))
+        vsize, vfmt = (8, "Q") if bigtiff else (4, "I")
+        for i in range(n):
+            e0 = ifd_off + ifd_cnt_size + i * entry_size
+            fh.seek(e0)
+            tag = struct.unpack(bo + "H", fh.read(2))[0]
+            if tag == _TIFF_DESC_TAG:
+                fh.seek(e0 + val_field_base)
+                real_off = struct.unpack(bo + vfmt, fh.read(vsize))[0]
+                return real_off, entry[1]
+    return None
+
+
+def _ome_tiffdata_refs(desc_text):
+    """OME-XML 里 TiffData/UUID@FileName 引用的文件名集合（有序去重）。"""
+    import re
+
+    if not desc_text:
+        return []
+    refs = []
+    seen = set()
+    for blk in re.finditer(r"<TiffData[^>]*>(.*?)</TiffData>", desc_text,
+                           re.S):
+        m = re.search(r'FileName="([^"]+)"', blk.group(1))
+        if m and m.group(1) not in seen:
+            seen.add(m.group(1))
+            refs.append(m.group(1))
+    return refs
+
+
+def _ome_self_channel_name(desc_text, original_filename):
+    """孤通道的通道名：TiffData FileName 匹配上传原名 → 其 FirstC 对应
+    Channel Name；匹配不到回退首个 Channel Name，再回退文件名 stem。"""
+    import re
+
+    self_c = None
+    if original_filename:
+        for blk in re.finditer(r"<TiffData([^>]*)>(.*?)</TiffData>", desc_text,
+                               re.S):
+            m = re.search(r'FileName="([^"]+)"', blk.group(2))
+            if m and os.path.basename(m.group(1)) == \
+                    os.path.basename(original_filename):
+                c = re.search(r'FirstC="(\d+)"', blk.group(1))
+                self_c = int(c.group(1)) if c else 0
+                break
+    if self_c is not None:
+        chm = re.search(r'<Channel ID="Channel:%d"[^>]*Name="([^"]*)"'
+                        % self_c, desc_text)
+        if chm and chm.group(1).strip():
+            return chm.group(1)
+    chm = re.search(r'<Channel[^>]*Name="([^"]*)"', desc_text)
+    if chm and chm.group(1).strip():
+        return chm.group(1)
+    stem = os.path.basename(original_filename or "channel")
+    stem = re.sub(r"\.[^.]+$", "", stem)
+    return stem or "channel"
+
+
+def normalize_lone_ome_channel(path, *, original_filename=None):
+    """多文件 OME 组合的孤通道入口件就地归一化（等长改写，返回是否改写）。
+
+    背景（2026-11-15 morphology_2d 实测）：形态学管线把 4 通道拆成 4 个
+    单通道 OME-TIFF，每份的 OME-XML 都描述**完整组合**（TiffData/UUID 引
+    用 4 个 FileName）。平台单文件上传后发布改名 data.tif，兄弟文件缺失 →
+    tifffile 按 TiffData 解析把缺失 plane **零填充** → 整片黑屏。
+
+    判定与动作：
+      - 描述不是 OME-XML，或无 TiffData 引用 → 不适用（False）；
+      - 引用的兄弟文件**有任一存在**于同目录 → 组合完整，保留原样（False；
+        未来 P4 多文件包走此形态）；
+      - 引用全部失配（孤通道）→ 就地改写为**单通道自足 OME**（SizeC=1、
+        无 TiffData、保留 SizeX/Y/Type/PhysicalSize 与自身通道名；等长
+        空白填充 + 原位 NUL），tifffile 随即按物理 IFD 渲染本文件通道。
+        改写只动 ImageDescription 标签值（等长），绝不触碰像素体。
+
+    仅应在发布打包（staging 拼接后/组装后）调用一次；幂等（改写后再调
+    用因无 TiffData 引用直接 False）。
+    """
+    try:
+        span = _tiff_desc_span(path)
+        if span is None:
+            return False
+        val_off, cnt = span
+        if cnt < 32:
+            return False
+        with open(path, "rb") as fh:
+            head = _parse_tiff_head(fh)
+            if head is None:
+                return False
+            entry = head["entries"].get(_TIFF_DESC_TAG)
+            if entry is None:
+                return False
+            desc = _bounded_text(fh, head["bo"], entry, head["bigtiff"])
+    except OSError:
+        return False
+    if not _looks_like_ome_xml(desc):
+        return False
+    refs = _ome_tiffdata_refs(desc)
+    if not refs:
+        return False  # 已自足（幂等）
+    base = os.path.dirname(os.path.abspath(path))
+    if any(os.path.exists(os.path.join(base, r)) for r in refs):
+        return False  # 组合完整（兄弟在侧），保留原样
+
+    new_xml = _build_lone_channel_ome(desc, original_filename)
+    new_bytes = new_xml.encode("utf-8")
+    if len(new_bytes) > cnt - 1:  # -1 保原 NUL 尾位
+        # 等长约束放不下最小 OME（描述异常小）：放弃改写（保持旧行为）
+        return False
+    padded = new_bytes + b" " * (cnt - 1 - len(new_bytes))
+    with open(path, "r+b") as f:
+        f.seek(val_off)
+        f.write(padded + b"\x00")
+        f.flush()
+        os.fsync(f.fileno())
+    return True
+
+
+def _build_lone_channel_ome(desc_text, original_filename):
+    """孤通道最小 OME-XML（无声明无 TiffData；保留原 Pixels 标定与通道名）。
+
+    文件名含染料/颜色关键词时（_red/_绿/DAPI 等，中英双语共享表）烘进
+    Channel@Color——用户需求「文件名提到颜色名称则按该色渲染」；无匹配
+    不写 Color（渲染层按通道名关键词→色卡兜底）。
+    不再携带 StructAnnotations（MapAnnotation LUT 建议随组合元数据丢弃）
+    ——对比度由渲染层 12 位拉伸承担（slide_io >>4）。
+    """
+    import re
+
+    def attr(name, default=None):
+        m = re.search(r'%s="([^"]*)"' % name, desc_text)
+        return m.group(1) if m else default
+
+    sx = attr("SizeX", "1")
+    sy = attr("SizeY", "1")
+    ptype = attr("Type", "uint16")
+    psx = attr("PhysicalSizeX")
+    psy = attr("PhysicalSizeY")
+    ux = attr("PhysicalSizeXUnit", "µm")
+    uy = attr("PhysicalSizeYUnit", "µm")
+    name = _ome_self_channel_name(desc_text, original_filename)
+    calib = ""
+    if psx:
+        calib += ' PhysicalSizeX="%s" PhysicalSizeXUnit="%s"' % (psx, ux)
+    if psy:
+        calib += ' PhysicalSizeY="%s" PhysicalSizeYUnit="%s"' % (psy, uy)
+    # 文件名颜色关键词 → Channel@Color（用户需求 #2；渲染层 Color 属性
+    # 优先级最高，之后的重渲染/伪彩都吃这个色）；无关键词按通道名稳定
+    # 散列取色（异名异色，用户需求 #1：孤通道切片互不撞色）
+    color_hex = None
+    try:
+        import slide_render  # 共享关键词/散列色卡（无模块环：不 import app）
+        if original_filename and \
+                slide_render.fluorophore_color_by_name(original_filename):
+            rgb = slide_render.fluorophore_color_by_name(original_filename)
+            color_hex = "#%02X%02X%02X" % rgb
+        else:
+            color_hex = slide_render.stable_channel_color(name)
+    except Exception:  # noqa: BLE001 — 颜色匹配失败不影响归一化
+        color_hex = None
+    color_attr = ' Color="%s"' % color_hex if color_hex else ""
+    return ('<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06">'
+            '<Image ID="Image:0"><Pixels ID="Pixels:0" DimensionOrder="XYCZT" '
+            'Type="%s" SizeX="%s" SizeY="%s" SizeZ="1" SizeC="1" SizeT="1"%s>'
+            '<Channel ID="Channel:0" SamplesPerPixel="1" Name="%s"%s>'
+            "<LightPath/></Channel>"
+            "</Pixels></Image></OME>") % (ptype, sx, sy, calib, name,
+                                          color_attr)

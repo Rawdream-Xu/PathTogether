@@ -12,7 +12,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 
 CONVERTER_ID = "kfb-hybrid-repackage"
@@ -58,7 +57,12 @@ def build_manifest(*, src, dst, part_path, header, level_results,
             "version": CONVERTER_VERSION,
             "policy": "classic-multi-ifd-jpeg-tiled-bigtiff",
         },
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        # P0-W4（审计 P0-3 a）：sidecar 是产物包成员（conversion_worker.
+        # _bundle_manifest 逐文件 sha256 全量收录）——**不写 wall-clock
+        # 时间戳**。同源字节 → 同 sidecar 字节（重转/崩溃恢复与不间断运行
+        # 产物一致，slide_publish 崩溃恢复分支 verify_bundle 才能幂等放行）。
+        # 时刻类 provenance 由 conversion_jobs（created_at/started_at/
+        # finished_at）承载，不进产物。
         "source": {
             "name": Path(src).name,
             "size": os.path.getsize(str(src)),

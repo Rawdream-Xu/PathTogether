@@ -55,6 +55,8 @@ __all__ = [
     "SlideRenderError", "TiffFileSlide", "build_channel_index",
     # 颜色与 manifest
     "default_pseudocolor", "parse_ome_channel_color", "hex_to_rgb01",
+    "fluorophore_color_by_name", "FLUOROPHORE_KEYWORDS",
+    "stable_channel_color",
     "build_channel_manifest", "slide_image_mode",
     # 全局统计
     "compute_global_window", "purge_stats_for",
@@ -312,9 +314,60 @@ def purge_stats_for(scope_prefix):
 # --------------------------------------------------------------------------- #
 # OME RGBA 解析（§5.1）与确定性色卡（§5.2）
 # --------------------------------------------------------------------------- #
+
+#: 染料/颜色名关键词 → 显示 RGB（2026-11-15 用户需求：文件名/通道名提及
+#: 颜色时按该色渲染）。大小写不敏感子串匹配；**中英双语**（中文用户文件
+#: 命名习惯：_红色/_绿/_DAPI 等）。slide_render（manifest 默认色）与
+#: slide_io（legacy read_region 灰度路径 tint）共用同一张表，防止两条
+#: 渲染路径颜色分叉。
+FLUOROPHORE_KEYWORDS = (
+    (("dapi", "hoechst", "蓝", "blue"), (0, 0, 255)),
+    (("fitc", "gfp", "488", "绿", "green"), (0, 255, 0)),
+    (("cy3", "tritc", "568", "594", "rfp", "mcherry", "红", "red"),
+     (255, 0, 0)),
+    (("cy5", "647", "far-red", "洋红", "品红", "magenta"),
+     (255, 0, 255)),
+    (("cy7", "750", "近红外", "黄", "yellow"), (255, 255, 0)),
+    (("青", "cyan"), (0, 255, 255)),
+    (("橙", "orange"), (255, 140, 0)),
+    (("紫", "purple", "violet"), (179, 136, 255)),
+)
+
+
+def fluorophore_color_by_name(name):
+    """按染料/颜色关键词返回显示 RGB 三元组；无匹配返回 None。
+
+    slide_render（manifest 默认色）与 slide_io（legacy 灰度路径 tint）
+    共用；匹配顺序即表序（先染料后普通颜色词）。
+    """
+    low = str(name or "").strip().lower()
+    if not low:
+        return None
+    for keys, color in FLUOROPHORE_KEYWORDS:
+        if any(k in low for k in keys):
+            return color
+    return None
+
+
 def default_pseudocolor(index):
     """按逻辑通道索引循环取确定性色卡；同索引永远同色（禁随机/进程哈希）。"""
     return DEFAULT_PALETTE[int(index) % len(DEFAULT_PALETTE)]
+
+
+def stable_channel_color(name):
+    """按通道名稳定取显示色（hex）：染料/颜色关键词优先，否则 crc32 稳定
+    散列选色卡（同名恒同色——跨进程/跨重启稳定；异名大概率异色）。
+
+    2026-11-15 用户需求：多文件 OME 组合的孤通道切片（每切片 1 通道）
+    全落色卡[0] 同色不可辨——按名散列后互不撞色。manifest 默认色与
+    slide_io legacy 灰度路径 tint 共用本函数（防分叉）。
+    """
+    keyword = fluorophore_color_by_name(name)
+    if keyword is not None:
+        return _rgba_to_hex(*keyword)
+    import zlib
+    idx = zlib.crc32(str(name or "").encode("utf-8")) % len(DEFAULT_PALETTE)
+    return DEFAULT_PALETTE[idx]
 
 
 def parse_ome_channel_color(value):
@@ -452,8 +505,18 @@ def build_channel_manifest(slide, *, asset_generation=None,
         color_raw = (meta or {}).get("color")
         alpha = 1.0
         if color_raw is None:
-            color_hex = default_pseudocolor(i)
-            source = "default"
+            # 2026-11-15：染料/颜色名关键词（DAPI→蓝 等）优先；单通道
+            # （孤通道切片）按名稳定散列取色——异名异色；多通道按索引色卡
+            keywords_rgb = fluorophore_color_by_name(name)
+            if keywords_rgb is not None:
+                color_hex = _rgba_to_hex(*keywords_rgb)
+                source = "default"
+            elif size_c == 1 and name:
+                color_hex = stable_channel_color(name)
+                source = "default"
+            else:
+                color_hex = default_pseudocolor(i)
+                source = "default"
         else:
             rgba = parse_ome_channel_color(color_raw)
             if rgba is None:

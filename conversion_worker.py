@@ -15,6 +15,10 @@ P4-app（合同 §3）：转换链切 slide ID 统一发布——
   - 完成经 ``slide_publish.publish_with_channel`` 的 conversion 通道发布
     产物包（manifest/associated 全进 objects/<产物 slide_id>/；intent 与置
     validating 同事务持久化作崩溃恢复栅栏；结算并入 publish 事务）；
+  - P0-W4（审计 P0-3）崩溃恢复幂等：kfb manifest sidecar 确定性序列化
+    （无 wall-clock——同源字节 → 同产物字节）；本代 work 缺失时优先收养
+    上一代完整 work（``_adopt_prior_work``，不重转）；_fail 在 commit-intent
+    已持久化时连同已发布包撤除（无孤儿；retry 复用同 slide_id 不死循环）；
   - 旧 dest 已存在三分支（manifest 匹配复用/同 inode 补提升/name_
     unavailable）与 ``_retract_ours`` 的同 inode 判定**全部拆除**——ID
     目录无冲突（objects/<slide_id> 唯一），失败清 staging 即可。
@@ -164,6 +168,57 @@ def _cleanup_work_dirs(job_id, upload_dir=None):
             pass
 
 
+def _find_prior_work(job_id, generation, *, upload_dir=None):
+    """定位上一代**完整** work 目录（``data.tif`` + manifest sidecar 齐备；
+    残件不算——converter 的 ``.part`` 由其自身原子转正）。按 data.tif
+    mtime 取最新一代；无则 None。"""
+    task_dir = slide_storage.staging_task_dir(job_id, root=upload_dir)
+    src_dir = source_staging_dir(job_id, upload_dir)
+    if not task_dir.is_dir():
+        return None
+    candidates = []
+    for child in task_dir.iterdir():
+        if child == src_dir or child.name == str(generation) \
+                or not child.is_dir():
+            continue
+        entry = child / PRODUCT_ENTRY
+        sidecar = child / (PRODUCT_ENTRY + ".manifest.json")
+        if entry.is_file() and sidecar.is_file():
+            try:
+                candidates.append((entry.stat().st_mtime, child))
+            except OSError:
+                continue
+    if not candidates:
+        return None
+    return max(candidates)[1]
+
+
+def _adopt_prior_work(job_id, generation, staging_gen, *, upload_dir=None):
+    """断点收养（P0-W4，镜像 cos_ingest_worker._adopt_staged_data）：本代
+    work 缺失时把上一代完整 work（data.tif + manifest + associated/）原子
+    搬入本代目录——恢复不重转，产物与不间断运行一致（P0-3 b）。
+
+    搬移后复核完整性；任何残缺（如搬移中途崩溃）由调用方回落重转路径，
+    残件交终态 _cleanup_work_dirs 清场。返回是否收养成功。"""
+    prior = _find_prior_work(job_id, generation, upload_dir=upload_dir)
+    if prior is None:
+        return False
+    staging_gen = Path(staging_gen)
+    staging_gen.mkdir(parents=True, exist_ok=True)
+    for cur, _dirs, names in os.walk(prior):
+        for n in sorted(names):
+            src = Path(cur) / n
+            dst = staging_gen / src.relative_to(prior)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.replace(src, dst)
+            except OSError:
+                return False
+    shutil.rmtree(prior, ignore_errors=True)
+    return (staging_gen / PRODUCT_ENTRY).is_file() and \
+        (staging_gen / (PRODUCT_ENTRY + ".manifest.json")).is_file()
+
+
 def _bundle_manifest(staging_gen):
     """产物包 manifest：入口 data.tif + kfb manifest + associated 全成员
     （size/sha256 逐文件——publish 前源侧核对的权威清单）。"""
@@ -203,9 +258,24 @@ def _validate_canonical(dest):
 
 def _fail(job, worker_id, code, detail, *, upload_dir=None):
     """终态失败收口：任务 failed + 产物资产行 failed（保留证据）+ 清本代次
-    work 目录（源副本保留——重试仍需）。"""
-    conversion_store.fail_job(job["id"], worker_id, code, detail)
+    work 目录（源副本保留——重试仍需）。
+
+    P0-W4（审计 P0-3 d，参照 cos_ingest_worker 撤包先例）：commit-intent
+    已持久化（发布段进入过——FS 包可能已发布）时连同 ``objects/<slide_id>/``
+    独占包一并撤除——未结算 → 无账可退；ID 独占目录只含本任务产物，绝不
+    触碰他人资产；retry 复用同 slide_id 不再撞 no-clobber 死循环。ready
+    资产不撤（已结算可见）；撤包失败不掩盖任务失败（残留包由删除编排按
+    failed 态 id_bundle 兜底收走，P0-W4 同步放行）。"""
+    row = conversion_store.fail_job(job["id"], worker_id, code, detail)
     sid = (job.get("slide_id") or "").strip()
+    if sid and row.get("commit_intent_json"):
+        try:
+            desc = slide_store.resolve_slide_id(sid)
+            if desc is not None and desc.asset_state != \
+                    slide_store.SlideState.READY:
+                slide_storage.remove_bundle(sid, root=upload_dir)
+        except Exception:  # noqa: BLE001 - 撤包失败不掩盖任务失败
+            pass
     if sid:
         try:
             slide_store.mark_failed(sid)
@@ -277,10 +347,14 @@ def _process_job_critical_section(job, worker_id, source, canonical,
         conversion_store.mark_state(job["id"], worker_id, "converting")
         if not (work.is_file() and kfb_manifest.is_file()):
             # 同代次断点续跑：只认完整的 work+manifest（converter 的 .part
-            # 中间件由其自身原子转正）；否则清残留重转。
-            _discard_work(staging_gen)
-            staging_gen.mkdir(parents=True, exist_ok=True)
-            _convert_for_source(source, str(work), on_progress=on_progress)
+            # 中间件由其自身原子转正）。本代缺失时先收养上一代完整 work
+            # （P0-3 b：恢复不重转——产物与不间断运行一致）；无以收养才清
+            # 残留重转。
+            if not _adopt_prior_work(job["id"], generation, staging_gen,
+                                     upload_dir=upload_dir):
+                _discard_work(staging_gen)
+                staging_gen.mkdir(parents=True, exist_ok=True)
+                _convert_for_source(source, str(work), on_progress=on_progress)
         conversion_store.heartbeat(job["id"], worker_id)
         conversion_store.mark_state(job["id"], worker_id, "validating")
         _validate_canonical(str(work))

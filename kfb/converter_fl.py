@@ -495,8 +495,6 @@ def convert_kfbf(src_path, dst_path, *, timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
 # --------------------------------------------------------------------------- #
 def _build_manifest(*, src, dst, part_path, doc, level_results, warnings,
                     assoc_dir) -> dict:
-    from datetime import datetime, timezone
-
     header = doc.header
     out_levels = []
     seen_level = set()
@@ -524,7 +522,9 @@ def _build_manifest(*, src, dst, part_path, doc, level_results, warnings,
             "version": CONVERTER_VERSION,
             "policy": "ome-bigtiff-subifd-multichannel-jpeg-passthrough",
         },
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        # P0-W4（审计 P0-3 a，同 kfb/manifest.py）：sidecar 是产物包成员
+        # （逐文件 sha256 收录）——不写 wall-clock 时间戳，同源字节 → 同
+        # sidecar 字节；时刻类 provenance 由 conversion_jobs 承载。
         "source": {
             "name": Path(src).name,
             "size": os.path.getsize(str(src)),

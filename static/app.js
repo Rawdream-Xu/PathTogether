@@ -1527,6 +1527,8 @@
     annoArrowBtn: $("anno-arrow-btn"),
     annoFreeBtn: $("anno-free-btn"),
     annoLabelInput: $("anno-label-input"),
+    annoClassSelect: $("anno-class-select"),
+    annoClassLegend: $("anno-class-legend"),
     annoMoreBtn: $("anno-more-btn"),
     annoPop: $("anno-pop"),
     annoCanvas: $("anno-canvas"),
@@ -1659,7 +1661,11 @@
     // P1-W0：AI 供应商面板（owner 专属区块）与查看器「AI 识图」按钮
     acctSettingsLlm: $("acct-settings-llm"),
     llmProvidersPanel: $("llm-providers-panel"),
+    // P1-W1：owner「标注类别」管理面板（owner 专属区块）
+    acctSettingsLabelClasses: $("acct-settings-label-classes"),
+    labelClassesPanel: $("label-classes-panel"),
     llmVisionBtn: $("llm-vision-btn"),
+    llmVisionCaret: $("llm-vision-caret"),
     // AI 面板外框拖动/调整大小（改版第四轮 §1.4；demo 面板无这些 id → 空引用）
     aiPanel: $("ai-panel"),
     aiPanelHeader: $("ai-panel-header"),
@@ -1759,6 +1765,11 @@
     pickerConfirm: $("picker-confirm"),
     // 标注面板
     annoPanel: $("anno-panel"),
+    annoPanelResize: $("anno-panel-resize"),
+    annoPanelCollapse: $("anno-panel-collapse"),
+    annoExportMenu: $("anno-export-menu"),
+    annoExportGeojson: $("anno-export-geojson"),
+    annoExportXml: $("anno-export-xml"),
     annoPanelTitle: $("anno-panel-title"),
     annoPanelClose: $("anno-panel-close"),
     annoPanelList: $("anno-panel-list"),
@@ -2526,7 +2537,18 @@
         return slideDziUrl(id);
       },
       normalizeRenderContext: function (id, body) {
-        // by-name 端点（缺口见上）：ID 通道时 id 是 slide_id，换成当前切片名
+        // P1-W1+（2026-11-15）：ID 通道直走 by-ID 端点（app.py:16719，
+        // P2 前端缺口④已补）——旧适配器把 slide_id 当名发给 by-name
+        // 端点，id-only 资产（本地直传，无 legacy 名）解析失败 → 403，
+        // 通道面板改色全部报无权限。demo/旧后端回落 by-name。
+        if (slideIdApiOn() && id) {
+          return apiFetch("/api/slides/" + encodeURIComponent(id) +
+            "/render-context", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body || {}),
+          });
+        }
         var name = (state.slide && state.slide.name) || id;
         if (base.normalizeRenderContext) {
           return base.normalizeRenderContext(name, body);
@@ -3994,13 +4016,16 @@
     els.annoExportBtn.disabled = !ready || annoExportBusy;
   }
 
-  function exportAnnotations() {
+  // fmt: "geojson"（默认，QuPath）| "xml"（Aperio/ImageScope Annotation XML）
+  function exportAnnotations(fmt) {
     if (annoExportBusy) return;
     var sid = (slideIdApiOn() && state.slide && state.slide.id) || "";
     if (!sid) { syncAnnoExportBtn(); return; }
+    fmt = (fmt === "xml") ? "xml" : "geojson";
     annoExportBusy = true;
     syncAnnoExportBtn();
-    return apiFetch("/api/slides/" + encodeURIComponent(sid) + "/annotations/export")
+    return apiFetch("/api/slides/" + encodeURIComponent(sid) +
+        "/annotations/export" + (fmt === "xml" ? "?format=xml" : ""))
       .then(function (res) {
         if (!res.ok) return annoExportError(res);
         var n = parseInt(res.headers.get("X-Annotation-Count") || "0", 10);
@@ -4010,7 +4035,9 @@
         }
         var fname = annoExportFilename(res.headers.get("Content-Disposition"));
         return downloadAnnoExport(res, fname).then(function () {
-          toast(t("anno.export.done", { n: n }), "success");
+          toast(fmt === "xml"
+            ? (t("anno.export.xml.done") || t("anno.export.done", { n: n }))
+            : t("anno.export.done", { n: n }), "success");
         });
       })
       .catch(function (e) {
@@ -7488,6 +7515,9 @@
     // ID 资产由服务端按 slide_id 裁决（两字段冲突会 400，前端不做猜测）
     var body = { slide: slideName, type: draft.kind, label: label, shared: false, note: "" };
     if (slideId) body.slide_id = slideId;
+    // P1-W1：选中类别随创建携带（{"name"}；null=无类别不携带键）
+    var activeClass = window.HP_AnnoClasses && HP_AnnoClasses.activeClass();
+    if (activeClass) body.classification = activeClass;
     for (var k in draft.geom) body[k] = draft.geom[k];
     // §6.3：临时框草稿锁随保存落库（POST 可选 geometry_locked；不因刷新解锁）
     if (draft.kind === "rect" && state.roiGeometryLocked) {
@@ -8374,10 +8404,17 @@
         openEditCard(it);
         redrawAnnoCanvas();
       }));
-    // ✨ 加入 AI 对话：主条目（UX 改版 2026-10-18：从 ⋯ 提到工具条；锁定
-    // 移入 ⋯）。冻结与发射在**点击时刻**执行——菜单打开不再预冻结。
+    // ✨ 加入 AI 对话：主条目（UX 改版 2026-10-18：从 ⋯ 提到工具条）。
+    // 冻结与发射在**点击时刻**执行——菜单打开不再预冻结。
     el.appendChild(annoAiAttachToolbarButton(it));
-    // 锁定/解锁移入 ⋯ 菜单（openAnnoToolbarMenu），工具条不再占位。
+    // P1-W1+：锁定/解锁提回工具条主位（2026-11-14 用户反馈：高频操作藏
+    // ⋯ 二层菜单不顺手；⋯ 菜单里的同名项保留，双入口并存）
+    if (editable) {
+      el.appendChild(annoToolbarButton("aot-lock" + (locked ? " on" : ""),
+        locked ? "🔓 " + t("anno.lock.unlock.short") : "🔒 " + t("anno.lock.locked.short"),
+        locked ? t("anno.lock.unlock.tip") : t("anno.lock.lock.tip"),
+        function () { toggleItemGeometryLocked(it, !locked); }));
+    }
     el.appendChild(annoToolbarButton("aot-more", "⋯", t("anno.toolbar.more"),
       function (menuWasOpen) { if (!menuWasOpen) openAnnoToolbarMenu(it); }));
   }
@@ -9588,6 +9625,65 @@
     updateResearchBusy();  // P3
   }
 
+  // P1-W1+：标注面板伸缩——左缘拖宽（280-560px clamp；localStorage 记忆，
+  // 换会话保留习惯）与折叠/展开（收成右缘竖条，width 0 不遮切片）。
+  var ANNO_PANEL_WIDTH_KEY = "pt.annoPanel.width";
+  var ANNO_PANEL_MIN_W = 280;
+  var ANNO_PANEL_MAX_W = 560;
+
+  function initAnnoPanelResize() {
+    var grip = els.annoPanelResize;
+    if (!grip) return;
+    // localStorage 防御性访问（测试沙箱/隐私模式可能不可用；try/catch 兜底）
+    var store = null;
+    try { store = window.localStorage; } catch (e) { /* 沙箱忽略 */ }
+    var saved = 0;
+    try { saved = parseInt(store && store.getItem(ANNO_PANEL_WIDTH_KEY), 10); } catch (e) { saved = NaN; }
+    if (isFinite(saved) && saved >= ANNO_PANEL_MIN_W && saved <= ANNO_PANEL_MAX_W) {
+      els.annoPanel.style.width = saved + "px";
+    }
+    var startX = 0, startW = 0, dragging = false;
+    function onMove(ev) {
+      if (!dragging) return;
+      // 向左拖 = 变宽（面板右缘固定）：dx = startX - clientX
+      var w = startW + (startX - ev.clientX);
+      w = Math.min(ANNO_PANEL_MAX_W, Math.max(ANNO_PANEL_MIN_W, w));
+      els.annoPanel.style.width = w + "px";
+      ev.preventDefault();
+    }
+    function onUp() {
+      if (!dragging) return;
+      dragging = false;
+      grip.classList.remove("dragging");
+      document.body.style.cursor = "";
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+      var w = parseInt(els.annoPanel.style.width, 10);
+      if (isFinite(w) && store) {
+        try { store.setItem(ANNO_PANEL_WIDTH_KEY, String(w)); } catch (e) { /* 隐私模式忽略 */ }
+      }
+    }
+    grip.addEventListener("pointerdown", function (ev) {
+      dragging = true;
+      startX = ev.clientX;
+      startW = els.annoPanel.getBoundingClientRect().width;
+      grip.classList.add("dragging");
+      document.body.style.cursor = "ew-resize";
+      document.addEventListener("pointermove", onMove);
+      document.addEventListener("pointerup", onUp);
+      ev.preventDefault();
+    });
+  }
+
+  function initAnnoPanelCollapse() {
+    var btn = els.annoPanelCollapse;
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      var collapsed = els.annoPanel.classList.toggle("collapsed");
+      btn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    });
+  }
+
   function renderAnnoPanel(groups) {
     els.annoPanelList.innerHTML = "";
     if (!groups || groups.length === 0) {
@@ -9628,13 +9724,30 @@
         var privateBadge = (!it.shared)
           ? '<span class="anno-private-badge">' + esc(t("anno.private.badge")) + "</span>"
           : "";
+        // P1-W1+：行内分类属性（QuPath 语义）——色条=分类色（无类别灰）、
+        // 徽章=分类名 + 行内改绑下拉（下拉变化即 PATCH，走既有 CAS）。
+        var cls = (it.classification && it.classification.name)
+          ? it.classification : null;
+        var clsColor = cls && Array.isArray(cls.color) ? cls.color : [110, 119, 129];
+        var classBadge = cls
+          ? '<span class="anno-class-badge" title="分类：' + esc(cls.name) + '">' +
+            '<span class="anno-class-dot" style="background:rgb(' + clsColor.join(",") + ')"></span>' +
+            esc(cls.name) + "</span>"
+          : "";
         left.innerHTML =
           '<div class="ai-title"><span class="ai-type-icon">' + typIcon + "</span>" +
-          '<span class="ai-label">' + esc(grp.label) + "</span>" + lockBadge + privateBadge + sizeStr + "</div>" +
+          '<span class="ai-label">' + esc(grp.label) + "</span>" + lockBadge + privateBadge + classBadge + sizeStr + "</div>" +
           '<div class="ai-sub">' + fmtTime(it.ts) +
           (it.token ? esc(t("anno.sub.source", { s: String(it.token).slice(0, 6) })) : "") +
           (it.visitor ? esc(t("anno.sub.visitor", { s: String(it.visitor).slice(0, 6) })) : "") + "</div>";
         row.appendChild(left);
+        // P1-W1+：行首分类色条（append 在 row 上绝对定位，QuPath 色条语义）
+        var strip = document.createElement("span");
+        strip.className = "anno-class-strip";
+        strip.style.background = "rgb(" + clsColor.join(",") + ")";
+        row.appendChild(strip);
+        // 行内分类改绑下拉（有可用类别才渲染；点击行时排除）
+        appendClassRebindControl(row, it);
 
         // 「公开」切换钮：管理员可策展任意来源标注
         var sharedBtn = document.createElement("button");
@@ -9730,8 +9843,8 @@
 
         row.style.cursor = "pointer";
         row.addEventListener("click", function (ev) {
-          // 点击落在操作按钮区（分享/AI 动作/编辑/删除）则交给按钮自身处理，不触发跳转
-          if (ev.target.closest(".ai-share, .ai-op, .ai-action-chip, .fork-chat")) return;
+          // 点击落在操作按钮区（分享/AI 动作/编辑/删除/分类改绑）则交给按钮自身处理
+          if (ev.target.closest(".ai-share, .ai-op, .ai-action-chip, .fork-chat, .anno-class-select-mini")) return;
           // §6.1：点击行 = 定位并选中（不再隐藏其它标记；「只看这条」在 ⋯ 内）。
           jumpToAnno(it);
         });
@@ -9746,6 +9859,68 @@
     var p = function (n) { return n < 10 ? "0" + n : n; };
     return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) +
       " " + p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+
+  // P1-W1+：标注行内分类改绑（QuPath 语义：行内直接换分类）。
+  // 有可用类别（HP_AnnoClasses 已拉到）且标注带 annotation_id 时渲染迷你
+  // 下拉；变更即 PATCH classification（expected_revision CAS；409 提示刷新）。
+  // 改绑成功后就地更新行内数据并重绘面板（不整页刷新）。
+  function appendClassRebindControl(row, it) {
+    if (!it.annotation_id || !window.HP_AnnoClasses || !els.annoClassSelect) {
+      return;
+    }
+    var enabledNames = Array.prototype.map.call(els.annoClassSelect.options,
+      function (o) { return o.value; }).filter(function (v) { return v; });
+    if (!enabledNames.length) return;
+    var sel = document.createElement("select");
+    sel.className = "anno-class-select-mini";
+    sel.title = t("anno.class.rebind.tip") || "改绑分类";
+    sel.appendChild(new Option("—", ""));
+    enabledNames.forEach(function (name) {
+      sel.appendChild(new Option(name, name));
+    });
+    sel.value = (it.classification && it.classification.name) || "";
+    sel.addEventListener("click", function (ev) { ev.stopPropagation(); });
+    sel.addEventListener("change", function (ev) {
+      ev.stopPropagation();
+      var name = sel.value || null;
+      rebindAnnoClass(it, name, sel);
+    });
+    row.appendChild(sel);
+  }
+
+  function rebindAnnoClass(it, name, sel) {
+    if (!it.annotation_id) return;
+    var body = { classification: name ? { name: name } : null };
+    if (Number(it.revision) > 0) body.expected_revision = Number(it.revision);
+    apiFetch("/api/annotation/id/" + encodeURIComponent(it.annotation_id), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(function (r) {
+      if (r.status === 409) {
+        toast(t("anno.class.conflict") || "该标注已被他人修改，请刷新后重试", "error");
+        loadCurrentSlideAnnotations();
+        return null;
+      }
+      if (!r.ok) {
+        return r.json().then(function (j) {
+          toast(j.error || t("save.fail"), "error");
+          loadCurrentSlideAnnotations();
+        }).catch(function () {
+          toast(t("save.fail"), "error");
+        });
+      }
+      return r.json().then(function (j) {
+        // 就地更新缓存 item（renderAnnoPanel 消费 currentAnnotations 数据）
+        it.classification = j.classification || null;
+        it.revision = j.revision;
+        toast(t("anno.class.saved") || "分类已更新", "success");
+        if (annoPanelOpen) renderAnnoPanel(currentAnnotations.annotations || []);
+      });
+    }).catch(function () {
+      toast(t("save.fail"), "error");
+    });
   }
 
   // 兜底：解析某标注条目在其 token 下的 index（仅旧缓存无 index 时使用；
@@ -10083,6 +10258,17 @@
     var geomChanged = !before || !geomEqual(before.geom, geom);
     var body = { note: noteVal };
     if (geomChanged) body.geom = geom;
+    // P1-W1：类别差量携带——下拉当前选择与标注原类别不同才带键（null=
+    // 显式清空）；下拉默认「无类别」绝不清掉未触碰标注的既有类别。模块
+    // 未挂载/无下拉则完全不碰 classification，旧语义不变。
+    if (window.HP_AnnoClasses && els.annoClassSelect) {
+      var activeCls = HP_AnnoClasses.activeClass();
+      var currentClsName = (it.classification && it.classification.name) || null;
+      var nextClsName = activeCls ? activeCls.name : null;
+      if ((currentClsName || null) !== nextClsName) {
+        body.classification = activeCls;
+      }
+    }
     if (Number(it.revision) > 0) body.expected_revision = Number(it.revision);
     // rect 的 size_mm 前端重算（仅真正方形的兼容展示字段；v2 附属信息）
     if (geomChanged && (it.type || "rect") === "rect" && geom.w === geom.h &&
@@ -10655,8 +10841,10 @@
     // U3（统一 COS，docs/cos-only-upload-agent-plan-20260928.md §4）：新任务
     // 只建 ingestion。能力不可用（capability off / 容量配置门禁未过）→ 禁用
     // 创建并提示，**不回退 V1/V2**；词表与上限以服务端 capability 为唯一
-    // 权威（cosUploadEligible 判定），不合格即说明原因。
-    if (!COS_UPLOAD_CONFIG) {
+    // 权威（cosUploadEligible 判定），不合格即说明原因。P0-W6a：本地通道
+    //（local_upload）可用即视为可用（两通道任一可用即可上传）。
+    if (!((typeof LOCAL_UPLOAD_CONFIG !== "undefined" &&
+           LOCAL_UPLOAD_CONFIG) || COS_UPLOAD_CONFIG)) {
       row.markError();
       row.setStage("upload.cos.unavailable");
       row.finish(10000);
@@ -10793,22 +10981,45 @@
 
   var COS_UPLOAD_CONFIG = resolveCosConfig();
 
+  // P0-W6a：本地直传通道（window.HP_LOCAL_UPLOAD，static/upload/
+  // local-uploader.js）。唯一权威 bootstrap.capabilities.local_upload
+  //（app.py _app_capabilities）——available 与 COS 凭证无关（本地裸部署
+  // 即 true）。通道选择：local 可用优先本地（不经外网；COS 配置后两
+  // 通道并存，本地恒优先）；local 不可用时回落 COS。
+  function resolveLocalConfig() {
+    if (!window.HP_LOCAL_UPLOAD) return null;
+    try {
+      var caps = window.HP_APP_BOOTSTRAP && window.HP_APP_BOOTSTRAP.capabilities;
+      return window.HP_LOCAL_UPLOAD.resolveConfig(caps && caps.local_upload);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  var LOCAL_UPLOAD_CONFIG = resolveLocalConfig();
+
+  // 当前生效的上传通道配置（local 优先；引擎选择在 uploadFileCos 内联）。
+  function activeUploadConfig() {
+    return LOCAL_UPLOAD_CONFIG || COS_UPLOAD_CONFIG;
+  }
+
   // U3：手动选路开关退役（统一 COS，无按大小/格式分流）。
+  // P0-W6a：词表/上限判定改用当前生效通道（local 优先，两通道词表同源
+  // 自注册表——W6b 起 jpg/jpeg/bmp 直传解禁随服务端 capability 自动生效）。
   function cosUploadEligible(file) {
-    // 词表/上限全部来自服务端 capability（注册表派生 + 产品上限）——前端
-    // 不再维护第二份格式例外（zip/conversion 由服务端受理，裸 mrxs 由
-    // 服务端拒绝并提示打包）。
-    if (!COS_UPLOAD_CONFIG) return false;
+    var cfg = activeUploadConfig();
+    if (!cfg) return false;
     if (!file || typeof file.size !== "number") return false;
-    if (file.size <= 0 || file.size > COS_UPLOAD_CONFIG.max_size_bytes) return false;
+    if (file.size <= 0 || file.size > cfg.max_size_bytes) return false;
     var name = file.name || "";
     var ext = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
-    return COS_UPLOAD_CONFIG.formats.indexOf(ext) >= 0;
+    return cfg.formats.indexOf(ext) >= 0;
   }
 
   function cosIneligibleReason(file) {
+    var cfg = activeUploadConfig() || { max_size_bytes: 0 };
     if (file && typeof file.size === "number" &&
-        (file.size <= 0 || file.size > COS_UPLOAD_CONFIG.max_size_bytes)) {
+        (file.size <= 0 || file.size > cfg.max_size_bytes)) {
       return tt("upload.cos.err.too_large");
     }
     return tt("upload.cos.err.format_unsupported");
@@ -11128,7 +11339,15 @@
       dropVisPoke();        // 注销可见性触点（别留悬空监听）
       if (opts.onOutcome) opts.onOutcome(body, err);
     }
-    if (!window.HP_COS_UPLOAD || !COS_UPLOAD_CONFIG) {
+    // P0-W6a：通道解析（local 优先；两引擎 createUpload 对外合同同形）。
+    // 函数内联判定（不引外部 helper，切片测试可独立运行）：local 引擎+
+    // 配置可用走本地直传，否则回落 COS。引擎缺失/配置非法同样走「建引擎
+    // 前失败」出口（P2 问题 1）。
+    var channel = (typeof LOCAL_UPLOAD_CONFIG !== "undefined" &&
+                   LOCAL_UPLOAD_CONFIG && window.HP_LOCAL_UPLOAD)
+      ? { engine: window.HP_LOCAL_UPLOAD, config: LOCAL_UPLOAD_CONFIG }
+      : { engine: window.HP_COS_UPLOAD, config: COS_UPLOAD_CONFIG };
+    if (!channel.engine || !channel.config) {
       row.markError();
       row.setStage("upload.stage.failed");
       row.finish(10000);
@@ -11241,10 +11460,10 @@
         settleOutcome(null, { cancelled: true, __cancelled: true });
         return;
       }
-      upload = window.HP_COS_UPLOAD.createUpload({
+      upload = channel.engine.createUpload({
         source: file,
         apiFetch: apiFetch,
-        config: COS_UPLOAD_CONFIG,
+        config: channel.config,
         // 阶段 1：创建 ingestion 时携带嗅探出的直传类别声明（服务端词表校验，
         // worker 在 open_slide 前头级核验；无声明则不带字段——存量语义不变）
         createBody: opts.directClass ? { direct_class: opts.directClass } : null,
@@ -11733,7 +11952,12 @@
         ? window.HP_INLINE_CONVERT.normalizeConfig(caps) : null,
       directUploadFormats: (cos.direct_upload && cos.direct_upload.formats) || null,
       browserConvertFormats: (cos.browser_convert && cos.browser_convert.formats) || null,
-      cosConfig: resolveCosConfig(),
+      // P0-W6 后续：这个槽位是「当前生效的上传通道配置」（activeUploadConfig
+      // ——local 优先，COS 配置后并存但本地恒优先）。inline-convert 的入队/
+      // 门禁/产物闸只认「有可用通道配置」，对两通道同形消费；引擎选择在
+      // app.js 的 createEntryUpload 按 cfg 来源分派——本地裸部署（无 COS
+      // 凭证）的转换产物（KFB→BigTIFF 等）同样可传。
+      cosConfig: activeUploadConfig(),
     };
   }
 
@@ -12216,7 +12440,17 @@
     var name = entry.artifactName || entry.name;
     var declaration = window.HP_INLINE_CONVERT
       ? window.HP_INLINE_CONVERT.artifactDeclaration(entry.artifactCls) : null;
-    var cfg = resolveCosConfig();
+    // P0-W6 后续：产物上传用「当前生效的上传通道配置」（local 优先——
+    // 与 inlineCaps 注入编排器的同一来源；COS 不可用而本地通道可用时，
+    // 转换产物走本地直传引擎，见 createEntryUpload 的分派）。函数内联
+    // 三级判定（切片测试沙箱按注入逐级可见；resolveCosConfig 兜底与
+    // 旧切片用例的注入兼容）。
+    var cfg = (typeof LOCAL_UPLOAD_CONFIG !== "undefined" &&
+               LOCAL_UPLOAD_CONFIG) ||
+              (typeof COS_UPLOAD_CONFIG !== "undefined" &&
+               COS_UPLOAD_CONFIG) ||
+              (typeof resolveCosConfig === "function"
+               ? resolveCosConfig() : null);
     if (!cfg) return Promise.reject({ data: { code: "cos_unavailable" } });
     // 复核 #4：建引擎之前等身份落定——createEntryUpload 的 storage.save
     // （upload.account）、引擎 opts.account、getJob 后的归属复核 `me` 都以
@@ -12347,7 +12581,13 @@
     }
     if (acct === null) acct = String(currentUserId || "");
     return new Promise(function (resolve, reject) {
-      var upload = window.HP_COS_UPLOAD.createUpload({
+      // P0-W6 后续：引擎随 cfg 来源分派——inlineCaps 在 COS 不可用而本地
+      // 通道可用时注入 LOCAL_UPLOAD_CONFIG，此时产物上传走本地直传引擎
+      //（两引擎 createUpload 对外合同同形；typeof 保护切片测试沙箱）。
+      var localEng = (typeof LOCAL_UPLOAD_CONFIG !== "undefined" &&
+                      cfg === LOCAL_UPLOAD_CONFIG && window.HP_LOCAL_UPLOAD)
+        ? window.HP_LOCAL_UPLOAD : null;
+      var upload = (localEng || window.HP_COS_UPLOAD).createUpload({
         source: {
           name: name, size: artifact.size,
           slice: function (s, e) { return artifact.slice(s, e); },
@@ -14940,15 +15180,50 @@
     if (els.acctSettingsAdmin) {
       els.acctSettingsAdmin.hidden = !!previewState || actorRole !== "owner";
     }
-    // P1-W0c：owner 专属「AI 供应商」区块（llm-provider-panel.js 渲染/拉取）
+    // P1-W0c v2：「AI 供应商」三栏面板——owner 管理 / user 只读（服务端 403 兜底）；
+    // hostBridge 桥接宿主既有入口（安全设置 / 数据共享），页签跨区跳转
     if (els.acctSettingsLlm) {
-      var llmOwner = !previewState && actorRole === "owner" &&
+      var llmReady = !previewState && (actorRole === "owner" || actorRole === "user") &&
         window.HP_LLM_PROVIDERS && els.llmProvidersPanel;
-      els.acctSettingsLlm.hidden = !llmOwner;
-      if (llmOwner) {
-        HP_LLM_PROVIDERS.mount({
-          container: els.llmProvidersPanel, apiFetch: apiFetch });
-        HP_LLM_PROVIDERS.refresh();
+      els.acctSettingsLlm.hidden = !llmReady;
+      if (llmReady) {
+        var llmHost = {
+          container: els.llmProvidersPanel,
+          apiFetch: apiFetch,
+          role: actorRole,
+          hostBridge: {
+            openSecurity: function () {
+              acctSettingsClose();
+              if (els.acctSettingsChangePw) els.acctSettingsChangePw.click();
+            },
+            openDatashare: function () {
+              acctSettingsClose();
+              if (els.acctSettingsDatashare) els.acctSettingsDatashare.click();
+            },
+          },
+        };
+        if (actorRole === "owner") {
+          HP_LLM_PROVIDERS.mount(llmHost);
+        } else {
+          HP_LLM_PROVIDERS.mountUser(llmHost);
+        }
+      }
+    }
+    // P1-W1：owner「标注类别」管理面板（label-class-panel.js 依赖注入；
+    // 变更成功回调刷新工作台标注下拉/图例——HP_AnnoClasses 自带保留选择语义）
+    if (els.acctSettingsLabelClasses && els.labelClassesPanel) {
+      var lcReady = !previewState && actorRole === "owner" &&
+        window.HP_LabelClasses;
+      els.acctSettingsLabelClasses.hidden = !lcReady;
+      if (lcReady && !els.labelClassesPanel.dataset.lcMounted) {
+        els.labelClassesPanel.dataset.lcMounted = "1";
+        HP_LabelClasses.mount({
+          container: els.labelClassesPanel,
+          apiFetch: apiFetch,
+          onChanged: function () {
+            if (window.HP_AnnoClasses) HP_AnnoClasses.refresh();
+          },
+        });
       }
     }
     els.acctSettingsMask.style.display = "";
@@ -15067,6 +15342,17 @@
         }
       },
     });
+    // P1-W1：标注类别下拉 + 颜色图例（anno-classes.js 依赖注入；无类别
+    // 配置时优雅降级「无类别」，绘制照常。选择变化仅更新待写状态）
+    if (window.HP_AnnoClasses && els.annoClassSelect) {
+      HP_AnnoClasses.mount({
+        select: els.annoClassSelect,
+        legend: els.annoClassLegend,
+        apiFetch: apiFetch,
+        toast: toast,
+        onChange: function () {},
+      });
+    }
     if (els.acctSettingsBtn) {
       els.acctSettingsBtn.addEventListener("click", acctSettingsOpen);
     }
@@ -15178,6 +15464,9 @@
       };
     }
     return (tbFoldSteps = [
+      // P1-W0d：AI 识图/切换入口最低频（可从 ⋯ 菜单重进），溢出时最先让位
+      foldStep("llm-vision-caret"),
+      foldStep("llm-vision-btn"),
       foldStep("rgb-badge"),
       foldStep("mpp-setter"),
       foldStep("zoom-native"),
@@ -15309,10 +15598,41 @@
       if (annoPanelOpen) { closeAnnoPanel(); } else { openAnnoPanel(); }
     });
     els.annoPanelClose.addEventListener("click", closeAnnoPanel);
+    // P1-W1+：面板伸缩（左缘拖宽 280-560px，localStorage 记忆）+ 折叠钮
+    initAnnoPanelResize();
+    initAnnoPanelCollapse();
     els.annoAllBtn.addEventListener("click", toggleAnnoAll);
     // 面板头部「显示全部标记」切换钮（与 toggleAnnoAll 同一逻辑）
     if (els.annoAllToggle) els.annoAllToggle.addEventListener("click", toggleAnnoAll);
-    if (els.annoExportBtn) els.annoExportBtn.addEventListener("click", exportAnnotations);
+    if (els.annoExportBtn) {
+      // P1-W1+：导出双格式——点开小菜单（GeoJSON=QuPath / XML=ImageScope），
+      // 点其他区域关闭；无菜单 DOM（旧模板）时回落直出 GeoJSON
+      els.annoExportBtn.addEventListener("click", function (ev) {
+        var menu = els.annoExportMenu;
+        if (!menu) { exportAnnotations("geojson"); return; }
+        ev.stopPropagation();
+        menu.hidden = !menu.hidden;
+      });
+      document.addEventListener("click", function (ev) {
+        if (els.annoExportMenu && !els.annoExportMenu.hidden &&
+            !ev.target.closest(".anno-export-menu") &&
+            ev.target !== els.annoExportBtn) {
+          els.annoExportMenu.hidden = true;
+        }
+      });
+    }
+    if (els.annoExportGeojson) {
+      els.annoExportGeojson.addEventListener("click", function () {
+        if (els.annoExportMenu) els.annoExportMenu.hidden = true;
+        exportAnnotations("geojson");
+      });
+    }
+    if (els.annoExportXml) {
+      els.annoExportXml.addEventListener("click", function () {
+        if (els.annoExportMenu) els.annoExportMenu.hidden = true;
+        exportAnnotations("xml");
+      });
+    }
     syncAnnoExportBtn();
     els.annoArrowBtn.addEventListener("click", function () { toggleDrawMode("arrow"); });
     els.annoFreeBtn.addEventListener("click", function () { toggleDrawMode("freehand"); });
@@ -15617,11 +15937,13 @@
     // 账户设置对话框（docs/owner-parity-plan-20261106.md §D；所有登录用户）
     initAcctSettings();
 
-    // P1-W0d：查看器「AI 识图」按钮（llm-vision-ui.js；取图优先选中选框，
-    // 否则当前视野——level0ViewportBbox 单一实现复用）
+    // P1-W0d：查看器「AI 识图」按钮 + 供应商切换窗口（llm-vision-ui.js；
+    // 取图优先选中选框，否则当前视野——level0ViewportBbox 单一实现复用）
     if (window.HP_LLM_VISION && els.llmVisionBtn) {
       HP_LLM_VISION.mount({
         btn: els.llmVisionBtn,
+        caret: els.llmVisionCaret,
+        moreItem: $("tbb-more-llm-vision"),
         container: viewer && viewer.container,
         apiFetch: apiFetch,
         getSlide: function () { return state.slide; },

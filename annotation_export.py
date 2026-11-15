@@ -209,6 +209,78 @@ def _provenance(raw):
     return prov if isinstance(prov, dict) else {}
 
 
+# --------------------------------------------------------------------------- #
+# classification（P1-W1 标注类别体系；docs/annotation-classes-w1-decisions.md D5）
+# --------------------------------------------------------------------------- #
+#: 当前类别色查询钩子：name → [r,g,b] | None。生产由 label_class_store 注入
+#: （app 启动接线；模块不 import store，保持纯函数可测）；测试 monkeypatch。
+#: 查询实现要求「启用或停用的存续类别都给色、软删/未知返回 None」（降级
+#: 链第 1 优先级语义）。
+_class_color_lookup = None
+
+
+def set_class_color_lookup(lookup):
+    """app/测试接线：注入 ``def lookup(name: str) -> list | None``。"""
+    global _class_color_lookup
+    _class_color_lookup = lookup
+
+
+def _stored_classification(raw):
+    """raw 的 classification 存储值：dict 且 name 非空返回该 dict，否则 None。"""
+    if not isinstance(raw, dict):
+        return None
+    cls = raw.get("classification")
+    if isinstance(cls, dict) and isinstance(cls.get("name"), str) \
+            and cls["name"].strip():
+        return cls
+    return None
+
+
+def _snapshot_color(cls):
+    """classification.color 展示快照：整型三元组（0-255）才可用，否则 None。"""
+    if not isinstance(cls, dict):
+        return None
+    color = cls.get("color")
+    if not isinstance(color, (list, tuple)) or len(color) != 3:
+        return None
+    out = []
+    for v in color:
+        if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                or int(v) != v or not (0 <= v <= 255):
+            return None
+        out.append(int(v))
+    return out
+
+
+def classification_of(item, raw=None):
+    """导出 classification 推导（D5 降级链，恒返回 {"name","color"}）：
+
+      1. 标注存有 classification 且类别表可查 → {name, 当前类别色}；
+      2. 类别表查无（软删/未注入/查色失败）→ {name, 快照色}；快照色非法
+         再退化 label 哈希色（同 name）；
+      3. 无 classification（旧行/未选类别）→ {name: label（":"→"："）,
+         color: label 哈希色}——与 20261028 导出行为逐字节兼容。
+    """
+    label = _label_of(item, raw)
+    lrgb = label_rgb(label)
+    cls = _stored_classification(raw)
+    if cls is None:
+        return {"name": label.replace(":", "：") if label else "",
+                "color": list(lrgb)}
+    name = cls["name"]
+    color = None
+    if _class_color_lookup is not None:
+        try:
+            color = _class_color_lookup(name)
+        except Exception:  # noqa: BLE001 - 查色失败降级快照，不阻断导出
+            color = None
+    if not (isinstance(color, (list, tuple)) and len(color) == 3):
+        color = _snapshot_color(cls)
+    if color is None:
+        color = list(lrgb)
+    return {"name": name, "color": list(color)}
+
+
 def _ai_skill(prov):
     skill = prov.get("skill")
     if isinstance(skill, str):
@@ -303,7 +375,13 @@ def build_feature(item, raw=None):
         "objectType": "annotation",
         "name": label,
     }
-    if label:
+    # P1-W1：有类别的标注按 D5 降级链取 classification（QuPath 按
+    # classification.name 分组并以 color 着色）；无类别保持旧行为
+    # （label 派生类 + 哈希色，20261028 导出逐字节兼容）。
+    stored_cls = _stored_classification(raw)
+    if stored_cls is not None:
+        props["classification"] = classification_of(item, raw)
+    elif label:
         # QuPath 用 ASCII ":" 构造派生类；改用全角冒号保留原标签语义
         props["classification"] = {
             "name": label.replace(":", "："),
@@ -350,6 +428,9 @@ def build_feature(item, raw=None):
         props["updated_at"] = updated_at
     props["author_kind"] = author_kind
     props["author_label"] = author_label
+    # P1-W1：类别名扁平字段（有存储值才出；pandas/GIS 用户免展开 metadata）
+    if stored_cls is not None:
+        props["classification_name"] = stored_cls["name"]
     if ai_generated:
         props["ai"] = {
             "skill": skill,

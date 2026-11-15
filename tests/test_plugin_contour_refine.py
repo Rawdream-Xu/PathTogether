@@ -330,7 +330,11 @@ def test_info_asset_revision_roundtrips_to_read_endpoints(monkeypatch, endpoint,
     token = _token_for(inst)
     desc = app_mod._resolve_legacy_read(slide)
     prefix = "/api/plugin/v1/slides/by-id/" + desc.slide_id
-    monkeypatch.setattr(app_mod, "_read_metadata", lambda *_: {"mpp_x": 0.5})
+    # P0-W6c：_read_metadata 增加 slide_id kwarg（手补 mpp 覆盖层查
+    # slide_mpp_overrides），info 通道以 slide_id=<sld_*> 调用（app.py
+    # _ai_slide_info_payload）；桩签名跟随产品函数 **kwargs。
+    monkeypatch.setattr(app_mod, "_read_metadata",
+                        lambda *_, **__: {"mpp_x": 0.5})
     m1, m2 = _slide_read_mocks(_FakeOsr())
     with m1, m2:
         info = _client().get(prefix, headers=_bearer(token))

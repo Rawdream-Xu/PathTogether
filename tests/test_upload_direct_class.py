@@ -79,15 +79,19 @@ def _classic_tiff(entries=None, description=b""):
     return header + ifd + heap
 
 
-def _ome_tiff_bytes():
-    """真实 OME-TIFF（tifffile 写 OME-XML 描述；is_ome 判定依据）。"""
+def _ome_tiff_bytes(xml_declaration=True):
+    """真实 OME-TIFF（tifffile 写 OME-XML 描述；is_ome 判定依据）。
+
+    xml_declaration=False：省略声明直接以 ``<OME`` 根元素开头（OME 规范
+    合法形态；2026-11-14 morphology_2d 产物实测曾被误判 tiff-other）。"""
     import numpy
     import tifffile
 
     buf = io.BytesIO()
+    decl = '<?xml version="1.0" encoding="UTF-8"?>' if xml_declaration else ""
     ome_xml = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06">'
+        decl
+        + '<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06">'
         '<Image ID="Image:0"><Pixels DimensionOrder="XYCZT" '
         'Type="uint8" SizeX="4" SizeY="4" SizeZ="1" SizeC="1" SizeT="1">'
         "</Pixels></Image></OME>")
@@ -151,6 +155,27 @@ def _write(tmp_path, name, data):
 def test_sniff_ome_tiff(tmp_path):
     p = _write(tmp_path, "a.ome.tif", _ome_tiff_bytes())
     assert udc.sniff_tiff_class(str(p)) == udc.ACTUAL_OME
+
+
+def test_sniff_ome_tiff_without_xml_declaration(tmp_path):
+    """OME 规范允许省略 XML 声明（2026-11-14 morphology_2d 产物实测：
+    description 直接以 ``<OME xmlns=...`` 开头）——必须仍识别为 ome-tiff，
+    不得误判 tiff-other 被拒收。"""
+    p = _write(tmp_path, "nodecl.ome.tif",
+               _ome_tiff_bytes(xml_declaration=False))
+    assert udc.sniff_tiff_class(str(p)) == udc.ACTUAL_OME
+
+
+def test_sniff_non_ome_xml_description_not_ome(tmp_path):
+    """非 OME 的 XML 描述（如其他元数据 XML）不误判为 ome-tiff。"""
+    other_xml = ('<?xml version="1.0"?><ImageMetadata>'
+                 '<Source>some pipeline</Source></ImageMetadata>')
+    p = _write(tmp_path, "meta.tif", _classic_tiff(description=other_xml))
+    assert udc.sniff_tiff_class(str(p)) == udc.ACTUAL_TIFF_OTHER
+    # 无声明 + 非 OME 根元素同理
+    p2 = _write(tmp_path, "meta2.tif",
+                _classic_tiff(description=other_xml[47:]))
+    assert udc.sniff_tiff_class(str(p2)) == udc.ACTUAL_TIFF_OTHER
 
 
 @pytest.mark.parametrize("source_format", [
@@ -835,3 +860,106 @@ def test_worker_zip_plain_tiff_items_still_publish(monkeypatch, tmp_path):
                                kind="zip")
     assert ciw.process_validating(cos=fake, state=st) == job["job_id"]
     assert ist.get_job(job["job_id"])["state"] == ist.READY
+
+
+# --------------------------------------------------------------------------- #
+# 多文件 OME 组合的孤通道归一化（2026-11-15 morphology_2d 链）
+# --------------------------------------------------------------------------- #
+def _lone_channel_ome_bytes(own_name="ch0003_a.ome.tif",
+                            other=("ch0000_b.ome.tif", "ch0001_c.ome.tif",
+                                   "ch0002_d.ome.tif")):
+    """单 plane BigTIFF + 完整组合 OME-XML（TiffData 引用 3 外部 + 自身）。"""
+    import io
+
+    import numpy
+    import tifffile
+    refs = "".join(
+        '<TiffData FirstC="%d" PlaneCount="1">'
+        '<UUID FileName="%s">urn:uuid:u%d</UUID></TiffData>'
+        % (i, name, i) for i, name in
+        enumerate([other[0], other[1], other[2], own_name]))
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06">'
+        '<Image ID="Image:0"><Pixels ID="Pixels:0" DimensionOrder="XYCZT" '
+        'Type="uint16" SizeX="48" SizeY="32" SizeZ="1" SizeC="4" SizeT="1" '
+        'PhysicalSizeX="0.21249222" '
+        'PhysicalSizeY="0.21249222">'
+        '<Channel ID="Channel:0" SamplesPerPixel="1" Name="DAPI">'
+        "<LightPath/></Channel>"
+        '<Channel ID="Channel:1" SamplesPerPixel="1" Name="E-Cad">'
+        "<LightPath/></Channel>"
+        '<Channel ID="Channel:2" SamplesPerPixel="1" Name="18S">'
+        "<LightPath/></Channel>"
+        '<Channel ID="Channel:3" SamplesPerPixel="1" Name="aSMA">'
+        "<LightPath/></Channel>"
+        + refs +
+        "</Pixels></Image></OME>")
+    buf = io.BytesIO()
+    tifffile.imwrite(buf, numpy.full((32, 48), 77, numpy.uint16),
+                     photometric="minisblack", description=xml,
+                     metadata=None, bigtiff=True)
+    return buf.getvalue()
+
+
+def test_normalize_lone_ome_channel_rewrites_broken_composition(tmp_path):
+    """孤通道（兄弟全缺）：等长改写为单通道自足 OME，渲染可见。"""
+    import numpy as np
+
+    p = _write(tmp_path, "data.tif", _lone_channel_ome_bytes())
+    assert udc.normalize_lone_ome_channel(
+        str(p), original_filename="ch0003_a.ome.tif") is True
+    desc = udc.ifd0_description(str(p))
+    assert "TiffData" not in desc and 'SizeC="1"' in desc
+    assert "aSMA" in desc  # 自身通道名（FirstC=3 → Channel:3）
+    # 渲染路径端到端：非零像素（零填充回归钉）
+    import slide_io
+    s = slide_io.TiffFileSlide(str(p))
+    try:
+        assert s.channel_count == 1
+        arr = np.asarray(s.read_region((0, 0), 0, (48, 32)))
+        assert arr[..., :3].max() > 0
+    finally:
+        s.close()
+
+
+def test_normalize_lone_ome_channel_skips_intact_composition(tmp_path):
+    """兄弟文件在侧（组合完整）：保留原样不改写。"""
+    p = _write(tmp_path, "data.tif", _lone_channel_ome_bytes())
+    # 兄弟之一落盘 → 引用可解析 → 组合完整
+    _write(tmp_path, "ch0000_b.ome.tif", _classic_tiff())
+    assert udc.normalize_lone_ome_channel(
+        str(p), original_filename="ch0003_a.ome.tif") is False
+    assert "TiffData" in udc.ifd0_description(str(p))  # 原样
+
+
+def test_normalize_lone_ome_channel_idempotent_and_passthrough(tmp_path):
+    """幂等（改写后无 TiffData → False）；非 OME TIFF 直通 False。"""
+    p = _write(tmp_path, "data.tif", _lone_channel_ome_bytes())
+    assert udc.normalize_lone_ome_channel(str(p)) is True  # 不带原名也改写
+    assert udc.normalize_lone_ome_channel(str(p)) is False  # 幂等
+    q = _write(tmp_path, "plain.tif", _classic_tiff())
+    assert udc.normalize_lone_ome_channel(str(q)) is False
+
+
+def test_normalize_lone_ome_channel_bakes_filename_color(tmp_path):
+    """文件名含颜色/染料关键词 → 烘进 Channel@Color（用户需求 #2）。"""
+    p = _write(tmp_path, "data.tif",
+               _lone_channel_ome_bytes(own_name="ch0003_red.ome.tif"))
+    assert udc.normalize_lone_ome_channel(
+        str(p), original_filename="ch0003_red.ome.tif") is True
+    desc = udc.ifd0_description(str(p))
+    assert 'Color="#FF0000"' in desc  # red → 红（关键词优先于名散列）
+    assert "TiffData" not in desc
+
+
+def test_normalize_lone_ome_channel_bakes_stable_hash_color(tmp_path):
+    """无颜色词：按通道名稳定散列烘 Color（孤通道切片互不撞色，需求 #1）。"""
+    import slide_render
+
+    p = _write(tmp_path, "data.tif", _lone_channel_ome_bytes())
+    assert udc.normalize_lone_ome_channel(
+        str(p), original_filename="ch0003_a.ome.tif") is True
+    desc = udc.ifd0_description(str(p))
+    expected = slide_render.stable_channel_color("aSMA")  # 自身 Channel Name
+    assert ('Color="%s"' % expected) in desc
